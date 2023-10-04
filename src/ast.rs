@@ -1,7 +1,7 @@
 // Don't bother with `Box`-ing everything for now. Allow huge enum values.
 #![allow(clippy::large_enum_variant)]
 
-use std::{ops::Range, fmt};
+use std::{fmt, ops::Range};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
 /// [`phf`](https://github.com/rust-phf/rust-phf), which generates "perfect hash
@@ -15,10 +15,45 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 /// to construct from within our parser.
 type Span = Range<usize>;
 
+/// The target language we're transpiling to.
+#[derive(Clone, Copy, Debug)]
+pub enum Target {
+    BigQuery,
+    SQLite3,
+}
+
+impl Target {
+    /// Format this node for the given target.
+    fn f<T: Node>(self, node: &T) -> FormatForTarget<'_, T> {
+        FormatForTarget { target: self, node }
+    }
+}
+
+/// Wrapper for formatting a node for a given target.
+struct FormatForTarget<'a, T: Node> {
+    target: Target,
+    node: &'a T,
+}
+
+impl<'a, T: Node> fmt::Display for FormatForTarget<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.node.fmt_for_target(self.target, f)
+    }
+}
+
 /// A node in our abstract syntax tree.
-pub trait Node: fmt::Debug + fmt::Display {
-     /// The source span corresponding to this node.
-     fn span(&self) -> Span;
+pub trait Node: fmt::Debug + Sized {
+    // The source span corresponding to this node.
+    // fn span(&self) -> Span;
+
+    /// Format this node as its SQLite3 equivalent. This would need to be replaced
+    /// with something a bit more compiler-like to support full transpilation.
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+
+    /// Convert this node to a string for the given target.
+    fn to_string_for_target(&self, t: Target) -> String {
+        format!("{}", t.f(self))
+    }
 }
 
 /// Because we're implementing a transpiler, we want to be able to keep track of
@@ -35,15 +70,29 @@ pub struct Whitespace {
     pub text: String,
 }
 
-impl fmt::Display for Whitespace {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.text)
-    }    
-}
-
 impl Node for Whitespace {
-    fn span(&self) -> Span {
-        self.span.clone()
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => write!(f, "{}", self.text),
+            Target::SQLite3 => {
+                // We need to fix `#` comments, which are not supported by SQLite3.
+                let mut in_hash_comment = false;
+                for c in self.text.chars() {
+                    if in_hash_comment {
+                        write!(f, "{}", c)?;
+                        if c == '\n' {
+                            in_hash_comment = false;
+                        }
+                    } else if c == '#' {
+                        write!(f, "--")?;
+                        in_hash_comment = true;
+                    } else {
+                        write!(f, "{}", c)?;
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 }
 
@@ -56,12 +105,17 @@ pub struct NodeVec<T: fmt::Debug> {
     pub trailing_ws: Vec<Whitespace>,
 }
 
-impl<T: fmt::Debug + fmt::Display> NodeVec<T> {
-    pub fn display_with_sep(&self, f: &mut fmt::Formatter<'_>, sep: &str) -> fmt::Result {
+impl<T: Node> NodeVec<T> {
+    pub fn display_with_sep(
+        &self,
+        t: Target,
+        f: &mut fmt::Formatter<'_>,
+        sep: &str,
+    ) -> fmt::Result {
         for (i, node) in self.nodes.iter().enumerate() {
-            write!(f, "{}", node)?;
+            write!(f, "{}", t.f(node))?;
             if i < self.trailing_ws.len() {
-                write!(f, "{}", self.trailing_ws[i])?;
+                write!(f, "{}", t.f(&self.trailing_ws[i]))?;
                 write!(f, "{}", sep)?;
             }
         }
@@ -99,29 +153,44 @@ impl Identifier {
     }
 }
 
-impl fmt::Display for Identifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Node for Identifier {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.needs_quotes() {
-            write!(f, "{}`", self.ws)?;
-            for c in self.text.chars() {
-                match c {
-                    '\\' => write!(f, "\\\\")?,
-                    '"' => write!(f, "\\\"")?,
-                    '\'' => write!(f, "\\\'")?,
-                    '`' => write!(f, "\\`")?,
-                    '\n' => write!(f, "\\n")?,
-                    '\r' => write!(f, "\\r")?,
-                    _ if c.is_ascii_graphic() || c == ' ' => write!(f, "{}", c)?,
-                    _ if c as u32 <= 0xFF => write!(f, "\\x{:02x}", c as u32)?,
-                    _ if c as u32 <= 0xFFFF => write!(f, "\\u{:04x}", c as u32)?,
-                    _ => write!(f, "\\U{:08x}", c as u32)?,
+            match t {
+                Target::BigQuery => {
+                    write!(f, "{}`", t.f(&self.ws))?;
+                    escape_for_bigquery(&self.text, f)?;
+                    write!(f, "`")
+                }
+                Target::SQLite3 => {
+                    write!(f, "{}\"", t.f(&self.ws))?;
+                    // TODO: Find the docs to implement this for SQLite3.
+                    escape_for_bigquery(&self.text, f)?;
+                    write!(f, "\"")
                 }
             }
-            write!(f, "`")
         } else {
-            write!(f, "{}{}", self.ws, self.text)
+            write!(f, "{}{}", t.f(&self.ws), self.text)
         }
-    }    
+    }
+}
+
+fn escape_for_bigquery(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    for c in s.chars() {
+        match c {
+            '\\' => write!(f, "\\\\")?,
+            '"' => write!(f, "\\\"")?,
+            '\'' => write!(f, "\\\'")?,
+            '`' => write!(f, "\\`")?,
+            '\n' => write!(f, "\\n")?,
+            '\r' => write!(f, "\\r")?,
+            _ if c.is_ascii_graphic() || c == ' ' => write!(f, "{}", c)?,
+            _ if c as u32 <= 0xFF => write!(f, "\\x{:02x}", c as u32)?,
+            _ if c as u32 <= 0xFFFF => write!(f, "\\u{:04x}", c as u32)?,
+            _ => write!(f, "\\U{:08x}", c as u32)?,
+        }
+    }
+    Ok(())
 }
 
 /// A table name.
@@ -144,18 +213,32 @@ pub enum TableName {
     },
 }
 
-impl fmt::Display for TableName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Node for TableName {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TableName::ProjectDatasetTable { project, ws, dataset, ws2, table } => {
-                write!(f, "{}{}.{}{}.{}", project, ws, dataset, ws2, table)
+            TableName::ProjectDatasetTable {
+                project,
+                ws,
+                dataset,
+                ws2,
+                table,
+            } => {
+                write!(
+                    f,
+                    "{}{}.{}{}.{}",
+                    t.f(project),
+                    t.f(ws),
+                    t.f(dataset),
+                    t.f(ws2),
+                    t.f(table)
+                )
             }
             TableName::DatasetTable { dataset, ws, table } => {
-                write!(f, "{}{}.{}", dataset, ws, table)
+                write!(f, "{}{}.{}", t.f(dataset), t.f(ws), t.f(table))
             }
-            TableName::Table { table } => write!(f, "{}", table),
+            TableName::Table { table } => write!(f, "{}", t.f(table)),
         }
-    }    
+    }
 }
 
 /// A table and a column name.
@@ -166,10 +249,16 @@ pub struct TableAndColumnName {
     pub column_name: Identifier,
 }
 
-impl fmt::Display for TableAndColumnName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}.{}", self.table_name, self.ws, self.column_name)
-    }    
+impl Node for TableAndColumnName {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}.{}",
+            t.f(&self.table_name),
+            t.f(&self.ws),
+            t.f(&self.column_name)
+        )
+    }
 }
 
 /// An entire SQL program.
@@ -182,10 +271,10 @@ pub struct SqlProgram {
     pub trailing_ws: Whitespace,
 }
 
-impl fmt::Display for SqlProgram {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.statement, self.trailing_ws)
-    }    
+impl Node for SqlProgram {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.statement), t.f(&self.trailing_ws))
+    }
 }
 
 /// A statement in our abstract syntax tree.
@@ -194,12 +283,12 @@ pub enum Statement {
     Select(SelectStatement),
 }
 
-impl fmt::Display for Statement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Node for Statement {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Statement::Select(s) => write!(f, "{}", s),
+            Statement::Select(s) => write!(f, "{}", t.f(s)),
         }
-    }    
+    }
 }
 
 /// A `SELECT` statement.
@@ -215,10 +304,16 @@ pub struct SelectStatement {
     // pub limit: Option<Limit>,
 }
 
-impl fmt::Display for SelectStatement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}{}", self.select, self.select_list, self.from_clause)
-    }    
+impl Node for SelectStatement {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            t.f(&self.select),
+            t.f(&self.select_list),
+            t.f(&self.from_clause)
+        )
+    }
 }
 
 /// The head of a `SELECT`, including any modifiers.
@@ -229,14 +324,14 @@ pub struct Select {
     pub distinct: Option<Distinct>,
 }
 
-impl fmt::Display for Select {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}SELECT", self.ws)?;
+impl Node for Select {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}SELECT", t.f(&self.ws))?;
         if let Some(distinct) = &self.distinct {
-            write!(f, "{}", distinct)?;
+            write!(f, "{}", t.f(distinct))?;
         }
         Ok(())
-    }    
+    }
 }
 
 /// The `DISTINCT` modifier.
@@ -246,22 +341,22 @@ pub struct Distinct {
     pub span: Span,
 }
 
-impl fmt::Display for Distinct {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}DISTINCT", self.ws)
-    }    
+impl Node for Distinct {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}DISTINCT", t.f(&self.ws))
+    }
 }
 
 /// The list of columns in a `SELECT` statement.
-/// 
+///
 /// # Official grammar
-/// 
+///
 /// We'll implement this as needed.
-/// 
+///
 /// ```text
 /// select_list:
 ///   { select_all | select_expression } [, ...]
-/// 
+///
 ///   select_all:
 ///     [ expression. ]*
 ///     [ EXCEPT ( column_name [, ...] ) ]
@@ -275,10 +370,10 @@ pub struct SelectList {
     pub items: NodeVec<SelectListItem>,
 }
 
-impl fmt::Display for SelectList {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.items.display_with_sep(f, ",")
-    }    
+impl Node for SelectList {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.items.display_with_sep(t, f, ",")
+    }
 }
 
 /// A single item in a `SELECT` list.
@@ -291,10 +386,7 @@ pub enum SelectListItem {
         alias: Option<Alias>,
     },
     /// A `*` wildcard.
-    Wildcard {
-        span: Span,
-        ws: Whitespace,
-    },
+    Wildcard { span: Span, ws: Whitespace },
     /// A `table.*` wildcard.
     TableNameWildcard {
         span: Span,
@@ -304,22 +396,29 @@ pub enum SelectListItem {
     },
 }
 
-impl fmt::Display for SelectListItem {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Node for SelectListItem {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SelectListItem::Expression { expression, alias, .. } => {
-                write!(f, "{}", expression)?;
+            SelectListItem::Expression {
+                expression, alias, ..
+            } => {
+                write!(f, "{}", t.f(expression))?;
                 if let Some(alias) = alias {
-                    write!(f, "{}", alias)?;
+                    write!(f, "{}", t.f(alias))?;
                 }
-                Ok(()) 
+                Ok(())
             }
-            SelectListItem::Wildcard { ws, .. } => write!(f, "{}*", ws),
-            SelectListItem::TableNameWildcard { table_name, dot_ws, star_ws, .. } => {
-                write!(f, "{}{}.{}*", table_name, dot_ws, star_ws)
-            }   
+            SelectListItem::Wildcard { ws, .. } => write!(f, "{}*", &t.f(ws)),
+            SelectListItem::TableNameWildcard {
+                table_name,
+                dot_ws,
+                star_ws,
+                ..
+            } => {
+                write!(f, "{}{}.{}*", t.f(table_name), t.f(dot_ws), t.f(star_ws))
+            }
         }
-    }    
+    }
 }
 
 /// An SQL expression.
@@ -329,12 +428,12 @@ pub enum Expression {
     TableAndColumnName(TableAndColumnName),
 }
 
-impl fmt::Display for Expression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Node for Expression {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expression::ColumnName(ident) => write!(f, "{}", ident),
+            Expression::ColumnName(ident) => write!(f, "{}", t.f(ident)),
             Expression::TableAndColumnName(table_and_column_name) => {
-                write!(f, "{}", table_and_column_name)
+                write!(f, "{}", t.f(table_and_column_name))
             }
         }
     }
@@ -348,14 +447,14 @@ pub struct Alias {
     pub ident: Identifier,
 }
 
-impl fmt::Display for Alias {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}AS{}", self.ws, self.ident)
-    }    
+impl Node for Alias {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}AS{}", t.f(&self.ws), t.f(&self.ident))
+    }
 }
 
 /// The `FROM` clause.
-/// 
+///
 /// TODO: We're keeping this simple for now.
 #[derive(Debug)]
 pub struct FromClause {
@@ -365,14 +464,14 @@ pub struct FromClause {
     pub alias: Option<Alias>,
 }
 
-impl fmt::Display for FromClause {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}FROM{}", self.ws, self.table_name)?;
+impl Node for FromClause {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}FROM{}", t.f(&self.ws), t.f(&self.table_name))?;
         if let Some(alias) = &self.alias {
-            write!(f, "{}", alias)?;
+            write!(f, "{}", t.f(alias))?;
         }
         Ok(())
-    }    
+    }
 }
 
 // We use `rust-peg` to parse BigQuery SQL. `rustpeg` uses a [Parsing Expression
@@ -422,7 +521,7 @@ peg::parser! {
                     from_clause,
                 }
             }
-    
+
         rule select() -> Select
             = s:position!()
               ws:_
@@ -560,7 +659,7 @@ peg::parser! {
         /// A table or column name with internal dots. This requires special
         /// handling with a PEG parser, because PEG parsers are greedy
         /// and backtracking to try alternatives can sometimes be strange.
-        rule dotted_name() -> NodeVec<Identifier> = sep(<ident()>, <".">) 
+        rule dotted_name() -> NodeVec<Identifier> = sep(<ident()>, <".">)
 
         /// An identifier, such as a column name.
         rule ident() -> Identifier
@@ -647,7 +746,7 @@ peg::parser! {
         // show up as an "expected" token in error messages, so we carefully
         // enclose _most_ of this in `quiet!`. The exception is the closing "*/"
         // in a block comment, which we want to mention explicitly.
-        
+
         /// Optional whitespace.
         rule _ -> Whitespace
             = w:__ { w }
@@ -682,15 +781,29 @@ mod tests {
     fn test_parser() {
         let sql_examples = &[
             // Basic test cases of gradually increasing complexity.
-            (r#"SELECT DISTINCT * FROM t1"#, r#"SELECT DISTINCT * FROM t1"#),
+            (
+                r#"SELECT DISTINCT * FROM t1"#,
+                r#"SELECT DISTINCT * FROM t1"#,
+            ),
             (r#"SELECT * FROM `t1`"#, r#"SELECT * FROM t1"#),
             (r#"select * from t1"#, r#"SELECT * FROM t1"#),
-            (r#"select /* hi */ * from `t1`"#, r#"SELECT /* hi */ * FROM t1"#),
+            (
+                r#"select /* hi */ * from `t1`"#,
+                r#"SELECT /* hi */ * FROM t1"#,
+            ),
             (r#"SELECT a,b FROM t"#, r#"SELECT a,b FROM t"#),
-            (r#"select a, b /* hi */, from t"#, r#"SELECT a, b /* hi */, FROM t"#),
-            (r#"select p.*, p.a AS b from t as p"#, r#"SELECT p.*, p.a AS b FROM t AS p"#),
-            (r#"select * from `p-123`.`d`.`t`"#, r#"SELECT * FROM `p-123`.d.t"#),
-
+            (
+                r#"select a, b /* hi */, from t"#,
+                r#"SELECT a, b /* hi */, FROM t"#,
+            ),
+            (
+                r#"select p.*, p.a AS b from t as p"#,
+                r#"SELECT p.*, p.a AS b FROM t AS p"#,
+            ),
+            (
+                r#"select * from `p-123`.`d`.`t`"#,
+                r#"SELECT * FROM `p-123`.d.t"#,
+            ),
             // We're working up to being able to parse this.
             //
             // r#"
@@ -699,13 +812,13 @@ mod tests {
             //         s1.*,
             //         CAST(`s1`.`random_id` AS STRING) AS key,
             //         proxy.first_name,
-            //         proxy.last_name,                
+            //         proxy.last_name,
             //         -- this is a comment
             //         CAST(NULL AS BOOL) AS id_placeholder,
             //         CAST(NULL AS ARRAY<INT64>) as more_ids
             //     FROM `project-123`.`sources`.`s1` AS s1
             //     INNER JOIN
-            //         (   
+            //         (
             //             SELECT DISTINCT first_name, last_name, `join_id`
             //             FROM `project-123`.`proxies`.`t1`
             //         ) AS proxy
@@ -716,7 +829,8 @@ mod tests {
         for (sql, normalized) in sql_examples {
             println!("parsing: {}", sql);
             let parsed = sql_program::sql_program(sql).unwrap();
-            assert_eq!(normalized, &parsed.to_string());
+            assert_eq!(normalized, &parsed.to_string_for_target(Target::BigQuery));
+            parsed.to_string_for_target(Target::SQLite3);
         }
     }
 }
