@@ -1,3 +1,6 @@
+// Don't bother with `Box`-ing everything for now. Allow huge enum values.
+#![allow(clippy::large_enum_variant)]
+
 use std::{ops::Range, fmt};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
@@ -74,21 +77,98 @@ pub struct Identifier {
     pub text: String,
 }
 
+impl Identifier {
+    /// Is this identifier a keyword?
+    fn is_keyword(&self) -> bool {
+        KEYWORDS.contains(self.text.to_ascii_uppercase().as_str())
+    }
+
+    /// Is this a valid C-style identifier?
+    fn is_c_ident(&self) -> bool {
+        let mut chars = self.text.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    // Does this need to be quoted?
+    fn needs_quotes(&self) -> bool {
+        self.is_keyword() || !self.is_c_ident()
+    }
+}
+
 impl fmt::Display for Identifier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.ws, self.text)
+        if self.needs_quotes() {
+            write!(f, "{}`", self.ws)?;
+            for c in self.text.chars() {
+                match c {
+                    '\\' => write!(f, "\\\\")?,
+                    '"' => write!(f, "\\\"")?,
+                    '\'' => write!(f, "\\\'")?,
+                    '`' => write!(f, "\\`")?,
+                    '\n' => write!(f, "\\n")?,
+                    '\r' => write!(f, "\\r")?,
+                    _ if c.is_ascii_graphic() || c == ' ' => write!(f, "{}", c)?,
+                    _ if c as u32 <= 0xFF => write!(f, "\\x{:02x}", c as u32)?,
+                    _ if c as u32 <= 0xFFFF => write!(f, "\\u{:04x}", c as u32)?,
+                    _ => write!(f, "\\U{:08x}", c as u32)?,
+                }
+            }
+            write!(f, "`")
+        } else {
+            write!(f, "{}{}", self.ws, self.text)
+        }
     }    
 }
 
 /// A table name.
 #[derive(Debug)]
-pub struct TableName {
-    pub ident: Identifier,
+pub enum TableName {
+    ProjectDatasetTable {
+        project: Identifier,
+        ws: Whitespace,
+        dataset: Identifier,
+        ws2: Whitespace,
+        table: Identifier,
+    },
+    DatasetTable {
+        dataset: Identifier,
+        ws: Whitespace,
+        table: Identifier,
+    },
+    Table {
+        table: Identifier,
+    },
 }
 
 impl fmt::Display for TableName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.ident.fmt(f)
+        match self {
+            TableName::ProjectDatasetTable { project, ws, dataset, ws2, table } => {
+                write!(f, "{}{}.{}{}.{}", project, ws, dataset, ws2, table)
+            }
+            TableName::DatasetTable { dataset, ws, table } => {
+                write!(f, "{}{}.{}", dataset, ws, table)
+            }
+            TableName::Table { table } => write!(f, "{}", table),
+        }
+    }    
+}
+
+/// A table and a column name.
+#[derive(Debug)]
+pub struct TableAndColumnName {
+    pub table_name: TableName,
+    pub ws: Whitespace,
+    pub column_name: Identifier,
+}
+
+impl fmt::Display for TableAndColumnName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}.{}", self.table_name, self.ws, self.column_name)
     }    
 }
 
@@ -246,21 +326,15 @@ impl fmt::Display for SelectListItem {
 #[derive(Debug)]
 pub enum Expression {
     ColumnName(Identifier),
-    TableAndColumnName {
-        span: Span,
-        table_name: TableName,
-        /// Whitespace before `.`.
-        ws: Whitespace,
-        column_name: Identifier,
-    }
+    TableAndColumnName(TableAndColumnName),
 }
 
 impl fmt::Display for Expression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Expression::ColumnName(ident) => write!(f, "{}", ident),
-            Expression::TableAndColumnName { table_name, ws, column_name, .. } => {
-                write!(f, "{}{}.{}", table_name, ws, column_name)
+            Expression::TableAndColumnName(table_and_column_name) => {
+                write!(f, "{}", table_and_column_name)
             }
         }
     }
@@ -287,7 +361,7 @@ impl fmt::Display for Alias {
 pub struct FromClause {
     pub ws: Whitespace,
     pub span: Span,
-    pub table_name: Identifier,
+    pub table_name: TableName,
     pub alias: Option<Alias>,
 }
 
@@ -369,7 +443,7 @@ peg::parser! {
             }
 
         rule select_list() -> SelectList
-            = items:sep(<select_list_item()>, <",">) {
+            = items:sep_opt_trailing(<select_list_item()>, <",">) {
                 SelectList { items }
             }
 
@@ -390,13 +464,8 @@ peg::parser! {
             }
 
         rule expression() -> Expression
-            = s:position!() table_name:table_name() ws:_ "." column_name:ident() e:position!() {
-                Expression::TableAndColumnName {
-                    span: s..e,
-                    table_name,
-                    ws,
-                    column_name,
-                }
+            = table_and_column_name:table_and_column_name() {
+                Expression::TableAndColumnName(table_and_column_name)
             }
             / column_name:ident() { Expression::ColumnName(column_name) }
 
@@ -410,7 +479,7 @@ peg::parser! {
             }
 
         rule from_clause() -> FromClause
-            = ws:_ s:position!() k("FROM") table_name:ident() alias:(alias()?) e:position!()
+            = ws:_ s:position!() k("FROM") table_name:table_name() alias:(alias()?) e:position!()
             {
                 FromClause {
                     span: s..e,
@@ -421,9 +490,77 @@ peg::parser! {
             }
 
         /// A table name, such as `t1` or `project-123.dataset1.table2`.
-        ///
-        /// TODO: Support more possibilities.
-        rule table_name() -> TableName = ident:ident() { TableName { ident } }
+        rule table_name() -> TableName
+            // We handle this manually because of PEG backtracking limitations.
+            = dotted:dotted_name() {?
+                let len = dotted.nodes.len();
+                let mut nodes = dotted.nodes.into_iter();
+                let mut trailing_ws = dotted.trailing_ws.into_iter();
+                if len == 1 {
+                    Ok(TableName::Table { table: nodes.next().unwrap() })
+                } else if len == 2 {
+                    Ok(TableName::DatasetTable {
+                        dataset: nodes.next().unwrap(),
+                        ws: trailing_ws.next().unwrap(),
+                        table: nodes.next().unwrap(),
+                    })
+                } else if len == 3 {
+                    Ok(TableName::ProjectDatasetTable {
+                        project: nodes.next().unwrap(),
+                        ws: trailing_ws.next().unwrap(),
+                        dataset: nodes.next().unwrap(),
+                        ws2: trailing_ws.next().unwrap(),
+                        table: nodes.next().unwrap(),
+                    })
+                } else {
+                    Err("table name")
+                }
+            }
+
+        /// A table name and a column name.
+        rule table_and_column_name() -> TableAndColumnName
+            // We handle this manually because of PEG backtracking limitations.
+            = dotted:dotted_name() {?
+                let len = dotted.nodes.len();
+                let mut nodes = dotted.nodes.into_iter();
+                let mut trailing_ws = dotted.trailing_ws.into_iter();
+                if len == 2 {
+                    Ok(TableAndColumnName {
+                        table_name: TableName::Table { table: nodes.next().unwrap() },
+                        ws: trailing_ws.next().unwrap(),
+                        column_name: nodes.next().unwrap(),
+                    })
+                } else if len == 3 {
+                    Ok(TableAndColumnName {
+                        table_name: TableName::DatasetTable {
+                            dataset: nodes.next().unwrap(),
+                            ws: trailing_ws.next().unwrap(),
+                            table: nodes.next().unwrap(),
+                        },
+                        ws: trailing_ws.next().unwrap(),
+                        column_name: nodes.next().unwrap(),
+                    })
+                } else if len == 4 {
+                    Ok(TableAndColumnName {
+                        table_name: TableName::ProjectDatasetTable {
+                            project: nodes.next().unwrap(),
+                            ws: trailing_ws.next().unwrap(),
+                            dataset: nodes.next().unwrap(),
+                            ws2: trailing_ws.next().unwrap(),
+                            table: nodes.next().unwrap(),
+                        },
+                        ws: trailing_ws.next().unwrap(),
+                        column_name: nodes.next().unwrap(),
+                    })
+                } else {
+                    Err("table and column name")
+                }
+            }
+
+        /// A table or column name with internal dots. This requires special
+        /// handling with a PEG parser, because PEG parsers are greedy
+        /// and backtracking to try alternatives can sometimes be strange.
+        rule dotted_name() -> NodeVec<Identifier> = sep(<ident()>, <".">) 
 
         /// An identifier, such as a column name.
         rule ident() -> Identifier
@@ -439,7 +576,7 @@ peg::parser! {
                     })
                 }
             }
-            / ws:_ s:position!() "`" id:c_ident() "`" e:position!() {
+            / ws:_ s:position!() "`" id:$(([^ '\\' | '`'] / escape())*) "`" e:position!() {
                 Identifier {
                     span: s..e,
                     ws,
@@ -450,11 +587,20 @@ peg::parser! {
 
         /// Low-level rule for matching a C-style identifier.
         rule c_ident() -> String
-            = id:$(['a'..='z' | 'A'..='Z' | '_'] ['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*)
+            = quiet! { id:$(c_ident_start() c_ident_cont()*)
               // The next character cannot be a valid ident character.
-              !['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
-              { id.to_string() }
+              !c_ident_cont()
+              { id.to_string() } }
             / expected!("identifier")
+        rule c_ident_start() = ['a'..='z' | 'A'..='Z' | '_']
+        rule c_ident_cont() = ['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
+
+        /// Escape sequences.
+        rule escape() = "\\" (octal_escape() / hex_escape() / unicode_escape() / [_])
+        rule octal_escape() = (['0'..='7'] * <3,3>)
+        rule hex_escape() = ("x" / "X") hex_digit() * <2,2>
+        rule unicode_escape() = "u" hex_digit() * <4,4> / "U" hex_digit() * <8,8>
+        rule hex_digit() = ['0'..='9' | 'a'..='f' | 'A'..='F']
 
         /// Keywords. These use case-insensitive matching, and may not be
         /// followed by a valid identifier character. See
@@ -463,8 +609,23 @@ peg::parser! {
             = input:$([_]*<{kw.len()}>) !['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
               {? if input.eq_ignore_ascii_case(kw) { Ok(()) } else { Err(kw) } }
 
-        /// Punctuation separated list. Allows a trailing separator.
+        /// Punctuation separated list. Does not allow a trailing separator.
         rule sep<T: fmt::Debug, S>(item: rule<T>, separator: rule<S>) -> NodeVec<T>
+            = first:item()
+              items:(ws:_ separator() item:item() { (ws, item) })*
+            {
+                let mut nodes = Vec::new();
+                let mut trailing_ws = Vec::new();
+                nodes.push(first);
+                for (ws, item) in items {
+                    trailing_ws.push(ws);
+                    nodes.push(item);
+                }
+                NodeVec { nodes, trailing_ws }
+            }
+
+        /// Punctuation separated list. Allows a trailing separator.
+        rule sep_opt_trailing<T: fmt::Debug, S>(item: rule<T>, separator: rule<S>) -> NodeVec<T>
             = first:item()
               items:(ws:_ separator() item:item() { (ws, item) })*
               ws2:(ws2:_ separator() { ws2 })?
@@ -528,6 +689,7 @@ mod tests {
             (r#"SELECT a,b FROM t"#, r#"SELECT a,b FROM t"#),
             (r#"select a, b /* hi */, from t"#, r#"SELECT a, b /* hi */, FROM t"#),
             (r#"select p.*, p.a AS b from t as p"#, r#"SELECT p.*, p.a AS b FROM t AS p"#),
+            (r#"select * from `p-123`.`d`.`t`"#, r#"SELECT * FROM `p-123`.d.t"#),
 
             // We're working up to being able to parse this.
             //
