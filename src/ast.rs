@@ -8,7 +8,32 @@ use std::{fmt, ops::Range};
 /// functions." These allow us to create highly optimized, read-only sets/maps
 /// generated at compile time.
 static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
-    "AS", "DISTINCT", "FROM", "SELECT",
+    "ABORT", "ACCOUNT", "ACTION", "ADD", "AFTER", "ALL", "ALTER", "ALWAYS",
+    "ANALYZE", "AND", "ANY", "ARRAY", "AS", "ASC", "ASSERT_ROWS_MODIFIED", "AT",
+    "ATTACH", "AUTOINCREMENT", "BEFORE", "BEGIN", "BETWEEN", "BY", "CASCADE",
+    "CASE", "CAST", "CHECK", "COLLATE", "COLUMN", "COMMIT", "CONFLICT",
+    "CONNECTION", "CONSTRAINT", "CONTAINS", "CREATE", "CROSS", "CUBE",
+    "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "DATABASE",
+    "DEFAULT", "DEFERRABLE", "DEFERRED", "DEFINE", "DELETE", "DESC", "DETACH",
+    "DISTINCT", "DO", "DROP", "EACH", "ELSE", "END", "ENUM", "ESCAPE", "EXCEPT",
+    "EXCLUDE", "EXCLUSIVE", "EXISTS", "EXPLAIN", "EXTRACT", "FAIL", "FALSE",
+    "FETCH", "FILTER", "FIRST", "FOLLOWING", "FOR", "FOREIGN", "FROM", "FULL",
+    "GENERATED", "GLOB", "GROUP", "GROUPING", "GROUPS", "GSCLUSTER", "HASH",
+    "HAVING", "IF", "IGNORE", "ILIKE", "IMMEDIATE", "IN", "INCREMENT", "INDEX",
+    "INDEXED", "INITIALLY", "INNER", "INSERT", "INSTEAD", "INTERSECT",
+    "INTERVAL", "INTO", "IS", "ISNULL", "ISSUE", "JOIN", "KEY", "LAST",
+    "LATERAL", "LEFT", "LIKE", "LIMIT", "LOOKUP", "MATCH", "MATERIALIZED",
+    "MERGE", "MINUS", "NATURAL", "NEW", "NO", "NOT", "NOTHING", "NOTNULL",
+    "NULL", "NULLS", "OF", "OFFSET", "ON", "OR", "ORDER", "ORGANIZATION",
+    "OTHERS", "OUTER", "OVER", "PARTITION", "PLAN", "PRAGMA", "PRECEDING",
+    "PRIMARY", "PROTO", "QUALIFY", "QUERY", "RAISE", "RANGE", "RECURSIVE",
+    "REFERENCES", "REGEXP", "REINDEX", "RELEASE", "RENAME", "REPLACE",
+    "RESPECT", "RESTRICT", "RETURNING", "RIGHT", "RLIKE", "ROLLBACK", "ROLLUP",
+    "ROW", "ROWS", "SAVEPOINT", "SCHEMA", "SELECT", "SET", "SOME", "STRUCT",
+    "TABLE", "TABLESAMPLE", "TEMP", "TEMPORARY", "THEN", "TIES", "TO",
+    "TRANSACTION", "TREAT", "TRIGGER", "TRUE", "TRY_CAST", "UNBOUNDED", "UNION",
+    "UNIQUE", "UNNEST", "UPDATE", "USING", "VACUUM", "VALUES", "VIEW",
+    "VIRTUAL", "WHEN", "WHERE", "WINDOW", "WITH", "WITHIN", "WITHOUT",
 };
 
 /// We represent a span in our source code using a Rust range. These are easy
@@ -17,6 +42,7 @@ type Span = Range<usize>;
 
 /// The target language we're transpiling to.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub enum Target {
     BigQuery,
     SQLite3,
@@ -116,7 +142,11 @@ impl<T: Node> NodeVec<T> {
             write!(f, "{}", t.f(node))?;
             if i < self.trailing_ws.len() {
                 write!(f, "{}", t.f(&self.trailing_ws[i]))?;
-                write!(f, "{}", sep)?;
+                match t {
+                    _ if i + 1 < self.nodes.len() => write!(f, "{}", sep)?,
+                    Target::BigQuery => write!(f, "{}", sep)?,
+                    Target::SQLite3 => write!(f, " ")?,
+                }
             }
         }
         Ok(())
@@ -164,8 +194,7 @@ impl Node for Identifier {
                 }
                 Target::SQLite3 => {
                     write!(f, "{}\"", t.f(&self.ws))?;
-                    // TODO: Find the docs to implement this for SQLite3.
-                    escape_for_bigquery(&self.text, f)?;
+                    escape_for_sqlite3(&self.text, f)?;
                     write!(f, "\"")
                 }
             }
@@ -175,6 +204,8 @@ impl Node for Identifier {
     }
 }
 
+/// Format `s` as a string literal for BigQuery. Does not include any
+/// surrounding quotes, so you can use it with identifiers or strings.
 fn escape_for_bigquery(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     for c in s.chars() {
         match c {
@@ -191,6 +222,12 @@ fn escape_for_bigquery(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         }
     }
     Ok(())
+}
+
+/// Escape for SQLite3.
+fn escape_for_sqlite3(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    // TODO: Implement this for real.
+    escape_for_bigquery(s, f)
 }
 
 /// A table name.
@@ -215,28 +252,54 @@ pub enum TableName {
 
 impl Node for TableName {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TableName::ProjectDatasetTable {
-                project,
-                ws,
-                dataset,
-                ws2,
-                table,
-            } => {
-                write!(
-                    f,
-                    "{}{}.{}{}.{}",
-                    t.f(project),
-                    t.f(ws),
-                    t.f(dataset),
-                    t.f(ws2),
-                    t.f(table)
-                )
-            }
-            TableName::DatasetTable { dataset, ws, table } => {
-                write!(f, "{}{}.{}", t.f(dataset), t.f(ws), t.f(table))
-            }
-            TableName::Table { table } => write!(f, "{}", t.f(table)),
+        match t {
+            Target::BigQuery => match self {
+                TableName::ProjectDatasetTable {
+                    project,
+                    ws,
+                    dataset,
+                    ws2,
+                    table,
+                } => {
+                    write!(
+                        f,
+                        "{}{}.{}{}.{}",
+                        t.f(project),
+                        t.f(ws),
+                        t.f(dataset),
+                        t.f(ws2),
+                        t.f(table)
+                    )
+                }
+                TableName::DatasetTable { dataset, ws, table } => {
+                    write!(f, "{}{}.{}", t.f(dataset), t.f(ws), t.f(table))
+                }
+                TableName::Table { table } => write!(f, "{}", t.f(table)),
+            },
+            Target::SQLite3 => match self {
+                TableName::ProjectDatasetTable {
+                    project,
+                    dataset,
+                    table,
+                    ..
+                } => {
+                    write!(f, "{}\"", t.f(&project.ws))?;
+                    escape_for_sqlite3(&project.text, f)?;
+                    write!(f, ".")?;
+                    escape_for_sqlite3(&dataset.text, f)?;
+                    write!(f, ".")?;
+                    escape_for_sqlite3(&table.text, f)?;
+                    write!(f, "\"")
+                }
+                TableName::DatasetTable { dataset, table, .. } => {
+                    write!(f, "{}\"", t.f(&dataset.ws))?;
+                    escape_for_sqlite3(&dataset.text, f)?;
+                    write!(f, ".")?;
+                    escape_for_sqlite3(&table.text, f)?;
+                    write!(f, "\"")
+                }
+                TableName::Table { table } => write!(f, "{}", t.f(table)),
+            },
         }
     }
 }
@@ -775,21 +838,24 @@ peg::parser! {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use super::*;
 
     #[test]
-    fn test_parser() {
+    fn test_parser_and_run_with_sqlite3() {
         let sql_examples = &[
             // Basic test cases of gradually increasing complexity.
             (
-                r#"SELECT DISTINCT * FROM t1"#,
-                r#"SELECT DISTINCT * FROM t1"#,
+                r#"SELECT * FROM t # comment"#,
+                r#"SELECT * FROM t # comment"#,
             ),
-            (r#"SELECT * FROM `t1`"#, r#"SELECT * FROM t1"#),
-            (r#"select * from t1"#, r#"SELECT * FROM t1"#),
+            (r#"SELECT DISTINCT * FROM t"#, r#"SELECT DISTINCT * FROM t"#),
+            (r#"SELECT * FROM `t`"#, r#"SELECT * FROM t"#),
+            (r#"select * from t"#, r#"SELECT * FROM t"#),
             (
-                r#"select /* hi */ * from `t1`"#,
-                r#"SELECT /* hi */ * FROM t1"#,
+                r#"select /* hi */ * from `t`"#,
+                r#"SELECT /* hi */ * FROM t"#,
             ),
             (r#"SELECT a,b FROM t"#, r#"SELECT a,b FROM t"#),
             (
@@ -797,13 +863,19 @@ mod tests {
                 r#"SELECT a, b /* hi */, FROM t"#,
             ),
             (
-                r#"select p.*, p.a AS b from t as p"#,
-                r#"SELECT p.*, p.a AS b FROM t AS p"#,
+                "select a, b, /* hi */ from t",
+                "SELECT a, b, /* hi */ FROM t",
+            ),
+            ("select a, b,from t", "SELECT a, b,FROM t"),
+            (
+                r#"select p.*, p.a AS c from t as p"#,
+                r#"SELECT p.*, p.a AS c FROM t AS p"#,
             ),
             (
                 r#"select * from `p-123`.`d`.`t`"#,
                 r#"SELECT * FROM `p-123`.d.t"#,
             ),
+            (r#"select * from `d`.`t`"#, r#"SELECT * FROM d.t"#),
             // We're working up to being able to parse this.
             //
             // r#"
@@ -826,11 +898,27 @@ mod tests {
             //     )
             // "#,
         ];
+
+        // Set up SQLite3 database for testing transpiled SQL.
+        let conn = Connection::open_in_memory().expect("failed to open SQLite3 database");
+        let fixtures = r#"
+            CREATE TABLE t (a INT, b INT);
+            CREATE TABLE "p-123.d.t" (a INT, b INT);
+            CREATE TABLE "d.t" (a INT, b INT);
+        "#;
+        conn.execute_batch(fixtures)
+            .expect("failed to create SQLite3 fixtures");
+
         for (sql, normalized) in sql_examples {
-            println!("parsing: {}", sql);
+            println!("parsing:   {}", sql);
             let parsed = sql_program::sql_program(sql).unwrap();
             assert_eq!(normalized, &parsed.to_string_for_target(Target::BigQuery));
-            parsed.to_string_for_target(Target::SQLite3);
+
+            let sql = parsed.to_string_for_target(Target::SQLite3);
+            println!("  SQLite3: {}", sql);
+            if let Err(err) = conn.prepare(&sql) {
+                panic!("failed to prepare SQL:\n{}\n{}", sql, err);
+            }
         }
     }
 }
