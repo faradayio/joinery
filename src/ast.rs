@@ -678,11 +678,16 @@ pub struct FromClause {
     pub ws: Whitespace,
     pub span: Span,
     pub from_item: FromItem,
+    pub join_operations: Vec<JoinOperation>,
 }
 
 impl Node for FromClause {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}FROM{}", t.f(&self.ws), t.f(&self.from_item))
+        write!(f, "{}FROM{}", t.f(&self.ws), t.f(&self.from_item))?;
+        for join_operation in &self.join_operations {
+            write!(f, "{}", t.f(join_operation))?;
+        }
+        Ok(())
     }
 }
 
@@ -730,6 +735,90 @@ impl Node for FromItem {
                     write!(f, "{}", t.f(alias))?;
                 }
                 Ok(())
+            }
+        }
+    }
+}
+
+/// A join operation.
+#[derive(Debug)]
+pub enum JoinOperation {
+    /// A `JOIN` clause.
+    ConditionJoin {
+        join_type: JoinType,
+        join_ws: Whitespace,
+        from_item: FromItem,
+        operator: ConditionJoinOperator,
+    },
+}
+
+impl Node for JoinOperation {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JoinOperation::ConditionJoin {
+                join_type,
+                join_ws,
+                from_item,
+                operator,
+            } => {
+                write!(
+                    f,
+                    "{}{}JOIN{}{}",
+                    t.f(join_type),
+                    t.f(join_ws),
+                    t.f(from_item),
+                    t.f(operator)
+                )
+            }
+        }
+    }
+}
+
+/// The type of a join.
+#[derive(Debug)]
+pub enum JoinType {
+    Inner { ws: Whitespace, span: Span },
+    Left { ws: Whitespace, span: Span },
+    Right { ws: Whitespace, span: Span },
+    Full { ws: Whitespace, span: Span },
+}
+
+impl Node for JoinType {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JoinType::Inner { ws, .. } => write!(f, "{}INNER", t.f(ws)),
+            JoinType::Left { ws, .. } => write!(f, "{}LEFT", t.f(ws)),
+            JoinType::Right { ws, .. } => write!(f, "{}RIGHT", t.f(ws)),
+            JoinType::Full { ws, .. } => write!(f, "{}FULL", t.f(ws)),
+        }
+    }
+}
+
+/// The condition used for a `JOIN`.
+#[derive(Debug)]
+pub enum ConditionJoinOperator {
+    Using {
+        ws: Whitespace,
+        span: Span,
+        paren1_ws: Whitespace,
+        column_names: NodeVec<Identifier>,
+        paren2_ws: Whitespace,
+    },
+}
+
+impl Node for ConditionJoinOperator {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConditionJoinOperator::Using {
+                ws,
+                paren1_ws,
+                column_names,
+                paren2_ws,
+                ..
+            } => {
+                write!(f, "{}USING{}(", t.f(ws), t.f(paren1_ws))?;
+                column_names.display_with_sep(t, f, ",")?;
+                write!(f, "{})", t.f(paren2_ws))
             }
         }
     }
@@ -989,12 +1078,14 @@ peg::parser! {
             }
 
         rule from_clause() -> FromClause
-            = ws:_ s:position!() k("FROM") from_item:from_item() e:position!()
+            = ws:_ s:position!() k("FROM") from_item:from_item()
+              join_operations:join_operations() e:position!()
             {
                 FromClause {
                     span: s..e,
                     ws,
                     from_item,
+                    join_operations,
                 }
             }
 
@@ -1008,6 +1099,44 @@ peg::parser! {
                     query: Box::new(query),
                     paren2_ws,
                     alias,
+                }
+            }
+
+        rule join_operations() -> Vec<JoinOperation>
+            = join_operations:join_operation()* { join_operations }
+
+        rule join_operation() -> JoinOperation
+            = join_type:join_type() join_ws:_ k("JOIN") from_item:from_item() operator:condition_join_operator() {
+                JoinOperation::ConditionJoin {
+                    join_type,
+                    join_ws,
+                    from_item,
+                    operator,
+                }
+            }
+
+        rule join_type() -> JoinType
+            = ws:_ s:position!() k("INNER") e:position!() {
+                JoinType::Inner { ws, span: s..e }
+            }
+            / ws:_ s:position!() k("LEFT") e:position!() {
+                JoinType::Left { ws, span: s..e }
+            }
+            / ws:_ s:position!() k("RIGHT") e:position!() {
+                JoinType::Right { ws, span: s..e }
+            }
+            / ws:_ s:position!() k("FULL") e:position!() {
+                JoinType::Full { ws, span: s..e }
+            }
+
+        rule condition_join_operator() -> ConditionJoinOperator
+            = ws:_ s:position!() k("USING") paren1_ws:_ "(" column_names:sep(<ident()>, <",">) paren2_ws:_ ")" e:position!() {
+                ConditionJoinOperator::Using {
+                    span: s..e,
+                    ws,
+                    paren1_ws,
+                    column_names,
+                    paren2_ws,
                 }
             }
 
@@ -1306,32 +1435,46 @@ mod tests {
                 r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
                 r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
             ),
-            // TODO: Add features needed for query below.
-            //
-            // - `INNER JOIN`
-            // - `USING`
-            //
-            // We're working up to being able to parse this.
-            //
-            // r#"
-            // CREATE OR REPLACE TABLE `project-123`.`proxies`.`t2`  AS (
-            //     SELECT
-            //         s1.*,
-            //         CAST(`s1`.`random_id` AS STRING) AS key,
-            //         proxy.first_name,
-            //         proxy.last_name,
-            //         -- this is a comment
-            //         CAST(NULL AS BOOL) AS id_placeholder,
-            //         CAST(NULL AS ARRAY<INT64>) as more_ids
-            //     FROM `project-123`.`sources`.`s1` AS s1
-            //     INNER JOIN
-            //         (
-            //             SELECT DISTINCT first_name, last_name, `join_id`
-            //             FROM `project-123`.`proxies`.`t1`
-            //         ) AS proxy
-            //         USING (`join_id`)
-            //     )
-            // "#,
+            (
+                r#"# Here's a challenge!
+CREATE OR REPLACE TABLE `project-123`.`proxies`.`t2` AS (
+    SELECT
+        s1.*,
+        CAST(`s1`.`random_id` AS STRING) AS `key`,
+        proxy.first_name,
+        proxy.last_name,
+        # this is a comment
+        CAST(NULL AS BOOL) AS id_placeholder,
+        CAST(NULL AS ARRAY<INT64>) as more_ids
+    FROM `project-123`.`sources`.`s1` AS s1
+    INNER JOIN
+        (
+            SELECT DISTINCT first_name, last_name, `join_id`
+            FROM `project-123`.`proxies`.`t1`
+        ) AS proxy
+        USING (`join_id`)
+    )
+                "#,
+                r#"# Here's a challenge!
+CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
+    SELECT
+        s1.*,
+        CAST(s1.random_id AS STRING) AS `key`,
+        proxy.first_name,
+        proxy.last_name,
+        # this is a comment
+        CAST(NULL AS BOOL) AS id_placeholder,
+        CAST(NULL AS ARRAY<INT64>) AS more_ids
+    FROM `project-123`.sources.s1 AS s1
+    INNER JOIN
+        (
+            SELECT DISTINCT first_name, last_name, join_id
+            FROM `project-123`.proxies.t1
+        ) AS proxy
+        USING (join_id)
+    )
+                "#,
+            ),
         ];
 
         // Set up SQLite3 database for testing transpiled SQL.
@@ -1340,6 +1483,17 @@ mod tests {
             CREATE TABLE t (a INT, b INT);
             CREATE TABLE "p-123.d.t" (a INT, b INT);
             CREATE TABLE "d.t" (a INT, b INT);
+
+            -- For our big query.
+            CREATE TABLE "project-123.sources.s1" (
+                random_id INT,
+                join_id INT
+            );
+            CREATE TABLE "project-123.proxies.t1" (
+                first_name TEXT,
+                last_name TEXT,
+                join_id INT
+            );
         "#;
         conn.execute_batch(fixtures)
             .expect("failed to create SQLite3 fixtures");
