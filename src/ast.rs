@@ -345,6 +345,8 @@ impl Node for SqlProgram {
 pub enum Statement {
     Query(QueryStatement),
     CreateTable(CreateTableStatement),
+    CreateView(CreateViewStatement),
+    DropView(DropViewStatement),
 }
 
 impl Node for Statement {
@@ -352,6 +354,8 @@ impl Node for Statement {
         match self {
             Statement::Query(s) => write!(f, "{}", t.f(s)),
             Statement::CreateTable(s) => write!(f, "{}", t.f(s)),
+            Statement::CreateView(s) => write!(f, "{}", t.f(s)),
+            Statement::DropView(s) => write!(f, "{}", t.f(s)),
         }
     }
 }
@@ -423,7 +427,7 @@ pub struct SelectExpression {
     pub select_options: SelectOptions,
     pub select_list: SelectList,
     pub from_clause: FromClause,
-    // pub where_clause: Option<WhereClause>,
+    pub where_clause: Option<WhereClause>,
     // pub group_by: Option<GroupBy>,
     // pub having: Option<Having>,
     // pub order_by: Option<OrderBy>,
@@ -438,7 +442,11 @@ impl Node for SelectExpression {
             t.f(&self.select_options),
             t.f(&self.select_list),
             t.f(&self.from_clause)
-        )
+        )?;
+        if let Some(where_clause) = &self.where_clause {
+            write!(f, "{}", t.f(where_clause))?;
+        }
+        Ok(())
     }
 }
 
@@ -550,6 +558,11 @@ impl Node for SelectListItem {
 /// An SQL expression.
 #[derive(Debug)]
 pub enum Expression {
+    Literal {
+        ws: Whitespace,
+        span: Span,
+        literal: Literal,
+    },
     Null {
         ws: Whitespace,
         span: Span,
@@ -565,11 +578,18 @@ pub enum Expression {
         data_type: DataType,
         paren2_ws: Whitespace,
     },
+    Binop {
+        left: Box<Expression>,
+        op_ws: Whitespace,
+        op: Binop,
+        right: Box<Expression>,
+    },
 }
 
 impl Node for Expression {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Expression::Literal { ws, literal, .. } => write!(f, "{}{}", t.f(ws), t.f(literal)),
             Expression::Null { ws, .. } => write!(f, "{}NULL", t.f(ws)),
             Expression::ColumnName(ident) => write!(f, "{}", t.f(ident)),
             Expression::TableAndColumnName(table_and_column_name) => {
@@ -595,6 +615,47 @@ impl Node for Expression {
                     t.f(paren2_ws)
                 )
             }
+            Expression::Binop {
+                left,
+                op_ws,
+                op,
+                right,
+            } => write!(
+                f,
+                "{}{}{}{}",
+                t.f(left.as_ref()),
+                t.f(op_ws),
+                t.f(op),
+                t.f(right.as_ref())
+            ),
+        }
+    }
+}
+
+/// A literal value.
+#[derive(Debug)]
+pub enum Literal {
+    Int64(i64),
+}
+
+impl Node for Literal {
+    fn fmt_for_target(&self, _t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Literal::Int64(i) => write!(f, "{}", i),
+        }
+    }
+}
+
+/// A binary operator.
+#[derive(Debug)]
+pub enum Binop {
+    Gte,
+}
+
+impl Node for Binop {
+    fn fmt_for_target(&self, _t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Binop::Gte => write!(f, ">="),
         }
     }
 }
@@ -824,6 +885,20 @@ impl Node for ConditionJoinOperator {
     }
 }
 
+/// A `WHERE` clause.
+#[derive(Debug)]
+pub struct WhereClause {
+    pub ws: Whitespace,
+    pub span: Span,
+    pub expression: Expression,
+}
+
+impl Node for WhereClause {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}WHERE{}", t.f(&self.ws), t.f(&self.expression))
+    }
+}
+
 /// A `CREATE TABLE` statement.
 #[derive(Debug)]
 pub struct CreateTableStatement {
@@ -856,6 +931,45 @@ impl Node for CreateTableStatement {
             t.f(&self.table_ws),
             t.f(&self.table_name),
             t.f(&self.definition),
+        )
+    }
+}
+
+/// A `CREATE VIEW` statement.
+#[derive(Debug)]
+pub struct CreateViewStatement {
+    pub create_ws: Whitespace,
+    pub span: Span,
+    pub or_replace: Option<OrReplace>,
+    pub view_ws: Whitespace,
+    pub view_name: TableName,
+    // TODO: Factor out shared code from
+    pub as_ws: Whitespace,
+    pub query: QueryStatement,
+}
+
+impl Node for CreateViewStatement {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", t.f(&self.create_ws))?;
+        match t {
+            Target::SQLite3 if self.or_replace.is_some() => {
+                // We need to convert this to a `DROP VIEW IF EXISTS` statement.
+                write!(f, "DROP VIEW IF EXISTS{};", t.f(&self.view_name))?;
+            }
+            _ => {}
+        }
+
+        write!(f, "CREATE")?;
+        if let Some(or_replace) = &self.or_replace {
+            write!(f, "{}", t.f(or_replace))?;
+        }
+        write!(
+            f,
+            "{}VIEW{}{}AS{}",
+            t.f(&self.view_ws),
+            t.f(&self.view_name),
+            t.f(&self.as_ws),
+            t.f(&self.query),
         )
     }
 }
@@ -926,6 +1040,27 @@ impl Node for ColumnDefinition {
     }
 }
 
+/// A `DROP VIEW` statement.
+#[derive(Debug)]
+pub struct DropViewStatement {
+    pub drop_ws: Whitespace,
+    pub span: Span,
+    pub view_ws: Whitespace,
+    pub view_name: TableName,
+}
+
+impl Node for DropViewStatement {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}DROP{}VIEW{}",
+            t.f(&self.drop_ws),
+            t.f(&self.view_ws),
+            t.f(&self.view_name)
+        )
+    }
+}
+
 // We use `rust-peg` to parse BigQuery SQL. `rustpeg` uses a [Parsing Expression
 // Grammar](https://en.wikipedia.org/wiki/Parsing_expression_grammar), which is
 // conceptually sort of like a recursive regex with named rules.
@@ -951,7 +1086,7 @@ impl Node for ColumnDefinition {
 //     leaving it for the `ws:_ "SELECT"` rule.
 peg::parser! {
     /// We parse as much of BigQuery's "Standard SQL" as we can.
-    grammar sql_program() for str {
+    pub grammar sql_program() for str {
         pub rule sql_program() -> SqlProgram
             = statement:statement()
               trailing_ws:_ { SqlProgram {
@@ -962,6 +1097,8 @@ peg::parser! {
         rule statement() -> Statement
             = s:query_statement() { Statement::Query(s) }
             / c:create_table_statement() { Statement::CreateTable(c) }
+            / c:create_view_statement() { Statement::CreateView(c) }
+            / d:drop_view_statement() { Statement::DropView(d) }
 
         rule query_statement() -> QueryStatement
             = query_expression:query_expression() { QueryStatement { query_expression } }
@@ -980,11 +1117,13 @@ peg::parser! {
             = select_options:select_options()
               select_list:select_list()
               from_clause:from_clause()
+              where_clause:where_clause()?
             {
                 SelectExpression {
                     select_options,
                     select_list,
                     from_clause,
+                    where_clause,
                 }
             }
 
@@ -1028,15 +1167,27 @@ peg::parser! {
                 SelectListItem::Expression { span: s..e, expression, alias }
             }
 
-        rule expression() -> Expression
-            = ws:_ s:position!() k("NULL") e:position!() {
+        rule expression() -> Expression = precedence! {
+            left:(@) op_ws:_ ">=" right:@ {
+                Expression::Binop {
+                    left: Box::new(left),
+                    op_ws,
+                    op: Binop::Gte,
+                    right: Box::new(right),
+                }
+            }
+            --
+            ws:_ s:position!() literal:literal() e:position!() {
+                Expression::Literal { ws, span: s..e, literal }
+            }
+            ws:_ s:position!() k("NULL") e:position!() {
                 Expression::Null { ws, span: s..e, }
             }
-            / table_and_column_name:table_and_column_name() {
+            table_and_column_name:table_and_column_name() {
                 Expression::TableAndColumnName(table_and_column_name)
             }
-            / column_name:ident() { Expression::ColumnName(column_name) }
-            / ws:_ s:position!() k("CAST") paren_ws:_ "(" expression:expression() as_ws:_ k("AS") data_type:data_type() paren2_ws:_ ")" e:position!() {
+            column_name:ident() { Expression::ColumnName(column_name) }
+            ws:_ s:position!() k("CAST") paren_ws:_ "(" expression:expression() as_ws:_ k("AS") data_type:data_type() paren2_ws:_ ")" e:position!() {
                 Expression::Cast {
                     ws,
                     span: s..e,
@@ -1047,6 +1198,10 @@ peg::parser! {
                     paren2_ws,
                 }
             }
+        }
+
+        rule literal() -> Literal
+            = value_str:$("-"? ['0'..='9']+) { Literal::Int64(value_str.parse().unwrap()) }
 
         rule data_type() -> DataType
             = ws:_ s:position!() k("BOOL") e:position!() {
@@ -1140,6 +1295,15 @@ peg::parser! {
                 }
             }
 
+        rule where_clause() -> WhereClause
+            = ws:_ s:position!() k("WHERE") expression:expression() e:position!() {
+                WhereClause {
+                    span: s..e,
+                    ws,
+                    expression,
+                }
+            }
+
         rule create_table_statement() -> CreateTableStatement
             = create_ws:_ s:position!() k("CREATE") or_replace:or_replace()?
               table_ws:_ k("TABLE") table_name:table_name()
@@ -1153,6 +1317,23 @@ peg::parser! {
                     table_ws,
                     table_name,
                     definition,
+                }
+            }
+
+        rule create_view_statement() -> CreateViewStatement
+            = create_ws:_ s:position!() k("CREATE") or_replace:or_replace()?
+              view_ws:_ k("VIEW") view_name:table_name()
+              as_ws:_ k("AS") query:query_statement()
+              e:position!()
+            {
+                CreateViewStatement {
+                    create_ws,
+                    span: s..e,
+                    or_replace,
+                    view_ws,
+                    view_name,
+                    as_ws,
+                    query,
                 }
             }
 
@@ -1185,6 +1366,17 @@ peg::parser! {
                 ColumnDefinition {
                     name,
                     data_type,
+                }
+            }
+
+        rule drop_view_statement() -> DropViewStatement
+            // Oddly, BigQuery accepts `DELETE VIEW`.
+            = drop_ws:_ s:position!() (k("DROP") / k("DELETE")) view_ws:_ k("VIEW") view_name:table_name() e:position!() {
+                DropViewStatement {
+                    drop_ws,
+                    span: s..e,
+                    view_ws,
+                    view_name,
                 }
             }
 
@@ -1411,6 +1603,10 @@ mod tests {
                 r#"SELECT p.*, p.a AS c FROM t AS p"#,
             ),
             (
+                r"SELECT * FROM t WHERE a >= 0",
+                r"SELECT * FROM t WHERE a >= 0",
+            ),
+            (
                 r#"SELECT * FROM (SELECT a FROM t) AS p"#,
                 r#"SELECT * FROM (SELECT a FROM t) AS p"#,
             ),
@@ -1435,6 +1631,11 @@ mod tests {
                 r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
                 r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
             ),
+            (
+                r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#,
+                r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#,
+            ),
+            (r#"DROP VIEW v"#, r#"DROP VIEW v"#),
             (
                 r#"# Here's a challenge!
 CREATE OR REPLACE TABLE `project-123`.`proxies`.`t2` AS (
