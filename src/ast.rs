@@ -41,7 +41,7 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 type Span = Range<usize>;
 
 /// The target language we're transpiling to.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
 pub enum Target {
     BigQuery,
@@ -343,21 +343,84 @@ impl Node for SqlProgram {
 /// A statement in our abstract syntax tree.
 #[derive(Debug)]
 pub enum Statement {
-    Select(SelectStatement),
+    Query(QueryStatement),
+    CreateTable(CreateTableStatement),
 }
 
 impl Node for Statement {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Statement::Select(s) => write!(f, "{}", t.f(s)),
+            Statement::Query(s) => write!(f, "{}", t.f(s)),
+            Statement::CreateTable(s) => write!(f, "{}", t.f(s)),
         }
     }
 }
 
-/// A `SELECT` statement.
+/// A query statement. This exists mainly because it's in the official grammar.
 #[derive(Debug)]
-pub struct SelectStatement {
-    pub select: Select,
+pub struct QueryStatement {
+    pub query_expression: QueryExpression,
+}
+
+impl Node for QueryStatement {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", t.f(&self.query_expression))
+    }
+}
+
+/// A query expression is a `SELECT` statement, plus some other optional
+/// surrounding things. See the [official grammar][]. This is where CTEs and
+/// similar things hook into the grammar.
+///
+/// [official grammar]:
+///     https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#sql_syntax.
+#[derive(Debug)]
+pub enum QueryExpression {
+    SelectExpression(SelectExpression),
+    Nested {
+        paren1_ws: Whitespace,
+        query: Box<QueryStatement>,
+        paren2_ws: Whitespace,
+    },
+}
+
+impl Node for QueryExpression {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            QueryExpression::SelectExpression(s) => write!(f, "{}", t.f(s)),
+            QueryExpression::Nested {
+                paren1_ws,
+                query,
+                paren2_ws,
+            } if t == Target::SQLite3 => {
+                // Throw in extra spaces for the erased parens.
+                write!(
+                    f,
+                    "{} {}{} ",
+                    t.f(paren1_ws),
+                    t.f(query.as_ref()),
+                    t.f(paren2_ws)
+                )
+            }
+            QueryExpression::Nested {
+                paren1_ws,
+                query,
+                paren2_ws,
+            } => write!(
+                f,
+                "{}({}{})",
+                t.f(paren1_ws),
+                t.f(query.as_ref()),
+                t.f(paren2_ws)
+            ),
+        }
+    }
+}
+
+/// A `SELECT` expression.
+#[derive(Debug)]
+pub struct SelectExpression {
+    pub select_options: SelectOptions,
     pub select_list: SelectList,
     pub from_clause: FromClause,
     // pub where_clause: Option<WhereClause>,
@@ -367,12 +430,12 @@ pub struct SelectStatement {
     // pub limit: Option<Limit>,
 }
 
-impl Node for SelectStatement {
+impl Node for SelectExpression {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{}{}{}",
-            t.f(&self.select),
+            t.f(&self.select_options),
             t.f(&self.select_list),
             t.f(&self.from_clause)
         )
@@ -381,13 +444,13 @@ impl Node for SelectStatement {
 
 /// The head of a `SELECT`, including any modifiers.
 #[derive(Debug)]
-pub struct Select {
+pub struct SelectOptions {
     pub ws: Whitespace,
     pub span: Span,
     pub distinct: Option<Distinct>,
 }
 
-impl Node for Select {
+impl Node for SelectOptions {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}SELECT", t.f(&self.ws))?;
         if let Some(distinct) = &self.distinct {
@@ -487,17 +550,108 @@ impl Node for SelectListItem {
 /// An SQL expression.
 #[derive(Debug)]
 pub enum Expression {
+    Null {
+        ws: Whitespace,
+        span: Span,
+    },
     ColumnName(Identifier),
     TableAndColumnName(TableAndColumnName),
+    Cast {
+        ws: Whitespace,
+        span: Span,
+        paren_ws: Whitespace,
+        expression: Box<Expression>,
+        as_ws: Whitespace,
+        data_type: DataType,
+        paren2_ws: Whitespace,
+    },
 }
 
 impl Node for Expression {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Expression::Null { ws, .. } => write!(f, "{}NULL", t.f(ws)),
             Expression::ColumnName(ident) => write!(f, "{}", t.f(ident)),
             Expression::TableAndColumnName(table_and_column_name) => {
                 write!(f, "{}", t.f(table_and_column_name))
             }
+            Expression::Cast {
+                ws,
+                paren_ws,
+                expression,
+                as_ws,
+                data_type,
+                paren2_ws,
+                ..
+            } => {
+                write!(
+                    f,
+                    "{}CAST{}({}{}AS{}{})",
+                    t.f(ws),
+                    t.f(paren_ws),
+                    t.f(expression.as_ref()),
+                    t.f(as_ws),
+                    t.f(data_type),
+                    t.f(paren2_ws)
+                )
+            }
+        }
+    }
+}
+
+/// Data types.
+#[derive(Debug)]
+pub enum DataType {
+    Bool {
+        ws: Whitespace,
+        span: Span,
+    },
+    Int64 {
+        ws: Whitespace,
+        span: Span,
+    },
+    String {
+        ws: Whitespace,
+        span: Span,
+    },
+    Array {
+        ws: Whitespace,
+        span: Span,
+        lt_ws: Whitespace,
+        data_type: Box<DataType>,
+        gt_ws: Whitespace,
+    },
+}
+
+impl Node for DataType {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => match self {
+                DataType::Bool { ws, .. } => write!(f, "{}BOOL", t.f(ws)),
+                DataType::Int64 { ws, .. } => write!(f, "{}INT64", t.f(ws)),
+                DataType::String { ws, .. } => write!(f, "{}STRING", t.f(ws)),
+                DataType::Array {
+                    ws,
+                    lt_ws,
+                    data_type,
+                    gt_ws,
+                    ..
+                } => write!(
+                    f,
+                    "{}ARRAY{}<{}{}>",
+                    t.f(ws),
+                    t.f(lt_ws),
+                    t.f(data_type.as_ref()),
+                    t.f(gt_ws)
+                ),
+            },
+            Target::SQLite3 => match self {
+                DataType::Bool { ws, .. } | DataType::Int64 { ws, .. } => {
+                    write!(f, "{}INTEGER", t.f(ws))
+                }
+                DataType::String { ws, .. } => write!(f, "{}TEXT", t.f(ws)),
+                DataType::Array { ws, .. } => write!(f, "{}/*JSON*/TEXT", t.f(ws)),
+            },
         }
     }
 }
@@ -523,17 +677,163 @@ impl Node for Alias {
 pub struct FromClause {
     pub ws: Whitespace,
     pub span: Span,
-    pub table_name: TableName,
-    pub alias: Option<Alias>,
+    pub from_item: FromItem,
 }
 
 impl Node for FromClause {
     fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}FROM{}", t.f(&self.ws), t.f(&self.table_name))?;
-        if let Some(alias) = &self.alias {
-            write!(f, "{}", t.f(alias))?;
+        write!(f, "{}FROM{}", t.f(&self.ws), t.f(&self.from_item))
+    }
+}
+
+/// Items which may appear in a `FROM` clause.
+#[derive(Debug)]
+pub enum FromItem {
+    /// A table name, optionally with an alias.
+    TableName {
+        table_name: TableName,
+        alias: Option<Alias>,
+    },
+    /// A subquery, optionally with an alias.
+    Subquery {
+        paren1_ws: Whitespace,
+        query: Box<QueryStatement>,
+        paren2_ws: Whitespace,
+        alias: Option<Alias>,
+    },
+}
+
+impl Node for FromItem {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FromItem::TableName { table_name, alias } => {
+                write!(f, "{}", t.f(table_name))?;
+                if let Some(alias) = alias {
+                    write!(f, "{}", t.f(alias))?;
+                }
+                Ok(())
+            }
+            FromItem::Subquery {
+                paren1_ws,
+                query,
+                paren2_ws,
+                alias,
+            } => {
+                write!(
+                    f,
+                    "{}({}{})",
+                    t.f(paren1_ws),
+                    t.f(query.as_ref()),
+                    t.f(paren2_ws)
+                )?;
+                if let Some(alias) = alias {
+                    write!(f, "{}", t.f(alias))?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
+    }
+}
+
+/// A `CREATE TABLE` statement.
+#[derive(Debug)]
+pub struct CreateTableStatement {
+    pub create_ws: Whitespace,
+    pub span: Span,
+    pub or_replace: Option<OrReplace>,
+    pub table_ws: Whitespace,
+    pub table_name: TableName,
+    pub definition: CreateTableDefinition,
+}
+
+impl Node for CreateTableStatement {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", t.f(&self.create_ws))?;
+        match t {
+            Target::SQLite3 if self.or_replace.is_some() => {
+                // We need to convert this to a `DROP TABLE IF EXISTS` statement.
+                write!(f, "DROP TABLE IF EXISTS{};", t.f(&self.table_name))?;
+            }
+            _ => {}
+        }
+
+        write!(f, "CREATE")?;
+        if let Some(or_replace) = &self.or_replace {
+            write!(f, "{}", t.f(or_replace))?;
+        }
+        write!(
+            f,
+            "{}TABLE{}{}",
+            t.f(&self.table_ws),
+            t.f(&self.table_name),
+            t.f(&self.definition),
+        )
+    }
+}
+
+/// The `OR REPLACE` modifier.
+#[derive(Debug)]
+pub struct OrReplace {
+    pub or_ws: Whitespace,
+    pub span: Span,
+    pub replace_ws: Whitespace,
+}
+
+impl Node for OrReplace {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => write!(f, "{}OR{}REPLACE", t.f(&self.or_ws), t.f(&self.replace_ws)),
+            Target::SQLite3 => Ok(()),
+        }
+    }
+}
+
+/// The part of a `CREATE TABLE` statement that defines the columns.
+#[derive(Debug)]
+pub enum CreateTableDefinition {
+    /// ( column_definition [, ...] )
+    Columns {
+        paren1_ws: Whitespace,
+        columns: NodeVec<ColumnDefinition>,
+        paren2_ws: Whitespace,
+    },
+    /// AS select_statement
+    As {
+        as_ws: Whitespace,
+        query_statement: QueryStatement,
+    },
+}
+
+impl Node for CreateTableDefinition {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CreateTableDefinition::Columns {
+                paren1_ws,
+                columns,
+                paren2_ws,
+            } => {
+                write!(f, "{}(", t.f(paren1_ws))?;
+                columns.display_with_sep(t, f, ",")?;
+                write!(f, "{})", t.f(paren2_ws))
+            }
+            CreateTableDefinition::As {
+                as_ws,
+                query_statement: select_statement,
+            } => write!(f, "{}AS{}", t.f(as_ws), t.f(select_statement)),
+        }
+    }
+}
+
+/// A column definition.
+#[derive(Debug)]
+pub struct ColumnDefinition {
+    pub name: Identifier,
+    pub data_type: DataType,
+}
+
+impl Node for ColumnDefinition {
+    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.name), t.f(&self.data_type))
     }
 }
 
@@ -571,28 +871,42 @@ peg::parser! {
               } }
 
         rule statement() -> Statement
-            = s:select_statement() { Statement::Select(s) }
+            = s:query_statement() { Statement::Query(s) }
+            / c:create_table_statement() { Statement::CreateTable(c) }
 
-        rule select_statement() -> SelectStatement
-            = select:select()
+        rule query_statement() -> QueryStatement
+            = query_expression:query_expression() { QueryStatement { query_expression } }
+
+        rule query_expression() -> QueryExpression
+            = select_expression:select_expression() { QueryExpression::SelectExpression(select_expression) }
+            / paren1_ws:_ "(" query:query_statement() paren2_ws:_ ")" {
+                QueryExpression::Nested {
+                    paren1_ws,
+                    query: Box::new(query),
+                    paren2_ws,
+                }
+            }
+
+        rule select_expression() -> SelectExpression
+            = select_options:select_options()
               select_list:select_list()
               from_clause:from_clause()
             {
-                SelectStatement {
-                    select,
+                SelectExpression {
+                    select_options,
                     select_list,
                     from_clause,
                 }
             }
 
-        rule select() -> Select
+        rule select_options() -> SelectOptions
             = s:position!()
               ws:_
               k("SELECT")
               distinct:distinct()?
               e:position!()
             {
-                Select {
+                SelectOptions {
                     span: s..e,
                     ws,
                     distinct,
@@ -626,10 +940,44 @@ peg::parser! {
             }
 
         rule expression() -> Expression
-            = table_and_column_name:table_and_column_name() {
+            = ws:_ s:position!() k("NULL") e:position!() {
+                Expression::Null { ws, span: s..e, }
+            }
+            / table_and_column_name:table_and_column_name() {
                 Expression::TableAndColumnName(table_and_column_name)
             }
             / column_name:ident() { Expression::ColumnName(column_name) }
+            / ws:_ s:position!() k("CAST") paren_ws:_ "(" expression:expression() as_ws:_ k("AS") data_type:data_type() paren2_ws:_ ")" e:position!() {
+                Expression::Cast {
+                    ws,
+                    span: s..e,
+                    paren_ws,
+                    expression: Box::new(expression),
+                    as_ws,
+                    data_type,
+                    paren2_ws,
+                }
+            }
+
+        rule data_type() -> DataType
+            = ws:_ s:position!() k("BOOL") e:position!() {
+                DataType::Bool { ws, span: s..e }
+            }
+            / ws:_ s:position!() k("INT64") e:position!() {
+                DataType::Int64 { ws, span: s..e }
+            }
+            / ws:_ s:position!() k("STRING") e:position!() {
+                DataType::String { ws, span: s..e }
+            }
+            / ws:_ s:position!() k("ARRAY") lt_ws:_ "<" data_type:data_type() gt_ws:_ ">" e:position!() {
+                DataType::Array {
+                    ws,
+                    span: s..e,
+                    lt_ws,
+                    data_type: Box::new(data_type),
+                    gt_ws,
+                }
+            }
 
         rule alias() -> Alias
             = ws:_ s:position!() k("AS") ident:ident() e:position!() {
@@ -641,13 +989,73 @@ peg::parser! {
             }
 
         rule from_clause() -> FromClause
-            = ws:_ s:position!() k("FROM") table_name:table_name() alias:(alias()?) e:position!()
+            = ws:_ s:position!() k("FROM") from_item:from_item() e:position!()
             {
                 FromClause {
                     span: s..e,
                     ws,
-                    table_name,
+                    from_item,
+                }
+            }
+
+        rule from_item() -> FromItem
+            = table_name:table_name() alias:alias()? {
+                FromItem::TableName { table_name, alias }
+            }
+            / paren1_ws:_ "(" query:query_statement() paren2_ws:_ ")" alias:alias()? {
+                FromItem::Subquery {
+                    paren1_ws,
+                    query: Box::new(query),
+                    paren2_ws,
                     alias,
+                }
+            }
+
+        rule create_table_statement() -> CreateTableStatement
+            = create_ws:_ s:position!() k("CREATE") or_replace:or_replace()?
+              table_ws:_ k("TABLE") table_name:table_name()
+              definition:create_table_definition()
+              e:position!()
+            {
+                CreateTableStatement {
+                    create_ws,
+                    span: s..e,
+                    or_replace,
+                    table_ws,
+                    table_name,
+                    definition,
+                }
+            }
+
+        rule or_replace() -> OrReplace
+            = or_ws:_ s:position!() k("OR") replace_ws:_ k("REPLACE") e:position!() {
+                OrReplace {
+                    or_ws,
+                    span: s..e,
+                    replace_ws,
+                }
+            }
+
+        rule create_table_definition() -> CreateTableDefinition
+            = paren1_ws:_ "(" columns:sep(<column_definition()>, <",">) paren2_ws:_ ")" {
+                CreateTableDefinition::Columns {
+                    paren1_ws,
+                    columns,
+                    paren2_ws,
+                }
+            }
+            / as_ws:_ k("AS") query_statement:query_statement() {
+                CreateTableDefinition::As {
+                    as_ws,
+                    query_statement,
+                }
+            }
+
+        rule column_definition() -> ColumnDefinition
+            = name:ident() data_type:data_type() {
+                ColumnDefinition {
+                    name,
+                    data_type,
                 }
             }
 
@@ -734,6 +1142,7 @@ peg::parser! {
                     Ok(Identifier {
                         span: s..e,
                         ws,
+                        // TODO: Unescape.
                         text: id.to_string(),
                     })
                 }
@@ -742,6 +1151,7 @@ peg::parser! {
                 Identifier {
                     span: s..e,
                     ws,
+                    // TODO: Unescape.
                     text: id.to_string(),
                 }
             }
@@ -872,10 +1282,35 @@ mod tests {
                 r#"SELECT p.*, p.a AS c FROM t AS p"#,
             ),
             (
+                r#"SELECT * FROM (SELECT a FROM t) AS p"#,
+                r#"SELECT * FROM (SELECT a FROM t) AS p"#,
+            ),
+            (
                 r#"select * from `p-123`.`d`.`t`"#,
                 r#"SELECT * FROM `p-123`.d.t"#,
             ),
             (r#"select * from `d`.`t`"#, r#"SELECT * FROM d.t"#),
+            (
+                r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
+                r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
+            ),
+            (
+                r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS placeholder FROM t"#,
+                r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS placeholder FROM t"#,
+            ),
+            (
+                r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#,
+                r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#,
+            ),
+            (
+                r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
+                r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
+            ),
+            // TODO: Add features needed for query below.
+            //
+            // - `INNER JOIN`
+            // - `USING`
+            //
             // We're working up to being able to parse this.
             //
             // r#"
@@ -916,8 +1351,8 @@ mod tests {
 
             let sql = parsed.to_string_for_target(Target::SQLite3);
             println!("  SQLite3: {}", sql);
-            if let Err(err) = conn.prepare(&sql) {
-                panic!("failed to prepare SQL:\n{}\n{}", sql, err);
+            if let Err(err) = conn.execute_batch(&sql) {
+                panic!("failed to execute with SQLite3:\n{}\n{}", sql, err);
             }
         }
     }
