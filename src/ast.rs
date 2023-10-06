@@ -1,7 +1,22 @@
+//! NOTE to Copilot & pair programmers: I am currently converting this file from
+//! one whitespace handling technique to another. Specifically, the old system:
+//!
+//! - Stores leading whitespace in grammar rules.
+//! - Tracks spans in many grammar rules.
+//! - Does not store token or keyword text in the AST.
+//!
+//! The new system:
+//!
+//! - Will introduce a `Token` type that stores _trailing_ whitespace.
+//! - Will try to minimize span storage outside of `Token` types.
+//! - Will include `Token` values in the AST.
+//!
+//! I will work down from the top, converting as I go.
+
 // Don't bother with `Box`-ing everything for now. Allow huge enum values.
 #![allow(clippy::large_enum_variant)]
 
-use std::{fmt, ops::Range};
+use std::{borrow::Cow, fmt, ops::Range};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
 /// [`phf`](https://github.com/rust-phf/rust-phf), which generates "perfect hash
@@ -34,6 +49,11 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     "TRANSACTION", "TREAT", "TRIGGER", "TRUE", "TRY_CAST", "UNBOUNDED", "UNION",
     "UNIQUE", "UNNEST", "UPDATE", "USING", "VACUUM", "VALUES", "VIEW",
     "VIRTUAL", "WHEN", "WHERE", "WINDOW", "WITH", "WITHIN", "WITHOUT",
+
+    // Types. These aren't really keywords but we treat them as such?
+    //
+    // TODO: Figure this out.
+    "BOOL", "INT64", "STRING",
 };
 
 /// We represent a span in our source code using a Rust range. These are easy
@@ -50,31 +70,32 @@ pub enum Target {
 
 impl Target {
     /// Format this node for the given target.
-    fn f<T: Node>(self, node: &T) -> FormatForTarget<'_, T> {
+    fn f<T: DisplayForTarget>(self, node: &T) -> FormatForTarget<'_, T> {
         FormatForTarget { target: self, node }
     }
 }
 
 /// Wrapper for formatting a node for a given target.
-struct FormatForTarget<'a, T: Node> {
+struct FormatForTarget<'a, T: DisplayForTarget> {
     target: Target,
     node: &'a T,
 }
 
-impl<'a, T: Node> fmt::Display for FormatForTarget<'a, T> {
+impl<'a, T: DisplayForTarget> fmt::Display for FormatForTarget<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.node.fmt_for_target(self.target, f)
+        self.node.fmt(self.target, f)
     }
 }
 
-/// A node in our abstract syntax tree.
-pub trait Node: fmt::Debug + Sized {
+/// A version of [`fmt::Display`] that can be customized for different
+/// [`Target`]s.
+pub trait DisplayForTarget: Sized {
     // The source span corresponding to this node.
     // fn span(&self) -> Span;
 
     /// Format this node as its SQLite3 equivalent. This would need to be replaced
     /// with something a bit more compiler-like to support full transpilation.
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
     /// Convert this node to a string for the given target.
     fn to_string_for_target(&self, t: Target) -> String {
@@ -82,6 +103,32 @@ pub trait Node: fmt::Debug + Sized {
     }
 }
 
+impl<T: DisplayForTarget> DisplayForTarget for Box<T> {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(t, f)
+    }
+}
+
+impl<T: DisplayForTarget> DisplayForTarget for Option<T> {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(node) = self {
+            node.fmt(t, f)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<T: DisplayForTarget> DisplayForTarget for Vec<T> {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for node in self.iter() {
+            node.fmt(t, f)?;
+        }
+        Ok(())
+    }
+}
+
+/*
 /// Because we're implementing a transpiler, we want to be able to keep track of
 /// the original whitespace and comments used in the source code. We'll use this
 /// to generate output that looks as close to the original source as possible.
@@ -121,6 +168,134 @@ impl Node for Whitespace {
         }
     }
 }
+*/
+
+/// Our basic token type. This is used for all punctuation and keywords.
+#[derive(Clone, Debug)]
+pub struct Token {
+    pub span: Span,
+    pub ws_offset: usize,
+    pub text: String,
+}
+
+// We have a few functions that aren't used yet.
+#[allow(dead_code)]
+impl Token {
+    /// Is this token a keyword?
+    pub fn is_keyword(&self) -> bool {
+        KEYWORDS.contains(self.text.to_ascii_uppercase().as_str())
+    }
+
+    /// Get the token's string.
+    pub fn token_str(&self) -> &str {
+        &self.text[0..self.ws_offset]
+    }
+
+    /// Get the token's span.
+    pub fn token_span(&self) -> Span {
+        self.span.start..self.span.start + self.ws_offset
+    }
+
+    /// Create a new token, changing the token string. This is useful where
+    /// tokens need to be normalized. Does not fix `span`, which always
+    /// corresponds to the original source code.
+    pub fn with_token_str(&self, token_str: &str) -> Token {
+        Token {
+            span: self.span.clone(),
+            ws_offset: token_str.len(),
+            text: format!("{}{}", token_str, &self.text[self.ws_offset..]),
+        }
+    }
+
+    /// "Erase" a token that we do not want to appear. This is useful for when
+    /// we want to remove a token from the transpiled output for a specific
+    /// database. However, we need to be careful not to accidentally connect the
+    /// tokens before and after the erased token. We will insert whitespace if
+    /// needed. Does not fix `span`, which always corresponds to the original
+    /// source code.
+    pub fn with_erased_token_str(&self) -> Token {
+        if self.has_ws() {
+            // We can just replace the token and rely on the existing
+            // whitespace to separate any surrounding tokens.
+            self.with_token_str("")
+        } else {
+            // We need to insert trailing whitespace.
+            Token {
+                span: self.span.clone(),
+                ws_offset: 0,
+                text: " ".to_owned(),
+            }
+        }
+    }
+
+    /// Does this token have trailing whitespace?
+    pub fn has_ws(&self) -> bool {
+        self.ws_offset < self.text.len()
+    }
+
+    /// Get the token's whitespace.
+    pub fn ws_str(&self) -> &str {
+        &self.text[self.ws_offset..]
+    }
+
+    /// Get the token's whitespace span.
+    pub fn ws_span(&self) -> Span {
+        self.span.start + self.ws_offset..self.span.end
+    }
+
+    /// Return only the whitespace portion of this token.
+    pub fn ws_only(&self) -> Token {
+        Token {
+            span: self.ws_span(),
+            ws_offset: 0,
+            text: self.ws_str().to_owned(),
+        }
+    }
+
+    /// Make sure this token has at least some trailing whitespace. This is
+    /// used when replacing a punctuation token with an identifier token, to
+    /// make sure we don't accidentally concatenate with the next token.
+    pub fn ensure_ws(&self) -> Cow<Token> {
+        if self.has_ws() {
+            Cow::Borrowed(self)
+        } else {
+            Cow::Owned(Token {
+                span: self.span.clone(),
+                ws_offset: self.text.len(),
+                text: format!("{} ", self.text),
+            })
+        }
+    }
+}
+
+impl DisplayForTarget for Token {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => write!(f, "{}", self.text),
+            Target::SQLite3 => {
+                // Write out the token itself.
+                write!(f, "{}", self.token_str())?;
+
+                // We need to fix `#` comments, which are not supported by SQLite3.
+                let mut in_hash_comment = false;
+                for c in self.ws_str().chars() {
+                    if in_hash_comment {
+                        write!(f, "{}", c)?;
+                        if c == '\n' {
+                            in_hash_comment = false;
+                        }
+                    } else if c == '#' {
+                        write!(f, "--")?;
+                        in_hash_comment = true;
+                    } else {
+                        write!(f, "{}", c)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 /// A vector which contains a list of nodes, along with any whitespace that
 /// appears after a node but before any separating punctuation. This can be
@@ -128,24 +303,23 @@ impl Node for Whitespace {
 #[derive(Debug)]
 pub struct NodeVec<T: fmt::Debug> {
     pub nodes: Vec<T>,
-    pub trailing_ws: Vec<Whitespace>,
+    pub separators: Vec<Token>,
 }
 
-impl<T: Node> NodeVec<T> {
-    pub fn display_with_sep(
-        &self,
-        t: Target,
-        f: &mut fmt::Formatter<'_>,
-        sep: &str,
-    ) -> fmt::Result {
+impl<T: fmt::Debug + DisplayForTarget> DisplayForTarget for NodeVec<T> {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, node) in self.nodes.iter().enumerate() {
             write!(f, "{}", t.f(node))?;
-            if i < self.trailing_ws.len() {
-                write!(f, "{}", t.f(&self.trailing_ws[i]))?;
-                match t {
-                    _ if i + 1 < self.nodes.len() => write!(f, "{}", sep)?,
-                    Target::BigQuery => write!(f, "{}", sep)?,
-                    Target::SQLite3 => write!(f, " ")?,
+            if i < self.separators.len() {
+                let sep = &self.separators[i];
+                if i + 1 < self.nodes.len() {
+                    write!(f, "{}", t.f(sep))?;
+                } else {
+                    // Trailing separator.
+                    match t {
+                        Target::BigQuery => write!(f, "{}", t.f(sep))?,
+                        Target::SQLite3 => write!(f, "{}", t.f(&sep.with_erased_token_str()))?,
+                    }
                 }
             }
         }
@@ -156,8 +330,10 @@ impl<T: Node> NodeVec<T> {
 /// An identifier, such as a column name.
 #[derive(Debug)]
 pub struct Identifier {
-    pub ws: Whitespace,
-    pub span: Span,
+    /// Our original token.
+    pub token: Token,
+
+    /// Our unescaped text.
     pub text: String,
 }
 
@@ -177,29 +353,29 @@ impl Identifier {
         chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
-    // Does this need to be quoted?
+    // Does this identifier need to be quoted?
     fn needs_quotes(&self) -> bool {
         self.is_keyword() || !self.is_c_ident()
     }
 }
 
-impl Node for Identifier {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for Identifier {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.needs_quotes() {
             match t {
                 Target::BigQuery => {
-                    write!(f, "{}`", t.f(&self.ws))?;
+                    write!(f, "`")?;
                     escape_for_bigquery(&self.text, f)?;
-                    write!(f, "`")
+                    write!(f, "`{}", t.f(&self.token.ws_only()))
                 }
                 Target::SQLite3 => {
-                    write!(f, "{}\"", t.f(&self.ws))?;
+                    write!(f, "\"")?;
                     escape_for_sqlite3(&self.text, f)?;
-                    write!(f, "\"")
+                    write!(f, "\"{}", t.f(&self.token.ws_only()))
                 }
             }
         } else {
-            write!(f, "{}{}", t.f(&self.ws), self.text)
+            write!(f, "{}{}", self.text, t.f(&self.token.ws_only()))
         }
     }
 }
@@ -235,14 +411,14 @@ fn escape_for_sqlite3(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 pub enum TableName {
     ProjectDatasetTable {
         project: Identifier,
-        ws: Whitespace,
+        dot1: Token,
         dataset: Identifier,
-        ws2: Whitespace,
+        dot2: Token,
         table: Identifier,
     },
     DatasetTable {
         dataset: Identifier,
-        ws: Whitespace,
+        dot: Token,
         table: Identifier,
     },
     Table {
@@ -250,29 +426,33 @@ pub enum TableName {
     },
 }
 
-impl Node for TableName {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for TableName {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::BigQuery => match self {
                 TableName::ProjectDatasetTable {
                     project,
-                    ws,
+                    dot1,
                     dataset,
-                    ws2,
+                    dot2,
                     table,
                 } => {
                     write!(
                         f,
-                        "{}{}.{}{}.{}",
+                        "{}{}{}{}{}",
                         t.f(project),
-                        t.f(ws),
+                        t.f(dot1),
                         t.f(dataset),
-                        t.f(ws2),
+                        t.f(dot2),
                         t.f(table)
                     )
                 }
-                TableName::DatasetTable { dataset, ws, table } => {
-                    write!(f, "{}{}.{}", t.f(dataset), t.f(ws), t.f(table))
+                TableName::DatasetTable {
+                    dataset,
+                    dot,
+                    table,
+                } => {
+                    write!(f, "{}{}{}", t.f(dataset), t.f(dot), t.f(table))
                 }
                 TableName::Table { table } => write!(f, "{}", t.f(table)),
             },
@@ -283,20 +463,20 @@ impl Node for TableName {
                     table,
                     ..
                 } => {
-                    write!(f, "{}\"", t.f(&project.ws))?;
+                    write!(f, "\"")?;
                     escape_for_sqlite3(&project.text, f)?;
                     write!(f, ".")?;
                     escape_for_sqlite3(&dataset.text, f)?;
                     write!(f, ".")?;
                     escape_for_sqlite3(&table.text, f)?;
-                    write!(f, "\"")
+                    write!(f, "\"{}", t.f(&table.token.ws_only()))
                 }
                 TableName::DatasetTable { dataset, table, .. } => {
-                    write!(f, "{}\"", t.f(&dataset.ws))?;
+                    write!(f, "\"")?;
                     escape_for_sqlite3(&dataset.text, f)?;
                     write!(f, ".")?;
                     escape_for_sqlite3(&table.text, f)?;
-                    write!(f, "\"")
+                    write!(f, "\"{}", t.f(&table.token.ws_only()))
                 }
                 TableName::Table { table } => write!(f, "{}", t.f(table)),
             },
@@ -308,17 +488,17 @@ impl Node for TableName {
 #[derive(Debug)]
 pub struct TableAndColumnName {
     pub table_name: TableName,
-    pub ws: Whitespace,
+    pub dot: Token,
     pub column_name: Identifier,
 }
 
-impl Node for TableAndColumnName {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for TableAndColumnName {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}.{}",
+            "{}{}{}",
             t.f(&self.table_name),
-            t.f(&self.ws),
+            t.f(&self.dot),
             t.f(&self.column_name)
         )
     }
@@ -327,16 +507,18 @@ impl Node for TableAndColumnName {
 /// An entire SQL program.
 #[derive(Debug)]
 pub struct SqlProgram {
+    /// Any whitespace that appears before the first statement. This is represented
+    /// as a token with an empty `token_str()`.
+    pub leading_ws: Token,
+
     /// For now, just handle single statements; BigQuery DDL is messy and maybe
     /// out of scope.
     pub statement: Statement,
-    /// Any trailing whitespace after the final token in the program.
-    pub trailing_ws: Whitespace,
 }
 
-impl Node for SqlProgram {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.statement), t.f(&self.trailing_ws))
+impl DisplayForTarget for SqlProgram {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.leading_ws), t.f(&self.statement))
     }
 }
 
@@ -349,8 +531,8 @@ pub enum Statement {
     DropView(DropViewStatement),
 }
 
-impl Node for Statement {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for Statement {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Statement::Query(s) => write!(f, "{}", t.f(s)),
             Statement::CreateTable(s) => write!(f, "{}", t.f(s)),
@@ -366,8 +548,8 @@ pub struct QueryStatement {
     pub query_expression: QueryExpression,
 }
 
-impl Node for QueryStatement {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for QueryStatement {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", t.f(&self.query_expression))
     }
 }
@@ -382,41 +564,35 @@ impl Node for QueryStatement {
 pub enum QueryExpression {
     SelectExpression(SelectExpression),
     Nested {
-        paren1_ws: Whitespace,
+        paren1: Token,
         query: Box<QueryStatement>,
-        paren2_ws: Whitespace,
+        paren2: Token,
     },
 }
 
-impl Node for QueryExpression {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for QueryExpression {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             QueryExpression::SelectExpression(s) => write!(f, "{}", t.f(s)),
             QueryExpression::Nested {
-                paren1_ws,
+                paren1,
                 query,
-                paren2_ws,
+                paren2,
             } if t == Target::SQLite3 => {
                 // Throw in extra spaces for the erased parens.
                 write!(
                     f,
-                    "{} {}{} ",
-                    t.f(paren1_ws),
-                    t.f(query.as_ref()),
-                    t.f(paren2_ws)
+                    "{}{}{}",
+                    t.f(&paren1.with_erased_token_str()),
+                    t.f(query),
+                    t.f(&paren2.with_erased_token_str())
                 )
             }
             QueryExpression::Nested {
-                paren1_ws,
+                paren1,
                 query,
-                paren2_ws,
-            } => write!(
-                f,
-                "{}({}{})",
-                t.f(paren1_ws),
-                t.f(query.as_ref()),
-                t.f(paren2_ws)
-            ),
+                paren2,
+            } => write!(f, "{}{}{}", t.f(paren1), t.f(query), t.f(paren2)),
         }
     }
 }
@@ -434,50 +610,41 @@ pub struct SelectExpression {
     // pub limit: Option<Limit>,
 }
 
-impl Node for SelectExpression {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for SelectExpression {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}{}",
+            "{}{}{}{}",
             t.f(&self.select_options),
             t.f(&self.select_list),
-            t.f(&self.from_clause)
-        )?;
-        if let Some(where_clause) = &self.where_clause {
-            write!(f, "{}", t.f(where_clause))?;
-        }
-        Ok(())
+            t.f(&self.from_clause),
+            t.f(&self.where_clause)
+        )
     }
 }
 
 /// The head of a `SELECT`, including any modifiers.
 #[derive(Debug)]
 pub struct SelectOptions {
-    pub ws: Whitespace,
-    pub span: Span,
+    pub select_token: Token,
     pub distinct: Option<Distinct>,
 }
 
-impl Node for SelectOptions {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}SELECT", t.f(&self.ws))?;
-        if let Some(distinct) = &self.distinct {
-            write!(f, "{}", t.f(distinct))?;
-        }
-        Ok(())
+impl DisplayForTarget for SelectOptions {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.select_token), t.f(&self.distinct))
     }
 }
 
 /// The `DISTINCT` modifier.
 #[derive(Debug)]
 pub struct Distinct {
-    pub ws: Whitespace,
-    pub span: Span,
+    pub distinct_token: Token,
 }
 
-impl Node for Distinct {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}DISTINCT", t.f(&self.ws))
+impl DisplayForTarget for Distinct {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", t.f(&self.distinct_token))
     }
 }
 
@@ -504,9 +671,9 @@ pub struct SelectList {
     pub items: NodeVec<SelectListItem>,
 }
 
-impl Node for SelectList {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.items.display_with_sep(t, f, ",")
+impl DisplayForTarget for SelectList {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", t.f(&self.items))
     }
 }
 
@@ -515,41 +682,34 @@ impl Node for SelectList {
 pub enum SelectListItem {
     /// An expression, optionally with an alias.
     Expression {
-        span: Span,
         expression: Expression,
         alias: Option<Alias>,
     },
     /// A `*` wildcard.
-    Wildcard { span: Span, ws: Whitespace },
+    Wildcard { star: Token },
     /// A `table.*` wildcard.
     TableNameWildcard {
-        span: Span,
         table_name: TableName,
-        dot_ws: Whitespace,
-        star_ws: Whitespace,
+        dot: Token,
+        star: Token,
     },
 }
 
-impl Node for SelectListItem {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for SelectListItem {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SelectListItem::Expression {
                 expression, alias, ..
             } => {
-                write!(f, "{}", t.f(expression))?;
-                if let Some(alias) = alias {
-                    write!(f, "{}", t.f(alias))?;
-                }
-                Ok(())
+                write!(f, "{}{}", t.f(expression), t.f(alias))
             }
-            SelectListItem::Wildcard { ws, .. } => write!(f, "{}*", &t.f(ws)),
+            SelectListItem::Wildcard { star } => write!(f, "{}", &t.f(star)),
             SelectListItem::TableNameWildcard {
                 table_name,
-                dot_ws,
-                star_ws,
-                ..
+                dot,
+                star,
             } => {
-                write!(f, "{}{}.{}*", t.f(table_name), t.f(dot_ws), t.f(star_ws))
+                write!(f, "{}{}{}", t.f(table_name), t.f(dot), t.f(star))
             }
         }
     }
@@ -559,159 +719,121 @@ impl Node for SelectListItem {
 #[derive(Debug)]
 pub enum Expression {
     Literal {
-        ws: Whitespace,
-        span: Span,
-        literal: Literal,
+        token: Token,
+        value: LiteralValue,
     },
     Null {
-        ws: Whitespace,
-        span: Span,
+        null_token: Token,
     },
     ColumnName(Identifier),
     TableAndColumnName(TableAndColumnName),
     Cast {
-        ws: Whitespace,
-        span: Span,
-        paren_ws: Whitespace,
+        cast_token: Token,
+        paren1: Token,
         expression: Box<Expression>,
-        as_ws: Whitespace,
+        as_token: Token,
         data_type: DataType,
-        paren2_ws: Whitespace,
+        paren2: Token,
     },
     Binop {
         left: Box<Expression>,
-        op_ws: Whitespace,
-        op: Binop,
+        op_token: Token,
         right: Box<Expression>,
     },
 }
 
-impl Node for Expression {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for Expression {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expression::Literal { ws, literal, .. } => write!(f, "{}{}", t.f(ws), t.f(literal)),
-            Expression::Null { ws, .. } => write!(f, "{}NULL", t.f(ws)),
+            Expression::Literal { token, .. } => write!(f, "{}", t.f(token)),
+            Expression::Null { null_token } => write!(f, "{}", t.f(null_token)),
             Expression::ColumnName(ident) => write!(f, "{}", t.f(ident)),
             Expression::TableAndColumnName(table_and_column_name) => {
                 write!(f, "{}", t.f(table_and_column_name))
             }
             Expression::Cast {
-                ws,
-                paren_ws,
+                cast_token,
+                paren1,
                 expression,
-                as_ws,
+                as_token,
                 data_type,
-                paren2_ws,
-                ..
+                paren2,
             } => {
                 write!(
                     f,
-                    "{}CAST{}({}{}AS{}{})",
-                    t.f(ws),
-                    t.f(paren_ws),
-                    t.f(expression.as_ref()),
-                    t.f(as_ws),
+                    "{}{}{}{}{}{}",
+                    t.f(cast_token),
+                    t.f(paren1),
+                    t.f(expression),
+                    t.f(as_token),
                     t.f(data_type),
-                    t.f(paren2_ws)
+                    t.f(paren2)
                 )
             }
             Expression::Binop {
                 left,
-                op_ws,
-                op,
+                op_token,
                 right,
-            } => write!(
-                f,
-                "{}{}{}{}",
-                t.f(left.as_ref()),
-                t.f(op_ws),
-                t.f(op),
-                t.f(right.as_ref())
-            ),
+            } => write!(f, "{}{}{}", t.f(left), t.f(op_token), t.f(right)),
         }
     }
 }
 
 /// A literal value.
 #[derive(Debug)]
-pub enum Literal {
+pub enum LiteralValue {
     Int64(i64),
-}
-
-impl Node for Literal {
-    fn fmt_for_target(&self, _t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Literal::Int64(i) => write!(f, "{}", i),
-        }
-    }
-}
-
-/// A binary operator.
-#[derive(Debug)]
-pub enum Binop {
-    Gte,
-}
-
-impl Node for Binop {
-    fn fmt_for_target(&self, _t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Binop::Gte => write!(f, ">="),
-        }
-    }
 }
 
 /// Data types.
 #[derive(Debug)]
 pub enum DataType {
-    Bool {
-        ws: Whitespace,
-        span: Span,
-    },
-    Int64 {
-        ws: Whitespace,
-        span: Span,
-    },
-    String {
-        ws: Whitespace,
-        span: Span,
-    },
+    Bool(Token),
+    Int64(Token),
+    String(Token),
     Array {
-        ws: Whitespace,
-        span: Span,
-        lt_ws: Whitespace,
+        array_token: Token,
+        lt: Token,
         data_type: Box<DataType>,
-        gt_ws: Whitespace,
+        gt: Token,
     },
 }
 
-impl Node for DataType {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for DataType {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::BigQuery => match self {
-                DataType::Bool { ws, .. } => write!(f, "{}BOOL", t.f(ws)),
-                DataType::Int64 { ws, .. } => write!(f, "{}INT64", t.f(ws)),
-                DataType::String { ws, .. } => write!(f, "{}STRING", t.f(ws)),
+                DataType::Bool(token) | DataType::Int64(token) | DataType::String(token) => {
+                    write!(f, "{}", t.f(token))
+                }
                 DataType::Array {
-                    ws,
-                    lt_ws,
+                    array_token,
+                    lt,
                     data_type,
-                    gt_ws,
-                    ..
+                    gt,
                 } => write!(
                     f,
-                    "{}ARRAY{}<{}{}>",
-                    t.f(ws),
-                    t.f(lt_ws),
-                    t.f(data_type.as_ref()),
-                    t.f(gt_ws)
+                    "{}{}{}{}",
+                    t.f(array_token),
+                    t.f(lt),
+                    t.f(data_type),
+                    t.f(gt)
                 ),
             },
             Target::SQLite3 => match self {
-                DataType::Bool { ws, .. } | DataType::Int64 { ws, .. } => {
-                    write!(f, "{}INTEGER", t.f(ws))
+                DataType::Bool(token) | DataType::Int64(token) => {
+                    write!(f, "{}", t.f(&token.with_token_str("INTEGER")))
                 }
-                DataType::String { ws, .. } => write!(f, "{}TEXT", t.f(ws)),
-                DataType::Array { ws, .. } => write!(f, "{}/*JSON*/TEXT", t.f(ws)),
+                DataType::String(token) => write!(f, "{}", t.f(&token.with_token_str("TEXT"))),
+                DataType::Array { gt, .. } => {
+                    write!(
+                        f,
+                        "{}",
+                        // Force whitespace because we're replacing a
+                        // punctuation token with an identifier token.
+                        t.f(gt.with_token_str("/*JSON*/TEXT").ensure_ws().as_ref())
+                    )
+                }
             },
         }
     }
@@ -720,14 +842,13 @@ impl Node for DataType {
 /// An `AS` alias.
 #[derive(Debug)]
 pub struct Alias {
-    pub ws: Whitespace,
-    pub span: Span,
+    pub as_token: Token,
     pub ident: Identifier,
 }
 
-impl Node for Alias {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}AS{}", t.f(&self.ws), t.f(&self.ident))
+impl DisplayForTarget for Alias {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.as_token), t.f(&self.ident))
     }
 }
 
@@ -736,15 +857,14 @@ impl Node for Alias {
 /// TODO: We're keeping this simple for now.
 #[derive(Debug)]
 pub struct FromClause {
-    pub ws: Whitespace,
-    pub span: Span,
+    pub from_token: Token,
     pub from_item: FromItem,
     pub join_operations: Vec<JoinOperation>,
 }
 
-impl Node for FromClause {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}FROM{}", t.f(&self.ws), t.f(&self.from_item))?;
+impl DisplayForTarget for FromClause {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.from_token), t.f(&self.from_item))?;
         for join_operation in &self.join_operations {
             write!(f, "{}", t.f(join_operation))?;
         }
@@ -760,42 +880,36 @@ pub enum FromItem {
         table_name: TableName,
         alias: Option<Alias>,
     },
-    /// A subquery, optionally with an alias.
+    /// A subquery, optionally with an alias. These parens belong here in the
+    /// grammar; they're different from the ones in [`QueryExpression`].
     Subquery {
-        paren1_ws: Whitespace,
+        paren1: Token,
         query: Box<QueryStatement>,
-        paren2_ws: Whitespace,
+        paren2: Token,
         alias: Option<Alias>,
     },
 }
 
-impl Node for FromItem {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for FromItem {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FromItem::TableName { table_name, alias } => {
-                write!(f, "{}", t.f(table_name))?;
-                if let Some(alias) = alias {
-                    write!(f, "{}", t.f(alias))?;
-                }
-                Ok(())
+                write!(f, "{}{}", t.f(table_name), t.f(alias))
             }
             FromItem::Subquery {
-                paren1_ws,
+                paren1,
                 query,
-                paren2_ws,
+                paren2,
                 alias,
             } => {
                 write!(
                     f,
-                    "{}({}{})",
-                    t.f(paren1_ws),
-                    t.f(query.as_ref()),
-                    t.f(paren2_ws)
-                )?;
-                if let Some(alias) = alias {
-                    write!(f, "{}", t.f(alias))?;
-                }
-                Ok(())
+                    "{}{}{}{}",
+                    t.f(paren1),
+                    t.f(query),
+                    t.f(paren2),
+                    t.f(alias)
+                )
             }
         }
     }
@@ -807,26 +921,26 @@ pub enum JoinOperation {
     /// A `JOIN` clause.
     ConditionJoin {
         join_type: JoinType,
-        join_ws: Whitespace,
+        join_token: Token,
         from_item: FromItem,
         operator: ConditionJoinOperator,
     },
 }
 
-impl Node for JoinOperation {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for JoinOperation {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JoinOperation::ConditionJoin {
                 join_type,
-                join_ws,
+                join_token,
                 from_item,
                 operator,
             } => {
                 write!(
                     f,
-                    "{}{}JOIN{}{}",
+                    "{}{}{}{}",
                     t.f(join_type),
-                    t.f(join_ws),
+                    t.f(join_token),
                     t.f(from_item),
                     t.f(operator)
                 )
@@ -838,19 +952,48 @@ impl Node for JoinOperation {
 /// The type of a join.
 #[derive(Debug)]
 pub enum JoinType {
-    Inner { ws: Whitespace, span: Span },
-    Left { ws: Whitespace, span: Span },
-    Right { ws: Whitespace, span: Span },
-    Full { ws: Whitespace, span: Span },
+    Inner {
+        inner_token: Option<Token>,
+    },
+    Left {
+        left_token: Token,
+        outer_token: Option<Token>,
+    },
+    Right {
+        right_token: Token,
+        outer_token: Option<Token>,
+    },
+    Full {
+        full_token: Token,
+        outer_token: Option<Token>,
+    },
 }
 
-impl Node for JoinType {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for JoinType {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // TODO: Clean this up with support for printing `Option<T>`.
         match self {
-            JoinType::Inner { ws, .. } => write!(f, "{}INNER", t.f(ws)),
-            JoinType::Left { ws, .. } => write!(f, "{}LEFT", t.f(ws)),
-            JoinType::Right { ws, .. } => write!(f, "{}RIGHT", t.f(ws)),
-            JoinType::Full { ws, .. } => write!(f, "{}FULL", t.f(ws)),
+            JoinType::Inner { inner_token } => {
+                write!(f, "{}", t.f(inner_token))
+            }
+            JoinType::Left {
+                left_token,
+                outer_token,
+            } => {
+                write!(f, "{}{}", t.f(left_token), t.f(outer_token))
+            }
+            JoinType::Right {
+                right_token,
+                outer_token,
+            } => {
+                write!(f, "{}{}", t.f(right_token), t.f(outer_token))
+            }
+            JoinType::Full {
+                full_token,
+                outer_token,
+            } => {
+                write!(f, "{}{}", t.f(full_token), t.f(outer_token))
+            }
         }
     }
 }
@@ -859,27 +1002,30 @@ impl Node for JoinType {
 #[derive(Debug)]
 pub enum ConditionJoinOperator {
     Using {
-        ws: Whitespace,
-        span: Span,
-        paren1_ws: Whitespace,
+        using_token: Token,
+        paren1: Token,
         column_names: NodeVec<Identifier>,
-        paren2_ws: Whitespace,
+        paren2: Token,
     },
 }
 
-impl Node for ConditionJoinOperator {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for ConditionJoinOperator {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConditionJoinOperator::Using {
-                ws,
-                paren1_ws,
+                using_token,
+                paren1,
                 column_names,
-                paren2_ws,
-                ..
+                paren2,
             } => {
-                write!(f, "{}USING{}(", t.f(ws), t.f(paren1_ws))?;
-                column_names.display_with_sep(t, f, ",")?;
-                write!(f, "{})", t.f(paren2_ws))
+                write!(
+                    f,
+                    "{}{}{}{}",
+                    t.f(using_token),
+                    t.f(paren1),
+                    t.f(column_names),
+                    t.f(paren2),
+                )
             }
         }
     }
@@ -888,47 +1034,41 @@ impl Node for ConditionJoinOperator {
 /// A `WHERE` clause.
 #[derive(Debug)]
 pub struct WhereClause {
-    pub ws: Whitespace,
-    pub span: Span,
+    pub where_token: Token,
     pub expression: Expression,
 }
 
-impl Node for WhereClause {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}WHERE{}", t.f(&self.ws), t.f(&self.expression))
+impl DisplayForTarget for WhereClause {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.where_token), t.f(&self.expression))
     }
 }
 
 /// A `CREATE TABLE` statement.
 #[derive(Debug)]
 pub struct CreateTableStatement {
-    pub create_ws: Whitespace,
-    pub span: Span,
+    pub create_token: Token,
     pub or_replace: Option<OrReplace>,
-    pub table_ws: Whitespace,
+    pub table_token: Token,
     pub table_name: TableName,
     pub definition: CreateTableDefinition,
 }
 
-impl Node for CreateTableStatement {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", t.f(&self.create_ws))?;
+impl DisplayForTarget for CreateTableStatement {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::SQLite3 if self.or_replace.is_some() => {
                 // We need to convert this to a `DROP TABLE IF EXISTS` statement.
-                write!(f, "DROP TABLE IF EXISTS{};", t.f(&self.table_name))?;
+                write!(f, "DROP TABLE IF EXISTS {};", t.f(&self.table_name))?;
             }
             _ => {}
         }
-
-        write!(f, "CREATE")?;
-        if let Some(or_replace) = &self.or_replace {
-            write!(f, "{}", t.f(or_replace))?;
-        }
         write!(
             f,
-            "{}TABLE{}{}",
-            t.f(&self.table_ws),
+            "{}{}{}{}{}",
+            t.f(&self.create_token),
+            t.f(&self.or_replace),
+            t.f(&self.table_token),
             t.f(&self.table_name),
             t.f(&self.definition),
         )
@@ -938,37 +1078,33 @@ impl Node for CreateTableStatement {
 /// A `CREATE VIEW` statement.
 #[derive(Debug)]
 pub struct CreateViewStatement {
-    pub create_ws: Whitespace,
-    pub span: Span,
+    pub create_token: Token,
     pub or_replace: Option<OrReplace>,
-    pub view_ws: Whitespace,
+    pub view_token: Token,
     pub view_name: TableName,
-    // TODO: Factor out shared code from
-    pub as_ws: Whitespace,
+    // TODO: Factor out shared `AS` code from [`CreateTableDefinition`].
+    pub as_token: Token,
     pub query: QueryStatement,
 }
 
-impl Node for CreateViewStatement {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", t.f(&self.create_ws))?;
+impl DisplayForTarget for CreateViewStatement {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::SQLite3 if self.or_replace.is_some() => {
-                // We need to convert this to a `DROP VIEW IF EXISTS` statement.
-                write!(f, "DROP VIEW IF EXISTS{};", t.f(&self.view_name))?;
+                // We need to convert add a `DROP VIEW IF EXISTS` statement.
+                write!(f, "DROP VIEW IF EXISTS {};", t.f(&self.view_name))?;
             }
             _ => {}
         }
 
-        write!(f, "CREATE")?;
-        if let Some(or_replace) = &self.or_replace {
-            write!(f, "{}", t.f(or_replace))?;
-        }
         write!(
             f,
-            "{}VIEW{}{}AS{}",
-            t.f(&self.view_ws),
+            "{}{}{}{}{}{}",
+            t.f(&self.create_token),
+            t.f(&self.or_replace),
+            t.f(&self.view_token),
             t.f(&self.view_name),
-            t.f(&self.as_ws),
+            t.f(&self.as_token),
             t.f(&self.query),
         )
     }
@@ -977,15 +1113,14 @@ impl Node for CreateViewStatement {
 /// The `OR REPLACE` modifier.
 #[derive(Debug)]
 pub struct OrReplace {
-    pub or_ws: Whitespace,
-    pub span: Span,
-    pub replace_ws: Whitespace,
+    pub or_token: Token,
+    pub replace_token: Token,
 }
 
-impl Node for OrReplace {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for OrReplace {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => write!(f, "{}OR{}REPLACE", t.f(&self.or_ws), t.f(&self.replace_ws)),
+            Target::BigQuery => write!(f, "{}{}", t.f(&self.or_token), t.f(&self.replace_token)),
             Target::SQLite3 => Ok(()),
         }
     }
@@ -996,33 +1131,33 @@ impl Node for OrReplace {
 pub enum CreateTableDefinition {
     /// ( column_definition [, ...] )
     Columns {
-        paren1_ws: Whitespace,
+        paren1: Token,
         columns: NodeVec<ColumnDefinition>,
-        paren2_ws: Whitespace,
+        paren2: Token,
     },
     /// AS select_statement
     As {
-        as_ws: Whitespace,
+        as_token: Token,
         query_statement: QueryStatement,
     },
 }
 
-impl Node for CreateTableDefinition {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for CreateTableDefinition {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CreateTableDefinition::Columns {
-                paren1_ws,
+                paren1,
                 columns,
-                paren2_ws,
+                paren2,
             } => {
-                write!(f, "{}(", t.f(paren1_ws))?;
-                columns.display_with_sep(t, f, ",")?;
-                write!(f, "{})", t.f(paren2_ws))
+                write!(f, "{}{}{}", t.f(paren1), t.f(columns), t.f(paren2))
             }
             CreateTableDefinition::As {
-                as_ws,
-                query_statement: select_statement,
-            } => write!(f, "{}AS{}", t.f(as_ws), t.f(select_statement)),
+                as_token,
+                query_statement,
+            } => {
+                write!(f, "{}{}", t.f(as_token), t.f(query_statement))
+            }
         }
     }
 }
@@ -1034,8 +1169,8 @@ pub struct ColumnDefinition {
     pub data_type: DataType,
 }
 
-impl Node for ColumnDefinition {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for ColumnDefinition {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", t.f(&self.name), t.f(&self.data_type))
     }
 }
@@ -1043,19 +1178,18 @@ impl Node for ColumnDefinition {
 /// A `DROP VIEW` statement.
 #[derive(Debug)]
 pub struct DropViewStatement {
-    pub drop_ws: Whitespace,
-    pub span: Span,
-    pub view_ws: Whitespace,
+    pub drop_token: Token,
+    pub view_token: Token,
     pub view_name: TableName,
 }
 
-impl Node for DropViewStatement {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl DisplayForTarget for DropViewStatement {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}DROP{}VIEW{}",
-            t.f(&self.drop_ws),
-            t.f(&self.view_ws),
+            "{}{}{}",
+            t.f(&self.drop_token),
+            t.f(&self.view_token),
             t.f(&self.view_name)
         )
     }
@@ -1088,11 +1222,8 @@ peg::parser! {
     /// We parse as much of BigQuery's "Standard SQL" as we can.
     pub grammar sql_program() for str {
         pub rule sql_program() -> SqlProgram
-            = statement:statement()
-              trailing_ws:_ { SqlProgram {
-                  statement,
-                  trailing_ws,
-              } }
+            = leading_ws:t("") statement:statement()
+              { SqlProgram { leading_ws, statement } }
 
         rule statement() -> Statement
             = s:query_statement() { Statement::Query(s) }
@@ -1105,11 +1236,11 @@ peg::parser! {
 
         rule query_expression() -> QueryExpression
             = select_expression:select_expression() { QueryExpression::SelectExpression(select_expression) }
-            / paren1_ws:_ "(" query:query_statement() paren2_ws:_ ")" {
+            / paren1:t("(") query:query_statement() paren2:t(")") {
                 QueryExpression::Nested {
-                    paren1_ws,
+                    paren1,
                     query: Box::new(query),
-                    paren2_ws,
+                    paren2,
                 }
             }
 
@@ -1129,116 +1260,94 @@ peg::parser! {
 
         rule select_options() -> SelectOptions
             = s:position!()
-              ws:_
-              k("SELECT")
+              select_token:k("SELECT")
               distinct:distinct()?
               e:position!()
             {
                 SelectOptions {
-                    span: s..e,
-                    ws,
+                    select_token,
                     distinct,
                 }
             }
 
         rule distinct() -> Distinct
-            = ws:_ s:position!() k("DISTINCT") e:position!() {
-                Distinct { span: s..e, ws }
+            = distinct_token:k("DISTINCT") {
+                Distinct { distinct_token }
             }
 
         rule select_list() -> SelectList
-            = items:sep_opt_trailing(<select_list_item()>, <",">) {
+            = items:sep_opt_trailing(<select_list_item()>, ",") {
                 SelectList { items }
             }
 
         rule select_list_item() -> SelectListItem
-            = ws:_ s:position!() "*" e:position!() {
-                SelectListItem::Wildcard { span: s..e, ws }
+            = star:t("*") {
+                SelectListItem::Wildcard { star }
             }
-            / s:position!() table_name:table_name() dot_ws:_ "." star_ws:_ "*" e:position!() {
-                SelectListItem::TableNameWildcard {
-                    span: s..e,
-                    table_name,
-                    dot_ws,
-                    star_ws,
-                }
+            / table_name:table_name() dot:t(".") star:t("*") {
+                SelectListItem::TableNameWildcard { table_name, dot, star }
             }
             / s:position!() expression:expression() alias:alias()? e:position!() {
-                SelectListItem::Expression { span: s..e, expression, alias }
+                SelectListItem::Expression { expression, alias }
             }
 
         rule expression() -> Expression = precedence! {
-            left:(@) op_ws:_ ">=" right:@ {
+            left:(@) op_token:t(">=") right:@ {
                 Expression::Binop {
                     left: Box::new(left),
-                    op_ws,
-                    op: Binop::Gte,
+                    op_token,
                     right: Box::new(right),
                 }
             }
             --
-            ws:_ s:position!() literal:literal() e:position!() {
-                Expression::Literal { ws, span: s..e, literal }
-            }
-            ws:_ s:position!() k("NULL") e:position!() {
-                Expression::Null { ws, span: s..e, }
-            }
+            literal:literal() { literal }
+            null_token:k("NULL") { Expression::Null { null_token } }
             table_and_column_name:table_and_column_name() {
                 Expression::TableAndColumnName(table_and_column_name)
             }
             column_name:ident() { Expression::ColumnName(column_name) }
-            ws:_ s:position!() k("CAST") paren_ws:_ "(" expression:expression() as_ws:_ k("AS") data_type:data_type() paren2_ws:_ ")" e:position!() {
+            cast_token:k("CAST") paren1:t("(") expression:expression() as_token:k("AS") data_type:data_type() paren2:t(")") {
                 Expression::Cast {
-                    ws,
-                    span: s..e,
-                    paren_ws,
+                    cast_token,
+                    paren1,
                     expression: Box::new(expression),
-                    as_ws,
+                    as_token,
                     data_type,
-                    paren2_ws,
+                    paren2,
                 }
             }
         }
 
-        rule literal() -> Literal
-            = value_str:$("-"? ['0'..='9']+) { Literal::Int64(value_str.parse().unwrap()) }
+        rule literal() -> Expression
+            = token:token("integer", <"-"? ['0'..='9']+>) {
+                let value = LiteralValue::Int64(token.token_str().parse().unwrap());
+                Expression::Literal { token, value }
+            }
 
         rule data_type() -> DataType
-            = ws:_ s:position!() k("BOOL") e:position!() {
-                DataType::Bool { ws, span: s..e }
-            }
-            / ws:_ s:position!() k("INT64") e:position!() {
-                DataType::Int64 { ws, span: s..e }
-            }
-            / ws:_ s:position!() k("STRING") e:position!() {
-                DataType::String { ws, span: s..e }
-            }
-            / ws:_ s:position!() k("ARRAY") lt_ws:_ "<" data_type:data_type() gt_ws:_ ">" e:position!() {
+            = token:k("BOOL") { DataType::Bool(token) }
+            / token:k("INT64") { DataType::Int64(token) }
+            / token:k("STRING") { DataType::String(token) }
+            / array_token:k("ARRAY") lt:t("<") data_type:data_type() gt:t(">") {
                 DataType::Array {
-                    ws,
-                    span: s..e,
-                    lt_ws,
+                    array_token,
+                    lt,
                     data_type: Box::new(data_type),
-                    gt_ws,
+                    gt,
                 }
             }
 
         rule alias() -> Alias
-            = ws:_ s:position!() k("AS") ident:ident() e:position!() {
-                Alias {
-                    span: s..e,
-                    ws,
-                    ident,
-                }
+            = as_token:k("AS") ident:ident() {
+                Alias { as_token, ident }
             }
 
         rule from_clause() -> FromClause
-            = ws:_ s:position!() k("FROM") from_item:from_item()
-              join_operations:join_operations() e:position!()
+            = from_token:k("FROM") from_item:from_item()
+              join_operations:join_operations()
             {
                 FromClause {
-                    span: s..e,
-                    ws,
+                    from_token,
                     from_item,
                     join_operations,
                 }
@@ -1248,11 +1357,11 @@ peg::parser! {
             = table_name:table_name() alias:alias()? {
                 FromItem::TableName { table_name, alias }
             }
-            / paren1_ws:_ "(" query:query_statement() paren2_ws:_ ")" alias:alias()? {
+            / paren1:t("(") query:query_statement() paren2:t(")") alias:alias()? {
                 FromItem::Subquery {
-                    paren1_ws,
+                    paren1,
                     query: Box::new(query),
-                    paren2_ws,
+                    paren2,
                     alias,
                 }
             }
@@ -1261,102 +1370,93 @@ peg::parser! {
             = join_operations:join_operation()* { join_operations }
 
         rule join_operation() -> JoinOperation
-            = join_type:join_type() join_ws:_ k("JOIN") from_item:from_item() operator:condition_join_operator() {
+            = join_type:join_type() join_token:k("JOIN") from_item:from_item() operator:condition_join_operator() {
                 JoinOperation::ConditionJoin {
                     join_type,
-                    join_ws,
+                    join_token,
                     from_item,
                     operator,
                 }
             }
 
         rule join_type() -> JoinType
-            = ws:_ s:position!() k("INNER") e:position!() {
-                JoinType::Inner { ws, span: s..e }
+            = left_token:k("LEFT") outer_token:(k("OUTER")?) {
+                JoinType::Left { left_token, outer_token }
             }
-            / ws:_ s:position!() k("LEFT") e:position!() {
-                JoinType::Left { ws, span: s..e }
+            / right_token:k("RIGHT") outer_token:(k("OUTER")?) {
+                JoinType::Right { right_token, outer_token }
             }
-            / ws:_ s:position!() k("RIGHT") e:position!() {
-                JoinType::Right { ws, span: s..e }
+            / full_token:k("FULL") outer_token:(k("OUTER")?) {
+                JoinType::Full { full_token, outer_token }
             }
-            / ws:_ s:position!() k("FULL") e:position!() {
-                JoinType::Full { ws, span: s..e }
+            / inner_token:(k("INNER")?) e:position!() {
+                JoinType::Inner { inner_token }
             }
 
         rule condition_join_operator() -> ConditionJoinOperator
-            = ws:_ s:position!() k("USING") paren1_ws:_ "(" column_names:sep(<ident()>, <",">) paren2_ws:_ ")" e:position!() {
+            = using_token:k("USING") paren1:t("(") column_names:sep(<ident()>, ",") paren2:t(")") {
                 ConditionJoinOperator::Using {
-                    span: s..e,
-                    ws,
-                    paren1_ws,
+                    using_token,
+                    paren1,
                     column_names,
-                    paren2_ws,
+                    paren2,
                 }
             }
 
         rule where_clause() -> WhereClause
-            = ws:_ s:position!() k("WHERE") expression:expression() e:position!() {
+            = where_token:k("WHERE") expression:expression() {
                 WhereClause {
-                    span: s..e,
-                    ws,
+                    where_token,
                     expression,
                 }
             }
 
         rule create_table_statement() -> CreateTableStatement
-            = create_ws:_ s:position!() k("CREATE") or_replace:or_replace()?
-              table_ws:_ k("TABLE") table_name:table_name()
+            = create_token:k("CREATE") or_replace:or_replace()?
+              table_token:k("TABLE") table_name:table_name()
               definition:create_table_definition()
               e:position!()
             {
                 CreateTableStatement {
-                    create_ws,
-                    span: s..e,
+                    create_token,
                     or_replace,
-                    table_ws,
+                    table_token,
                     table_name,
                     definition,
                 }
             }
 
         rule create_view_statement() -> CreateViewStatement
-            = create_ws:_ s:position!() k("CREATE") or_replace:or_replace()?
-              view_ws:_ k("VIEW") view_name:table_name()
-              as_ws:_ k("AS") query:query_statement()
-              e:position!()
+            = create_token:k("CREATE") or_replace:or_replace()?
+              view_token:k("VIEW") view_name:table_name()
+              as_token:k("AS") query:query_statement()
             {
                 CreateViewStatement {
-                    create_ws,
-                    span: s..e,
+                    create_token,
                     or_replace,
-                    view_ws,
+                    view_token,
                     view_name,
-                    as_ws,
+                    as_token,
                     query,
                 }
             }
 
         rule or_replace() -> OrReplace
-            = or_ws:_ s:position!() k("OR") replace_ws:_ k("REPLACE") e:position!() {
-                OrReplace {
-                    or_ws,
-                    span: s..e,
-                    replace_ws,
-                }
+            = or_token:k("OR") replace_token:k("REPLACE") {
+                OrReplace { or_token, replace_token }
             }
 
         rule create_table_definition() -> CreateTableDefinition
-            = paren1_ws:_ "(" columns:sep(<column_definition()>, <",">) paren2_ws:_ ")" {
+            = paren1:t("(") columns:sep(<column_definition()>, ",") paren2:t(")") {
                 CreateTableDefinition::Columns {
-                    paren1_ws,
+                    paren1,
                     columns,
-                    paren2_ws,
+                    paren2,
                 }
             }
-            / as_ws:_ k("AS") query_statement:query_statement() {
+            / as_token:k("AS") query_statement:query_statement() {
                 CreateTableDefinition::As {
-                    as_ws,
+                    as_token,
                     query_statement,
                 }
             }
@@ -1371,11 +1471,11 @@ peg::parser! {
 
         rule drop_view_statement() -> DropViewStatement
             // Oddly, BigQuery accepts `DELETE VIEW`.
-            = drop_ws:_ s:position!() (k("DROP") / k("DELETE")) view_ws:_ k("VIEW") view_name:table_name() e:position!() {
+            = drop_token:(k("DROP") / k("DELETE")) view_token:k("VIEW") view_name:table_name() {
                 DropViewStatement {
-                    drop_ws,
-                    span: s..e,
-                    view_ws,
+                    // Fix this at parse time. Nobody wants `DELETE VIEW`.
+                    drop_token: drop_token.with_token_str("DROP"),
+                    view_token,
                     view_name,
                 }
             }
@@ -1386,21 +1486,21 @@ peg::parser! {
             = dotted:dotted_name() {?
                 let len = dotted.nodes.len();
                 let mut nodes = dotted.nodes.into_iter();
-                let mut trailing_ws = dotted.trailing_ws.into_iter();
+                let mut dots = dotted.separators.into_iter();
                 if len == 1 {
                     Ok(TableName::Table { table: nodes.next().unwrap() })
                 } else if len == 2 {
                     Ok(TableName::DatasetTable {
                         dataset: nodes.next().unwrap(),
-                        ws: trailing_ws.next().unwrap(),
+                        dot: dots.next().unwrap(),
                         table: nodes.next().unwrap(),
                     })
                 } else if len == 3 {
                     Ok(TableName::ProjectDatasetTable {
                         project: nodes.next().unwrap(),
-                        ws: trailing_ws.next().unwrap(),
+                        dot1: dots.next().unwrap(),
                         dataset: nodes.next().unwrap(),
-                        ws2: trailing_ws.next().unwrap(),
+                        dot2: dots.next().unwrap(),
                         table: nodes.next().unwrap(),
                     })
                 } else {
@@ -1414,33 +1514,33 @@ peg::parser! {
             = dotted:dotted_name() {?
                 let len = dotted.nodes.len();
                 let mut nodes = dotted.nodes.into_iter();
-                let mut trailing_ws = dotted.trailing_ws.into_iter();
+                let mut dots = dotted.separators.into_iter();
                 if len == 2 {
                     Ok(TableAndColumnName {
                         table_name: TableName::Table { table: nodes.next().unwrap() },
-                        ws: trailing_ws.next().unwrap(),
+                        dot: dots.next().unwrap(),
                         column_name: nodes.next().unwrap(),
                     })
                 } else if len == 3 {
                     Ok(TableAndColumnName {
                         table_name: TableName::DatasetTable {
                             dataset: nodes.next().unwrap(),
-                            ws: trailing_ws.next().unwrap(),
+                            dot: dots.next().unwrap(),
                             table: nodes.next().unwrap(),
                         },
-                        ws: trailing_ws.next().unwrap(),
+                        dot: dots.next().unwrap(),
                         column_name: nodes.next().unwrap(),
                     })
                 } else if len == 4 {
                     Ok(TableAndColumnName {
                         table_name: TableName::ProjectDatasetTable {
                             project: nodes.next().unwrap(),
-                            ws: trailing_ws.next().unwrap(),
+                            dot1: dots.next().unwrap(),
                             dataset: nodes.next().unwrap(),
-                            ws2: trailing_ws.next().unwrap(),
+                            dot2: dots.next().unwrap(),
                             table: nodes.next().unwrap(),
                         },
-                        ws: trailing_ws.next().unwrap(),
+                        dot: dots.next().unwrap(),
                         column_name: nodes.next().unwrap(),
                     })
                 } else {
@@ -1451,27 +1551,33 @@ peg::parser! {
         /// A table or column name with internal dots. This requires special
         /// handling with a PEG parser, because PEG parsers are greedy
         /// and backtracking to try alternatives can sometimes be strange.
-        rule dotted_name() -> NodeVec<Identifier> = sep(<ident()>, <".">)
+        rule dotted_name() -> NodeVec<Identifier> = sep(<ident()>, ".")
 
         /// An identifier, such as a column name.
         rule ident() -> Identifier
-            = ws:_ s:position!() id:c_ident() e:position!() {?
+            = s:position!() id:c_ident() ws:$(_) e:position!() {?
                 if KEYWORDS.contains(id.to_ascii_uppercase().as_str()) {
                     // Wanted an identifier, but got a bare keyword.
                     Err("identifier")
                 } else {
                     Ok(Identifier {
-                        span: s..e,
-                        ws,
+                        token: Token {
+                            span: s..e,
+                            ws_offset: id.len(),
+                            text: format!("{}{}", id, ws),
+                        },
                         // TODO: Unescape.
                         text: id.to_string(),
                     })
                 }
             }
-            / ws:_ s:position!() "`" id:$(([^ '\\' | '`'] / escape())*) "`" e:position!() {
+            / s:position!() "`" id:$(([^ '\\' | '`'] / escape())*) "`" ws:$(_) e:position!() {
                 Identifier {
-                    span: s..e,
-                    ws,
+                    token: Token {
+                        span: s..e,
+                        ws_offset: id.len() + 2,
+                        text: format!("`{}`{}", id, ws),
+                    },
                     // TODO: Unescape.
                     text: id.to_string(),
                 }
@@ -1495,46 +1601,73 @@ peg::parser! {
         rule unicode_escape() = "u" hex_digit() * <4,4> / "U" hex_digit() * <8,8>
         rule hex_digit() = ['0'..='9' | 'a'..='f' | 'A'..='F']
 
-        /// Keywords. These use case-insensitive matching, and may not be
-        /// followed by a valid identifier character. See
-        /// https://github.com/kevinmehall/rust-peg/issues/216#issuecomment-564390313
-        rule k(kw: &'static str)
-            = input:$([_]*<{kw.len()}>) !['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
-              {? if input.eq_ignore_ascii_case(kw) { Ok(()) } else { Err(kw) } }
-
         /// Punctuation separated list. Does not allow a trailing separator.
-        rule sep<T: fmt::Debug, S>(item: rule<T>, separator: rule<S>) -> NodeVec<T>
-            = first:item()
-              items:(ws:_ separator() item:item() { (ws, item) })*
-            {
+        rule sep<T: fmt::Debug>(item: rule<T>, separator: &'static str) -> NodeVec<T>
+            = first:item() items:(sep:t(separator) item:item() { (sep, item) })* {
                 let mut nodes = Vec::new();
-                let mut trailing_ws = Vec::new();
+                let mut separators = Vec::new();
                 nodes.push(first);
-                for (ws, item) in items {
-                    trailing_ws.push(ws);
+                for (sep, item) in items {
+                    separators.push(sep);
                     nodes.push(item);
                 }
-                NodeVec { nodes, trailing_ws }
+                NodeVec { nodes, separators }
             }
 
         /// Punctuation separated list. Allows a trailing separator.
-        rule sep_opt_trailing<T: fmt::Debug, S>(item: rule<T>, separator: rule<S>) -> NodeVec<T>
-            = first:item()
-              items:(ws:_ separator() item:item() { (ws, item) })*
-              ws2:(ws2:_ separator() { ws2 })?
-            {
-                let mut nodes = Vec::new();
-                let mut trailing_ws = Vec::new();
-                nodes.push(first);
-                for (ws, item) in items {
-                    trailing_ws.push(ws);
-                    nodes.push(item);
+        rule sep_opt_trailing<T: fmt::Debug>(item: rule<T>, separator: &'static str) -> NodeVec<T>
+            = list:sep(item, separator) trailing_sep:t(separator)? {
+                let mut list = list;
+                if let Some(trailing_sep) = trailing_sep {
+                    list.separators.push(trailing_sep);
                 }
-                if let Some(ws) = ws2 {
-                    trailing_ws.push(ws);
-                }
-                NodeVec { nodes, trailing_ws }
+                list
             }
+
+        /// Keywords. These use case-insensitive matching, and may not be
+        /// followed by a valid identifier character. See
+        /// https://github.com/kevinmehall/rust-peg/issues/216#issuecomment-564390313
+        rule k(kw: &'static str) -> Token
+            = s:position!() input:$([_]*<{kw.len()}>) ws:$(_) e:position!() {?
+                if !KEYWORDS.contains(kw) {
+                    panic!("BUG: {:?} is not in KEYWORDS", kw);
+                }
+                if input.eq_ignore_ascii_case(kw) {
+                    Ok(Token {
+                        span: s..e,
+                        ws_offset: input.len(),
+                        text: format!("{}{}", input, ws),
+                    })
+                } else {
+                    Err(kw)
+                }
+            }
+
+        /// Simple tokens.
+        rule t(token: &'static str) -> Token
+            = s:position!() input:$([_]*<{token.len()}>) ws:$(_) e:position!() {?
+                if KEYWORDS.contains(token) {
+                    panic!("BUG: {:?} is in KEYWORDS, so parse it with k()", token);
+                }
+                if input.eq(token) {
+                    Ok(Token {
+                        span: s..e,
+                        ws_offset: input.len(),
+                        text: format!("{}{}", input, ws),
+                    })
+                } else {
+                    Err(token)
+                }
+            }
+
+        /// Complex tokens matching a grammar rule.
+        rule token<T>(label: &'static str, r: rule<T>) -> Token
+            = s:position!() text:$(r()) ws:$(_) e:position!() {
+                let ws_offset = text.len();
+                let text = format!("{}{}", text, ws);
+                Token { span: s..e, ws_offset, text }
+            }
+            / {? Err(label) }
 
         // Whitespace, including comments. We don't normally want whitespace to
         // show up as an "expected" token in error messages, so we carefully
@@ -1542,26 +1675,13 @@ peg::parser! {
         // in a block comment, which we want to mention explicitly.
 
         /// Optional whitespace.
-        rule _ -> Whitespace
-            = w:__ { w }
-            / s:position!() e:position!() { Whitespace {
-                span: s..e,
-                text: "".to_string(),
-            } }
+        rule _ = whitespace()?
 
         /// Mandatory whitespace.
-        rule __ -> Whitespace
-            = s:position!()
-              text:$((whitespace() / line_comment() / block_comment())+)
-              e:position!()
-            {
-                Whitespace {
-                    span: s..e,
-                    text: text.to_string(),
-                }
-            }
+        rule whitespace()
+            = (whitespace_char() / line_comment() / block_comment())+
 
-        rule whitespace() = quiet! { [' ' | '\t' | '\r' | '\n'] }
+        rule whitespace_char() = quiet! { [' ' | '\t' | '\r' | '\n'] }
         rule line_comment() = quiet! { ("#" / "--") (!['\n'][_])* ( "\n" / ![_] ) }
         rule block_comment() = quiet! { "/*"(!"*/"[_])* } "*/"
     }
@@ -1577,30 +1697,31 @@ mod tests {
     fn test_parser_and_run_with_sqlite3() {
         let sql_examples = &[
             // Basic test cases of gradually increasing complexity.
+            (r#"SELECT * FROM t"#, r#"SELECT * FROM t"#),
             (
                 r#"SELECT * FROM t # comment"#,
                 r#"SELECT * FROM t # comment"#,
             ),
             (r#"SELECT DISTINCT * FROM t"#, r#"SELECT DISTINCT * FROM t"#),
             (r#"SELECT * FROM `t`"#, r#"SELECT * FROM t"#),
-            (r#"select * from t"#, r#"SELECT * FROM t"#),
+            (r#"select * from t"#, r#"select * from t"#),
             (
                 r#"select /* hi */ * from `t`"#,
-                r#"SELECT /* hi */ * FROM t"#,
+                r#"select /* hi */ * from t"#,
             ),
             (r#"SELECT a,b FROM t"#, r#"SELECT a,b FROM t"#),
             (
                 r#"select a, b /* hi */, from t"#,
-                r#"SELECT a, b /* hi */, FROM t"#,
+                r#"select a, b /* hi */, from t"#,
             ),
             (
                 "select a, b, /* hi */ from t",
-                "SELECT a, b, /* hi */ FROM t",
+                "select a, b, /* hi */ from t",
             ),
-            ("select a, b,from t", "SELECT a, b,FROM t"),
+            ("select a, b,from t", "select a, b,from t"),
             (
                 r#"select p.*, p.a AS c from t as p"#,
-                r#"SELECT p.*, p.a AS c FROM t AS p"#,
+                r#"select p.*, p.a AS c from t as p"#,
             ),
             (
                 r"SELECT * FROM t WHERE a >= 0",
@@ -1612,9 +1733,9 @@ mod tests {
             ),
             (
                 r#"select * from `p-123`.`d`.`t`"#,
-                r#"SELECT * FROM `p-123`.d.t"#,
+                r#"select * from `p-123`.d.t"#,
             ),
-            (r#"select * from `d`.`t`"#, r#"SELECT * FROM d.t"#),
+            (r#"select * from `d`.`t`"#, r#"select * from d.t"#),
             (
                 r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
                 r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
@@ -1665,7 +1786,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         proxy.last_name,
         # this is a comment
         CAST(NULL AS BOOL) AS id_placeholder,
-        CAST(NULL AS ARRAY<INT64>) AS more_ids
+        CAST(NULL AS ARRAY<INT64>) as more_ids
     FROM `project-123`.sources.s1 AS s1
     INNER JOIN
         (
