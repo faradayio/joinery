@@ -54,6 +54,9 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     //
     // TODO: Figure this out.
     "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING",
+
+    // Magic functions with parser integration.
+    "COUNT",
 };
 
 /// We represent a span in our source code using a Rust range. These are easy
@@ -265,6 +268,15 @@ impl DisplayForTarget for Token {
 pub struct NodeVec<T: fmt::Debug> {
     pub nodes: Vec<T>,
     pub separators: Vec<Token>,
+}
+
+impl<T: fmt::Debug> Default for NodeVec<T> {
+    fn default() -> Self {
+        NodeVec {
+            nodes: Vec::new(),
+            separators: Vec::new(),
+        }
+    }
 }
 
 impl<T: fmt::Debug + DisplayForTarget> DisplayForTarget for NodeVec<T> {
@@ -685,12 +697,13 @@ pub enum SelectListItem {
         alias: Option<Alias>,
     },
     /// A `*` wildcard.
-    Wildcard { star: Token },
+    Wildcard { star: Token, except: Option<Except> },
     /// A `table.*` wildcard.
     TableNameWildcard {
         table_name: TableName,
         dot: Token,
         star: Token,
+        except: Option<Except>,
     },
 }
 
@@ -702,13 +715,52 @@ impl DisplayForTarget for SelectListItem {
             } => {
                 write!(f, "{}{}", t.f(expression), t.f(alias))
             }
-            SelectListItem::Wildcard { star } => write!(f, "{}", &t.f(star)),
+            SelectListItem::Wildcard { star, except } => write!(f, "{}{}", &t.f(star), t.f(except)),
             SelectListItem::TableNameWildcard {
                 table_name,
                 dot,
                 star,
+                except,
             } => {
-                write!(f, "{}{}{}", t.f(table_name), t.f(dot), t.f(star))
+                write!(
+                    f,
+                    "{}{}{}{}",
+                    t.f(table_name),
+                    t.f(dot),
+                    t.f(star),
+                    t.f(except),
+                )
+            }
+        }
+    }
+}
+
+/// An `EXCEPT` clause.
+#[derive(Debug)]
+pub struct Except {
+    pub except_token: Token,
+    pub paren1: Token,
+    pub columns: NodeVec<Identifier>,
+    pub paren2: Token,
+}
+
+impl DisplayForTarget for Except {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => {
+                write!(
+                    f,
+                    "{}{}{}{}",
+                    t.f(&self.except_token),
+                    t.f(&self.paren1),
+                    t.f(&self.columns),
+                    t.f(&self.paren2)
+                )
+            }
+            Target::SQLite3 => {
+                // TODO: Implement `EXCEPT` by inspecting the database schema.
+                // For now, erase it.
+                Ok(())
             }
         }
     }
@@ -765,6 +817,8 @@ pub enum Expression {
         expression: Box<Expression>,
         paren2: Token,
     },
+    Count(CountExpression),
+    FunctionCall(FunctionCall),
 }
 
 impl Expression {
@@ -848,6 +902,10 @@ impl DisplayForTarget for Expression {
             } => {
                 write!(f, "{}{}{}", t.f(paren1), t.f(expression), t.f(paren2))
             }
+            Expression::Count(count_expression) => write!(f, "{}", t.f(count_expression)),
+            Expression::FunctionCall(function_call) => {
+                write!(f, "{}", t.f(function_call))
+            }
         }
     }
 }
@@ -856,6 +914,87 @@ impl DisplayForTarget for Expression {
 #[derive(Debug)]
 pub enum LiteralValue {
     Int64(i64),
+    Float64(f64),
+    String(String),
+}
+
+/// A `COUNT` expression.
+#[derive(Debug)]
+pub enum CountExpression {
+    CountStar {
+        count_token: Token,
+        paren1: Token,
+        star: Token,
+        paren2: Token,
+    },
+    CountExpression {
+        count_token: Token,
+        paren1: Token,
+        distinct: Option<Distinct>,
+        expression: Box<Expression>,
+        paren2: Token,
+    },
+}
+
+impl DisplayForTarget for CountExpression {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CountExpression::CountStar {
+                count_token,
+                paren1,
+                star,
+                paren2,
+            } => {
+                write!(
+                    f,
+                    "{}{}{}{}",
+                    t.f(count_token),
+                    t.f(paren1),
+                    t.f(star),
+                    t.f(paren2)
+                )
+            }
+            CountExpression::CountExpression {
+                count_token,
+                paren1,
+                distinct,
+                expression,
+                paren2,
+            } => {
+                write!(
+                    f,
+                    "{}{}{}{}{}",
+                    t.f(count_token),
+                    t.f(paren1),
+                    t.f(distinct),
+                    t.f(expression),
+                    t.f(paren2)
+                )
+            }
+        }
+    }
+}
+
+/// A function call.
+#[derive(Debug)]
+pub struct FunctionCall {
+    pub name: Identifier,
+    pub paren1: Token,
+    pub args: NodeVec<Expression>,
+    pub paren2: Token,
+}
+
+impl DisplayForTarget for FunctionCall {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}",
+            t.f(&self.name),
+            t.f(&self.paren1),
+            t.f(&self.args),
+            t.f(&self.paren2)
+        )
+    }
 }
 
 /// Data types.
@@ -1420,14 +1559,24 @@ peg::parser! {
             }
 
         rule select_list_item() -> SelectListItem
-            = star:t("*") {
-                SelectListItem::Wildcard { star }
+            = star:t("*") except:except()? {
+                SelectListItem::Wildcard { star, except }
             }
-            / table_name:table_name() dot:t(".") star:t("*") {
-                SelectListItem::TableNameWildcard { table_name, dot, star }
+            / table_name:table_name() dot:t(".") star:t("*") except:except()? {
+                SelectListItem::TableNameWildcard { table_name, dot, star, except }
             }
             / s:position!() expression:expression() alias:alias()? e:position!() {
                 SelectListItem::Expression { expression, alias }
+            }
+
+        rule except() -> Except
+            = except_token:k("EXCEPT") paren1:t("(") columns:sep_opt_trailing(<ident()>, ",") paren2:t(")") {
+                Except {
+                    except_token,
+                    paren1,
+                    columns,
+                    paren2,
+                }
             }
 
         rule expression() -> Expression = precedence! {
@@ -1449,6 +1598,8 @@ peg::parser! {
             left:(@) op_token:t("*") right:@ { Expression::binop(left, op_token, right) }
             left:(@) op_token:t("/") right:@ { Expression::binop(left, op_token, right) }
             --
+            count_expression:count_expression() { Expression::Count(count_expression) }
+            function_call:function_call() { Expression::FunctionCall(function_call) }
             paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { literal }
             null_token:k("NULL") { Expression::Null { null_token } }
@@ -1469,9 +1620,50 @@ peg::parser! {
         }
 
         rule literal() -> Expression
-            = token:token("integer", <"-"? ['0'..='9']+>) {
+            // TODO: Check for other floating point notations.
+            = quiet! { token:token("float", <"-"? ['0'..='9']+ "." ['0'..='9']*>) {
+                let value = LiteralValue::Float64(token.token_str().parse().unwrap());
+                Expression::Literal { token, value }
+            } }
+            / quiet! { token:token("integer", <"-"? ['0'..='9']+>) {
                 let value = LiteralValue::Int64(token.token_str().parse().unwrap());
                 Expression::Literal { token, value }
+            } }
+            / quiet! { token:token("string", <"'" ([^ '\\' | '\''] / escape())* "'">) {
+                // TODO: Unescape.
+                let unescaped = token.token_str()[1..token.token_str().len() - 1].to_string();
+                let value = LiteralValue::String(unescaped);
+                Expression::Literal { token, value }
+            } }
+            / expected!("literal")
+
+        rule count_expression() -> CountExpression
+            = count_token:k("COUNT") paren1:t("(") star:t("*") paren2:t(")") {
+                CountExpression::CountStar {
+                    count_token,
+                    paren1,
+                    star,
+                    paren2,
+                }
+            }
+            / count_token:k("COUNT") paren1:t("(") distinct:distinct()? expression:expression() paren2:t(")") {
+                CountExpression::CountExpression {
+                    count_token,
+                    paren1,
+                    distinct,
+                    expression: Box::new(expression),
+                    paren2,
+                }
+            }
+
+        rule function_call() -> FunctionCall
+            = name:ident() paren1:t("(") args:sep_opt_trailing(<expression()>, ",")? paren2:t(")") {
+                FunctionCall {
+                    name,
+                    paren1,
+                    args: args.unwrap_or_default(),
+                    paren2,
+                }
             }
 
         rule data_type() -> DataType
@@ -1855,7 +2047,7 @@ peg::parser! {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use rusqlite::{functions::FunctionFlags, types, Connection};
 
     use super::*;
 
@@ -1878,7 +2070,9 @@ mod tests {
             ("select a, b, /* hi */ from t", None),
             ("select a, b,from t", None),
             (r#"select p.*, p.a AS c from t as p"#, None),
-            // TODO: EXCEPT
+            (r#"SELECT * EXCEPT(a) FROM t"#, None),
+            // TODO: GROUP BY
+            // TODO: UNION DISTINCT, UNION ALL
             (r"SELECT * FROM t WHERE a IS NULL", None),
             (r"SELECT * FROM t WHERE a IS NOT NULL", None),
             (r"SELECT * FROM t WHERE a < 0", None),
@@ -1886,10 +2080,20 @@ mod tests {
             (r"SELECT * FROM t WHERE a != 0", None),
             (r"SELECT * FROM t WHERE a = 0 AND b = 0", None),
             (r"SELECT * FROM t WHERE a = 0 OR b = 0", None),
+            (r"SELECT * FROM t WHERE a < 0.0", None),
             // TODO: IN, NOT IN
-            // TODO: Functions
-            // TODO: COUNT
-            // TODO: String literals
+            // TODO: IF, CASE WHEN
+            // TODO: TRUE, FALSE
+            (r"SELECT COUNT(*) FROM t", None),
+            (r"SELECT COUNT(a) FROM t", None),
+            (r"SELECT COUNT(DISTINCT a) FROM t", None),
+            (r"SELECT COUNT(DISTINCT(a)) FROM t", None),
+            (r"SELECT generate_uuid()", None),
+            (
+                r"SELECT format_datetime('%Y-%Q', current_datetime()) AS uuid",
+                None,
+            ),
+            // TODO: RANK() OVER
             (r#"SELECT * FROM (SELECT a FROM t) AS p"#, None),
             (r#"SELECT * FROM (SELECT a FROM t) p"#, None),
             (
@@ -1898,6 +2102,8 @@ mod tests {
             ),
             (r#"SELECT * FROM t AS t1 JOIN t AS t2 USING (a)"#, None),
             (r#"SELECT * FROM t AS t1 JOIN t AS t2 ON t1.a = t2.a"#, None),
+            // TODO: CROSS JOIN
+            // TODO: UNNEST
             (r#"select * from `d`.`t`"#, Some(r#"select * from d.t"#)),
             (r#"SELECT a, CAST(NULL AS BOOL) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS c FROM t"#, None),
@@ -1975,6 +2181,19 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         "#;
         conn.execute_batch(fixtures)
             .expect("failed to create SQLite3 fixtures");
+
+        // Install some dummy functions that always return NULL.
+        let dummy_fns = &[
+            ("generate_uuid", 0),
+            ("format_datetime", 2),
+            ("current_datetime", 0),
+        ];
+        for &(fn_name, n_arg) in dummy_fns {
+            conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
+                Ok(types::Value::Null)
+            })
+            .expect("failed to create dummy function");
+        }
 
         for (sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);
