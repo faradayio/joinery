@@ -58,7 +58,7 @@ fn main() -> Result<()> {
             }
             Err(e) => {
                 let mut files = SimpleFiles::new();
-                let file_id = files.add(&row.id, row.query);
+                let file_id = files.add(&row.id, &row.query);
                 let diagnostic = Diagnostic::error()
                     .with_message(format!("Failed to parse query {}", row.id))
                     .with_labels(vec![Label::primary(

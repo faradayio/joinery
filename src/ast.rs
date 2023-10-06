@@ -60,6 +60,9 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 /// to construct from within our parser.
 type Span = Range<usize>;
 
+/// A function that compares two strings for equality.
+type StrCmp = dyn Fn(&str, &str) -> bool;
+
 /// The target language we're transpiling to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
@@ -1628,35 +1631,31 @@ peg::parser! {
         /// followed by a valid identifier character. See
         /// https://github.com/kevinmehall/rust-peg/issues/216#issuecomment-564390313
         rule k(kw: &'static str) -> Token
-            = s:position!() input:$([_]*<{kw.len()}>) ws:$(_) e:position!() {?
+            = want(kw, &str::eq_ignore_ascii_case)
+              s:position!() input:$([_]*<{kw.len()}>) ws:$(_) e:position!()
+            {
                 if !KEYWORDS.contains(kw) {
                     panic!("BUG: {:?} is not in KEYWORDS", kw);
                 }
-                if input.eq_ignore_ascii_case(kw) {
-                    Ok(Token {
-                        span: s..e,
-                        ws_offset: input.len(),
-                        text: format!("{}{}", input, ws),
-                    })
-                } else {
-                    Err(kw)
+                Token {
+                    span: s..e,
+                    ws_offset: input.len(),
+                    text: format!("{}{}", input, ws),
                 }
             }
 
         /// Simple tokens.
         rule t(token: &'static str) -> Token
-            = s:position!() input:$([_]*<{token.len()}>) ws:$(_) e:position!() {?
+            = want(token, &str::eq)
+              s:position!() input:$([_]*<{token.len()}>) ws:$(_) e:position!()
+            {
                 if KEYWORDS.contains(token) {
                     panic!("BUG: {:?} is in KEYWORDS, so parse it with k()", token);
                 }
-                if input.eq(token) {
-                    Ok(Token {
-                        span: s..e,
-                        ws_offset: input.len(),
-                        text: format!("{}{}", input, ws),
-                    })
-                } else {
-                    Err(token)
+                Token {
+                    span: s..e,
+                    ws_offset: input.len(),
+                    text: format!("{}{}", input, ws),
                 }
             }
 
@@ -1667,7 +1666,20 @@ peg::parser! {
                 let text = format!("{}{}", text, ws);
                 Token { span: s..e, ws_offset, text }
             }
-            / {? Err(label) }
+
+        /// Tricky zero-length rule for asserting the next token without
+        /// advancing the parse location.
+        ///
+        /// TODO: See https://github.com/kevinmehall/rust-peg/issues/361
+        rule want(s: &'static str, cmp: &StrCmp)
+            = &(found:$([_]*<{s.len()}>) {?
+                if cmp(found, s) {
+                    Ok(())
+                } else {
+                    Err(s)
+                }
+            })
+            / expected!("token/keyword")
 
         // Whitespace, including comments. We don't normally want whitespace to
         // show up as an "expected" token in error messages, so we carefully
@@ -1752,6 +1764,7 @@ mod tests {
                 r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
                 r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
             ),
+            (r#"DROP TABLE t2"#, r#"DROP TABLE t2"#),
             (
                 r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#,
                 r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#,
