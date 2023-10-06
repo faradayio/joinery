@@ -53,7 +53,7 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     // Types. These aren't really keywords but we treat them as such?
     //
     // TODO: Figure this out.
-    "BOOL", "BOOLEAN", "INT64", "STRING",
+    "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING",
 };
 
 /// We represent a span in our source code using a Rust range. These are easy
@@ -601,7 +601,7 @@ impl DisplayForTarget for CommonTableExpression {
 pub struct SelectExpression {
     pub select_options: SelectOptions,
     pub select_list: SelectList,
-    pub from_clause: FromClause,
+    pub from_clause: Option<FromClause>,
     pub where_clause: Option<WhereClause>,
     // pub group_by: Option<GroupBy>,
     // pub having: Option<Having>,
@@ -734,10 +734,36 @@ pub enum Expression {
         data_type: DataType,
         paren2: Token,
     },
+    Is {
+        left: Box<Expression>,
+        is_token: Token,
+        right: Box<Expression>,
+    },
+    IsNot {
+        left: Box<Expression>,
+        is_token: Token,
+        not_token: Token,
+        right: Box<Expression>,
+    },
+    And {
+        left: Box<Expression>,
+        and_token: Token,
+        right: Box<Expression>,
+    },
+    Or {
+        left: Box<Expression>,
+        or_token: Token,
+        right: Box<Expression>,
+    },
     Binop {
         left: Box<Expression>,
         op_token: Token,
         right: Box<Expression>,
+    },
+    Parens {
+        paren1: Token,
+        expression: Box<Expression>,
+        paren2: Token,
     },
 }
 
@@ -780,11 +806,48 @@ impl DisplayForTarget for Expression {
                     t.f(paren2)
                 )
             }
+            Expression::Is {
+                left,
+                is_token,
+                right,
+            } => {
+                write!(f, "{}{}{}", t.f(left), t.f(is_token), t.f(right))
+            }
+            Expression::IsNot {
+                left,
+                is_token,
+                not_token,
+                right,
+            } => write!(
+                f,
+                "{}{}{}{}",
+                t.f(left),
+                t.f(is_token),
+                t.f(not_token),
+                t.f(right)
+            ),
+            Expression::And {
+                left,
+                and_token,
+                right,
+            } => write!(f, "{}{}{}", t.f(left), t.f(and_token), t.f(right)),
+            Expression::Or {
+                left,
+                or_token,
+                right,
+            } => write!(f, "{}{}{}", t.f(left), t.f(or_token), t.f(right)),
             Expression::Binop {
                 left,
                 op_token,
                 right,
             } => write!(f, "{}{}{}", t.f(left), t.f(op_token), t.f(right)),
+            Expression::Parens {
+                paren1,
+                expression,
+                paren2,
+            } => {
+                write!(f, "{}{}{}", t.f(paren1), t.f(expression), t.f(paren2))
+            }
         }
     }
 }
@@ -800,6 +863,7 @@ pub enum LiteralValue {
 pub enum DataType {
     Bool(Token),
     Int64(Token),
+    Float64(Token),
     String(Token),
     Array {
         array_token: Token,
@@ -813,7 +877,10 @@ impl DisplayForTarget for DataType {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::BigQuery => match self {
-                DataType::Bool(token) | DataType::Int64(token) | DataType::String(token) => {
+                DataType::Bool(token)
+                | DataType::Int64(token)
+                | DataType::Float64(token)
+                | DataType::String(token) => {
                     write!(f, "{}", t.f(token))
                 }
                 DataType::Array {
@@ -834,6 +901,7 @@ impl DisplayForTarget for DataType {
                 DataType::Bool(token) | DataType::Int64(token) => {
                     write!(f, "{}", t.f(&token.with_token_str("INTEGER")))
                 }
+                DataType::Float64(token) => write!(f, "{}", t.f(&token.with_token_str("REAL"))),
                 DataType::String(token) => write!(f, "{}", t.f(&token.with_token_str("TEXT"))),
                 DataType::Array { gt, .. } => {
                     write!(
@@ -852,7 +920,7 @@ impl DisplayForTarget for DataType {
 /// An `AS` alias.
 #[derive(Debug)]
 pub struct Alias {
-    pub as_token: Token,
+    pub as_token: Option<Token>,
     pub ident: Identifier,
 }
 
@@ -1017,6 +1085,10 @@ pub enum ConditionJoinOperator {
         column_names: NodeVec<Identifier>,
         paren2: Token,
     },
+    On {
+        on_token: Token,
+        expression: Expression,
+    },
 }
 
 impl DisplayForTarget for ConditionJoinOperator {
@@ -1036,6 +1108,12 @@ impl DisplayForTarget for ConditionJoinOperator {
                     t.f(column_names),
                     t.f(paren2),
                 )
+            }
+            ConditionJoinOperator::On {
+                on_token,
+                expression,
+            } => {
+                write!(f, "{}{}", t.f(on_token), t.f(expression))
             }
         }
     }
@@ -1308,7 +1386,7 @@ peg::parser! {
         rule select_expression() -> SelectExpression
             = select_options:select_options()
               select_list:select_list()
-              from_clause:from_clause()
+              from_clause:from_clause()?
               where_clause:where_clause()?
             {
                 SelectExpression {
@@ -1353,9 +1431,25 @@ peg::parser! {
             }
 
         rule expression() -> Expression = precedence! {
-            left:(@) op_token:t(">=") right:@ { Expression::binop(left, op_token, right) }
-            left:(@) op_token:t("=") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) and_token:k("AND") right:@ { Expression::And { left: Box::new(left), and_token, right: Box::new(right) } }
+            left:(@) or_token:k("OR") right:@ { Expression::Or { left: Box::new(left), or_token, right: Box::new(right) } }
             --
+            left:(@) is_token:k("IS") right:@ { Expression::Is { left: Box::new(left), is_token, right: Box::new(right) } }
+            left:(@) is_token:k("IS") not_token:k("NOT") right:@ { Expression::IsNot { left: Box::new(left), is_token, not_token, right: Box::new(right) } }
+            left:(@) op_token:t("=") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t("!=") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t("<") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t("<=") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t(">") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t(">=") right:@ { Expression::binop(left, op_token, right) }
+            --
+            left:(@) op_token:t("+") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t("-") right:@ { Expression::binop(left, op_token, right) }
+            --
+            left:(@) op_token:t("*") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t("/") right:@ { Expression::binop(left, op_token, right) }
+            --
+            paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { literal }
             null_token:k("NULL") { Expression::Null { null_token } }
             table_and_column_name:table_and_column_name() {
@@ -1383,6 +1477,7 @@ peg::parser! {
         rule data_type() -> DataType
             = token:(k("BOOLEAN") / k("BOOL")) { DataType::Bool(token) }
             / token:k("INT64") { DataType::Int64(token) }
+            / token:k("FLOAT64") { DataType::Float64(token) }
             / token:k("STRING") { DataType::String(token) }
             / array_token:k("ARRAY") lt:t("<") data_type:data_type() gt:t(">") {
                 DataType::Array {
@@ -1394,7 +1489,7 @@ peg::parser! {
             }
 
         rule alias() -> Alias
-            = as_token:k("AS") ident:ident() {
+            = as_token:(k("AS")?) ident:ident() {
                 Alias { as_token, ident }
             }
 
@@ -1456,6 +1551,12 @@ peg::parser! {
                     paren1,
                     column_names,
                     paren2,
+                }
+            }
+            / on_token:k("ON") expression:expression() {
+                ConditionJoinOperator::On {
+                    on_token,
+                    expression,
                 }
             }
 
@@ -1765,6 +1866,7 @@ mod tests {
             (r#"SELECT * FROM t"#, None),
             (r#"SELECT * FROM t # comment"#, None),
             (r#"SELECT DISTINCT * FROM t"#, None),
+            (r#"SELECT 1 a"#, None),
             (r#"SELECT * FROM `t`"#, Some(r#"SELECT * FROM t"#)),
             (r#"select * from t"#, None),
             (
@@ -1776,22 +1878,33 @@ mod tests {
             ("select a, b, /* hi */ from t", None),
             ("select a, b,from t", None),
             (r#"select p.*, p.a AS c from t as p"#, None),
+            // TODO: EXCEPT
+            (r"SELECT * FROM t WHERE a IS NULL", None),
+            (r"SELECT * FROM t WHERE a IS NOT NULL", None),
+            (r"SELECT * FROM t WHERE a < 0", None),
             (r"SELECT * FROM t WHERE a >= 0", None),
+            (r"SELECT * FROM t WHERE a != 0", None),
+            (r"SELECT * FROM t WHERE a = 0 AND b = 0", None),
+            (r"SELECT * FROM t WHERE a = 0 OR b = 0", None),
+            // TODO: IN, NOT IN
+            // TODO: Functions
+            // TODO: COUNT
+            // TODO: String literals
             (r#"SELECT * FROM (SELECT a FROM t) AS p"#, None),
+            (r#"SELECT * FROM (SELECT a FROM t) p"#, None),
             (
                 r#"select * from `p-123`.`d`.`t`"#,
                 Some(r#"select * from `p-123`.d.t"#),
             ),
+            (r#"SELECT * FROM t AS t1 JOIN t AS t2 USING (a)"#, None),
+            (r#"SELECT * FROM t AS t1 JOIN t AS t2 ON t1.a = t2.a"#, None),
             (r#"select * from `d`.`t`"#, Some(r#"select * from d.t"#)),
-            (
-                r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
-                None,
-            ),
-            (
-                r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS placeholder FROM t"#,
-                None,
-            ),
+            (r#"SELECT a, CAST(NULL AS BOOL) AS c FROM t"#, None),
+            (r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS c FROM t"#, None),
+            (r#"SELECT a, CAST(NULL AS FLOAT64) AS c FROM t"#, None),
+            (r#"SELECT a, CAST(NULL AS STRING) AS c FROM t"#, None),
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
+            // TODO: INSERT INTO
             (r#"DELETE FROM t WHERE a = 0"#, None),
             (r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#, None),
             (r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#, None),
