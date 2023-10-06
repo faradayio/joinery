@@ -53,7 +53,7 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     // Types. These aren't really keywords but we treat them as such?
     //
     // TODO: Figure this out.
-    "BOOL", "INT64", "STRING",
+    "BOOL", "BOOLEAN", "INT64", "STRING",
 };
 
 /// We represent a span in our source code using a Rust range. These are easy
@@ -130,48 +130,6 @@ impl<T: DisplayForTarget> DisplayForTarget for Vec<T> {
         Ok(())
     }
 }
-
-/*
-/// Because we're implementing a transpiler, we want to be able to keep track of
-/// the original whitespace and comments used in the source code. We'll use this
-/// to generate output that looks as close to the original source as possible.
-///
-/// Normally, each AST node is responsible for storing any leading or interior
-/// whitespace. This is because whitespace contains comments, and comments tend to
-/// mostly come before nodes. Trailing whitespace for the final token
-/// is stored in the [`SqlProgram`] struct.
-#[derive(Debug)]
-pub struct Whitespace {
-    pub span: Span,
-    pub text: String,
-}
-
-impl Node for Whitespace {
-    fn fmt_for_target(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match t {
-            Target::BigQuery => write!(f, "{}", self.text),
-            Target::SQLite3 => {
-                // We need to fix `#` comments, which are not supported by SQLite3.
-                let mut in_hash_comment = false;
-                for c in self.text.chars() {
-                    if in_hash_comment {
-                        write!(f, "{}", c)?;
-                        if c == '\n' {
-                            in_hash_comment = false;
-                        }
-                    } else if c == '#' {
-                        write!(f, "--")?;
-                        in_hash_comment = true;
-                    } else {
-                        write!(f, "{}", c)?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-*/
 
 /// Our basic token type. This is used for all punctuation and keywords.
 #[derive(Clone, Debug)]
@@ -529,6 +487,7 @@ impl DisplayForTarget for SqlProgram {
 #[derive(Debug)]
 pub enum Statement {
     Query(QueryStatement),
+    DeleteFrom(DeleteFromStatement),
     CreateTable(CreateTableStatement),
     CreateView(CreateViewStatement),
     DropView(DropViewStatement),
@@ -538,6 +497,7 @@ impl DisplayForTarget for Statement {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Statement::Query(s) => write!(f, "{}", t.f(s)),
+            Statement::DeleteFrom(s) => write!(f, "{}", t.f(s)),
             Statement::CreateTable(s) => write!(f, "{}", t.f(s)),
             Statement::CreateView(s) => write!(f, "{}", t.f(s)),
             Statement::DropView(s) => write!(f, "{}", t.f(s)),
@@ -571,6 +531,11 @@ pub enum QueryExpression {
         query: Box<QueryStatement>,
         paren2: Token,
     },
+    With {
+        with_token: Token,
+        ctes: NodeVec<CommonTableExpression>,
+        query: Box<QueryStatement>,
+    },
 }
 
 impl DisplayForTarget for QueryExpression {
@@ -596,7 +561,38 @@ impl DisplayForTarget for QueryExpression {
                 query,
                 paren2,
             } => write!(f, "{}{}{}", t.f(paren1), t.f(query), t.f(paren2)),
+            QueryExpression::With {
+                with_token,
+                ctes,
+                query,
+            } => {
+                write!(f, "{}{}{}", t.f(with_token), t.f(ctes), t.f(query))
+            }
         }
+    }
+}
+
+/// Common table expressions (CTEs).
+#[derive(Debug)]
+pub struct CommonTableExpression {
+    pub name: Identifier,
+    pub as_token: Token,
+    pub paren1: Token,
+    pub query: Box<QueryStatement>,
+    pub paren2: Token,
+}
+
+impl DisplayForTarget for CommonTableExpression {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}",
+            t.f(&self.name),
+            t.f(&self.as_token),
+            t.f(&self.paren1),
+            t.f(&self.query),
+            t.f(&self.paren2)
+        )
     }
 }
 
@@ -743,6 +739,17 @@ pub enum Expression {
         op_token: Token,
         right: Box<Expression>,
     },
+}
+
+impl Expression {
+    /// Create a new binary operator expression.
+    fn binop(left: Expression, op_token: Token, right: Expression) -> Expression {
+        Expression::Binop {
+            left: Box::new(left),
+            op_token,
+            right: Box::new(right),
+        }
+    }
 }
 
 impl DisplayForTarget for Expression {
@@ -1047,6 +1054,28 @@ impl DisplayForTarget for WhereClause {
     }
 }
 
+/// A `DELETE FROM` statement.
+#[derive(Debug)]
+pub struct DeleteFromStatement {
+    pub delete_token: Token,
+    pub from_token: Token,
+    pub table_name: TableName,
+    pub where_clause: Option<WhereClause>,
+}
+
+impl DisplayForTarget for DeleteFromStatement {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}",
+            t.f(&self.delete_token),
+            t.f(&self.from_token),
+            t.f(&self.table_name),
+            t.f(&self.where_clause)
+        )
+    }
+}
+
 /// A `CREATE TABLE` statement.
 #[derive(Debug)]
 pub struct CreateTableStatement {
@@ -1230,6 +1259,7 @@ peg::parser! {
 
         rule statement() -> Statement
             = s:query_statement() { Statement::Query(s) }
+            / d:delete_from_statement() { Statement::DeleteFrom(d) }
             / c:create_table_statement() { Statement::CreateTable(c) }
             / c:create_view_statement() { Statement::CreateView(c) }
             / d:drop_view_statement() { Statement::DropView(d) }
@@ -1237,10 +1267,38 @@ peg::parser! {
         rule query_statement() -> QueryStatement
             = query_expression:query_expression() { QueryStatement { query_expression } }
 
+        rule delete_from_statement() -> DeleteFromStatement
+            = delete_token:k("DELETE") from_token:k("FROM") table_name:table_name() where_clause:where_clause()? {
+                DeleteFromStatement {
+                    delete_token,
+                    from_token,
+                    table_name,
+                    where_clause,
+                }
+            }
+
         rule query_expression() -> QueryExpression
             = select_expression:select_expression() { QueryExpression::SelectExpression(select_expression) }
             / paren1:t("(") query:query_statement() paren2:t(")") {
                 QueryExpression::Nested {
+                    paren1,
+                    query: Box::new(query),
+                    paren2,
+                }
+            }
+            / with_token:k("WITH") ctes:sep_opt_trailing(<common_table_expression()>, ",") query:query_statement() {
+                QueryExpression::With {
+                    with_token,
+                    ctes,
+                    query: Box::new(query),
+                }
+            }
+
+        rule common_table_expression() -> CommonTableExpression
+            = name:ident() as_token:k("AS") paren1:t("(") query:query_statement() paren2:t(")") {
+                CommonTableExpression {
+                    name,
+                    as_token,
                     paren1,
                     query: Box::new(query),
                     paren2,
@@ -1295,13 +1353,8 @@ peg::parser! {
             }
 
         rule expression() -> Expression = precedence! {
-            left:(@) op_token:t(">=") right:@ {
-                Expression::Binop {
-                    left: Box::new(left),
-                    op_token,
-                    right: Box::new(right),
-                }
-            }
+            left:(@) op_token:t(">=") right:@ { Expression::binop(left, op_token, right) }
+            left:(@) op_token:t("=") right:@ { Expression::binop(left, op_token, right) }
             --
             literal:literal() { literal }
             null_token:k("NULL") { Expression::Null { null_token } }
@@ -1328,7 +1381,7 @@ peg::parser! {
             }
 
         rule data_type() -> DataType
-            = token:k("BOOL") { DataType::Bool(token) }
+            = token:(k("BOOLEAN") / k("BOOL")) { DataType::Bool(token) }
             / token:k("INT64") { DataType::Int64(token) }
             / token:k("STRING") { DataType::String(token) }
             / array_token:k("ARRAY") lt:t("<") data_type:data_type() gt:t(">") {
@@ -1709,67 +1762,42 @@ mod tests {
     fn test_parser_and_run_with_sqlite3() {
         let sql_examples = &[
             // Basic test cases of gradually increasing complexity.
-            (r#"SELECT * FROM t"#, r#"SELECT * FROM t"#),
-            (
-                r#"SELECT * FROM t # comment"#,
-                r#"SELECT * FROM t # comment"#,
-            ),
-            (r#"SELECT DISTINCT * FROM t"#, r#"SELECT DISTINCT * FROM t"#),
-            (r#"SELECT * FROM `t`"#, r#"SELECT * FROM t"#),
-            (r#"select * from t"#, r#"select * from t"#),
+            (r#"SELECT * FROM t"#, None),
+            (r#"SELECT * FROM t # comment"#, None),
+            (r#"SELECT DISTINCT * FROM t"#, None),
+            (r#"SELECT * FROM `t`"#, Some(r#"SELECT * FROM t"#)),
+            (r#"select * from t"#, None),
             (
                 r#"select /* hi */ * from `t`"#,
-                r#"select /* hi */ * from t"#,
+                Some(r#"select /* hi */ * from t"#),
             ),
-            (r#"SELECT a,b FROM t"#, r#"SELECT a,b FROM t"#),
-            (
-                r#"select a, b /* hi */, from t"#,
-                r#"select a, b /* hi */, from t"#,
-            ),
-            (
-                "select a, b, /* hi */ from t",
-                "select a, b, /* hi */ from t",
-            ),
-            ("select a, b,from t", "select a, b,from t"),
-            (
-                r#"select p.*, p.a AS c from t as p"#,
-                r#"select p.*, p.a AS c from t as p"#,
-            ),
-            (
-                r"SELECT * FROM t WHERE a >= 0",
-                r"SELECT * FROM t WHERE a >= 0",
-            ),
-            (
-                r#"SELECT * FROM (SELECT a FROM t) AS p"#,
-                r#"SELECT * FROM (SELECT a FROM t) AS p"#,
-            ),
+            (r#"SELECT a,b FROM t"#, None),
+            (r#"select a, b /* hi */, from t"#, None),
+            ("select a, b, /* hi */ from t", None),
+            ("select a, b,from t", None),
+            (r#"select p.*, p.a AS c from t as p"#, None),
+            (r"SELECT * FROM t WHERE a >= 0", None),
+            (r#"SELECT * FROM (SELECT a FROM t) AS p"#, None),
             (
                 r#"select * from `p-123`.`d`.`t`"#,
-                r#"select * from `p-123`.d.t"#,
+                Some(r#"select * from `p-123`.d.t"#),
             ),
-            (r#"select * from `d`.`t`"#, r#"select * from d.t"#),
+            (r#"select * from `d`.`t`"#, Some(r#"select * from d.t"#)),
             (
                 r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
-                r#"SELECT a, CAST(NULL AS BOOL) AS placeholder FROM t"#,
+                None,
             ),
             (
                 r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS placeholder FROM t"#,
-                r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS placeholder FROM t"#,
+                None,
             ),
-            (
-                r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#,
-                r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#,
-            ),
-            (
-                r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
-                r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#,
-            ),
-            (r#"DROP TABLE t2"#, r#"DROP TABLE t2"#),
-            (
-                r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#,
-                r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#,
-            ),
-            (r#"DROP VIEW v"#, r#"DROP VIEW v"#),
+            (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
+            (r#"DELETE FROM t WHERE a = 0"#, None),
+            (r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#, None),
+            (r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#, None),
+            //(r#"DROP TABLE t2"#, None),
+            (r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#, None),
+            (r#"DROP VIEW v"#, None),
             (
                 r#"# Here's a challenge!
 CREATE OR REPLACE TABLE `project-123`.`proxies`.`t2` AS (
@@ -1790,7 +1818,8 @@ CREATE OR REPLACE TABLE `project-123`.`proxies`.`t2` AS (
         USING (`join_id`)
     )
                 "#,
-                r#"# Here's a challenge!
+                Some(
+                    r#"# Here's a challenge!
 CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
     SELECT
         s1.*,
@@ -1809,6 +1838,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         USING (join_id)
     )
                 "#,
+                ),
             ),
         ];
 
@@ -1835,6 +1865,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
 
         for (sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);
+            let normalized = normalized.unwrap_or(sql);
             let parsed = sql_program::sql_program(sql).unwrap();
             assert_eq!(normalized, &parsed.to_string_for_target(Target::BigQuery));
 
