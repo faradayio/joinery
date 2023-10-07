@@ -1,22 +1,16 @@
-//! NOTE to Copilot & pair programmers: I am currently converting this file from
-//! one whitespace handling technique to another. Specifically, the old system:
-//!
-//! - Stores leading whitespace in grammar rules.
-//! - Tracks spans in many grammar rules.
-//! - Does not store token or keyword text in the AST.
-//!
-//! The new system:
-//!
-//! - Will introduce a `Token` type that stores _trailing_ whitespace.
-//! - Will try to minimize span storage outside of `Token` types.
-//! - Will include `Token` values in the AST.
-//!
-//! I will work down from the top, converting as I go.
-
 // Don't bother with `Box`-ing everything for now. Allow huge enum values.
 #![allow(clippy::large_enum_variant)]
 
-use std::{borrow::Cow, fmt, ops::Range};
+use std::{borrow::Cow, error, fmt, ops::Range};
+
+use codespan_reporting::{
+    diagnostic::{Diagnostic, Label},
+    files::SimpleFile,
+    term::{
+        self,
+        termcolor::{ColorChoice, StandardStream},
+    },
+};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
 /// [`phf`](https://github.com/rust-phf/rust-phf), which generates "perfect hash
@@ -548,6 +542,11 @@ pub enum QueryExpression {
         ctes: NodeVec<CommonTableExpression>,
         query: Box<QueryStatement>,
     },
+    SetOperation {
+        left: Box<QueryExpression>,
+        set_operator: SetOperator,
+        right: Box<QueryExpression>,
+    },
 }
 
 impl DisplayForTarget for QueryExpression {
@@ -580,6 +579,13 @@ impl DisplayForTarget for QueryExpression {
             } => {
                 write!(f, "{}{}{}", t.f(with_token), t.f(ctes), t.f(query))
             }
+            QueryExpression::SetOperation {
+                left: query1,
+                set_operator,
+                right: query2,
+            } => {
+                write!(f, "{}{}{}", t.f(query1), t.f(set_operator), t.f(query2))
+            }
         }
     }
 }
@@ -608,6 +614,76 @@ impl DisplayForTarget for CommonTableExpression {
     }
 }
 
+/// Set operators.
+#[derive(Debug)]
+pub enum SetOperator {
+    UnionAll {
+        union_token: Token,
+        all_token: Token,
+    },
+    UnionDistinct {
+        union_token: Token,
+        distinct_token: Token,
+    },
+    IntersectDistinct {
+        intersect_token: Token,
+        distinct_token: Token,
+    },
+    ExceptDistinct {
+        except_token: Token,
+        distinct_token: Token,
+    },
+}
+
+impl DisplayForTarget for SetOperator {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => match self {
+                SetOperator::UnionAll {
+                    union_token,
+                    all_token,
+                } => write!(f, "{}{}", t.f(union_token), t.f(all_token)),
+                SetOperator::UnionDistinct {
+                    union_token,
+                    distinct_token,
+                } => write!(f, "{}{}", t.f(union_token), t.f(distinct_token)),
+                SetOperator::IntersectDistinct {
+                    intersect_token,
+                    distinct_token,
+                } => write!(f, "{}{}", t.f(intersect_token), t.f(distinct_token)),
+                SetOperator::ExceptDistinct {
+                    except_token,
+                    distinct_token,
+                } => write!(f, "{}{}", t.f(except_token), t.f(distinct_token)),
+            },
+            // SQLite3 only supports `UNION` and `INTERSECT`. We'll keep the
+            // whitespace from the first token in those cases. In other cases,
+            // we'll substitute `UNION` with a comment saying what it really
+            // should be.
+            Target::SQLite3 => match self {
+                SetOperator::UnionAll { union_token, .. } => write!(f, "{}", t.f(union_token)),
+                SetOperator::UnionDistinct { union_token, .. } => {
+                    write!(
+                        f,
+                        "{}",
+                        t.f(&union_token.with_token_str("UNION/*DISTINCT*/"))
+                    )
+                }
+                SetOperator::IntersectDistinct {
+                    intersect_token, ..
+                } => write!(f, "{}", t.f(intersect_token)),
+                SetOperator::ExceptDistinct { except_token, .. } => {
+                    write!(
+                        f,
+                        "{}",
+                        t.f(&except_token.with_token_str("UNION/*EXCEPT DISTINCT*/"))
+                    )
+                }
+            },
+        }
+    }
+}
+
 /// A `SELECT` expression.
 #[derive(Debug)]
 pub struct SelectExpression {
@@ -615,7 +691,7 @@ pub struct SelectExpression {
     pub select_list: SelectList,
     pub from_clause: Option<FromClause>,
     pub where_clause: Option<WhereClause>,
-    // pub group_by: Option<GroupBy>,
+    pub group_by: Option<GroupBy>,
     // pub having: Option<Having>,
     // pub order_by: Option<OrderBy>,
     // pub limit: Option<Limit>,
@@ -625,11 +701,12 @@ impl DisplayForTarget for SelectExpression {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             t.f(&self.select_options),
             t.f(&self.select_list),
             t.f(&self.from_clause),
-            t.f(&self.where_clause)
+            t.f(&self.where_clause),
+            t.f(&self.group_by),
         )
     }
 }
@@ -794,8 +871,16 @@ pub enum Expression {
     IsNot {
         left: Box<Expression>,
         is_token: Token,
-        not_token: Token,
+        not_token: Token, // TODO: Merge into `Is`?
         right: Box<Expression>,
+    },
+    In {
+        left: Box<Expression>,
+        not_token: Option<Token>,
+        in_token: Token,
+        paren1: Token,
+        value_set: InValueSet,
+        paren2: Token,
     },
     And {
         left: Box<Expression>,
@@ -806,6 +891,22 @@ pub enum Expression {
         left: Box<Expression>,
         or_token: Token,
         right: Box<Expression>,
+    },
+    If {
+        if_token: Token,
+        paren1: Token,
+        condition: Box<Expression>,
+        comma1: Token,
+        then_expression: Box<Expression>,
+        comma2: Token,
+        else_expression: Box<Expression>,
+        paren2: Token,
+    },
+    Case {
+        case_token: Token,
+        when_clauses: Vec<CaseWhenClause>,
+        else_clause: Option<CaseElseClause>,
+        end_token: Token,
     },
     Binop {
         left: Box<Expression>,
@@ -835,6 +936,20 @@ impl Expression {
 impl DisplayForTarget for Expression {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // SQLite3 does not support `TRUE` or `FALSE`.
+            Expression::Literal {
+                token,
+                value: LiteralValue::Bool(b),
+            } if t == Target::SQLite3 => {
+                write!(
+                    f,
+                    "{}",
+                    t.f(token
+                        .with_token_str(if *b { "1" } else { "0" })
+                        .ensure_ws()
+                        .as_ref())
+                )
+            }
             Expression::Literal { token, .. } => write!(f, "{}", t.f(token)),
             Expression::Null { null_token } => write!(f, "{}", t.f(null_token)),
             Expression::ColumnName(ident) => write!(f, "{}", t.f(ident)),
@@ -880,6 +995,25 @@ impl DisplayForTarget for Expression {
                 t.f(not_token),
                 t.f(right)
             ),
+            Expression::In {
+                left,
+                not_token,
+                in_token,
+                paren1,
+                value_set,
+                paren2,
+            } => {
+                write!(
+                    f,
+                    "{}{}{}{}{}{}",
+                    t.f(left),
+                    t.f(not_token),
+                    t.f(in_token),
+                    t.f(paren1),
+                    t.f(value_set),
+                    t.f(paren2)
+                )
+            }
             Expression::And {
                 left,
                 and_token,
@@ -890,6 +1024,54 @@ impl DisplayForTarget for Expression {
                 or_token,
                 right,
             } => write!(f, "{}{}{}", t.f(left), t.f(or_token), t.f(right)),
+            Expression::If {
+                if_token,
+                paren1,
+                condition,
+                comma1,
+                then_expression,
+                comma2,
+                else_expression,
+                paren2,
+            } => match t {
+                Target::BigQuery => write!(
+                    f,
+                    "{}{}{}{}{}{}{}{}",
+                    t.f(if_token),
+                    t.f(paren1),
+                    t.f(condition),
+                    t.f(comma1),
+                    t.f(then_expression),
+                    t.f(comma2),
+                    t.f(else_expression),
+                    t.f(paren2)
+                ),
+                // SQLite3 only supports `CASE` expressions, not `IF`.
+                Target::SQLite3 => write!(
+                    f,
+                    "{}WHEN {} THEN {} ELSE {} {}",
+                    t.f(if_token.with_token_str("CASE").ensure_ws().as_ref()),
+                    t.f(condition),
+                    t.f(then_expression),
+                    t.f(else_expression),
+                    t.f(paren2.with_token_str("END").ensure_ws().as_ref()),
+                ),
+            },
+            Expression::Case {
+                case_token,
+                when_clauses,
+                else_clause,
+                end_token,
+            } => {
+                write!(
+                    f,
+                    "{}{}{}{}",
+                    t.f(case_token),
+                    t.f(when_clauses),
+                    t.f(else_clause),
+                    t.f(end_token),
+                )
+            }
             Expression::Binop {
                 left,
                 op_token,
@@ -913,9 +1095,30 @@ impl DisplayForTarget for Expression {
 /// A literal value.
 #[derive(Debug)]
 pub enum LiteralValue {
+    Bool(bool),
     Int64(i64),
     Float64(f64),
     String(String),
+}
+
+/// A value set for an `IN` expression.
+#[derive(Debug)]
+pub enum InValueSet {
+    QueryExpression(Box<QueryExpression>),
+    ExpressionList(NodeVec<Expression>),
+}
+
+impl DisplayForTarget for InValueSet {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InValueSet::QueryExpression(query_expression) => {
+                write!(f, "{}", t.f(query_expression))
+            }
+            InValueSet::ExpressionList(expressions) => {
+                write!(f, "{}", t.f(expressions))
+            }
+        }
+    }
 }
 
 /// A `COUNT` expression.
@@ -975,6 +1178,41 @@ impl DisplayForTarget for CountExpression {
     }
 }
 
+/// A `CASE WHEN` clause.
+#[derive(Debug)]
+pub struct CaseWhenClause {
+    pub when_token: Token,
+    pub condition: Box<Expression>,
+    pub then_token: Token,
+    pub result: Box<Expression>,
+}
+
+impl DisplayForTarget for CaseWhenClause {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}",
+            t.f(&self.when_token),
+            t.f(&self.condition),
+            t.f(&self.then_token),
+            t.f(&self.result)
+        )
+    }
+}
+
+/// A `CASE ELSE` clause.
+#[derive(Debug)]
+pub struct CaseElseClause {
+    pub else_token: Token,
+    pub result: Box<Expression>,
+}
+
+impl DisplayForTarget for CaseElseClause {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.else_token), t.f(&self.result))
+    }
+}
+
 /// A function call.
 #[derive(Debug)]
 pub struct FunctionCall {
@@ -982,18 +1220,111 @@ pub struct FunctionCall {
     pub paren1: Token,
     pub args: NodeVec<Expression>,
     pub paren2: Token,
+    pub over_clause: Option<OverClause>,
 }
 
 impl DisplayForTarget for FunctionCall {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             t.f(&self.name),
             t.f(&self.paren1),
             t.f(&self.args),
-            t.f(&self.paren2)
+            t.f(&self.paren2),
+            t.f(&self.over_clause),
         )
+    }
+}
+
+/// An `OVER` clause for a window function.
+///
+/// See the [official grammar][]. We only implement part of this.
+///
+/// [official grammar]: https://cloud.google.com/bigquery/docs/reference/standard-sql/window-function-calls#syntax
+#[derive(Debug)]
+pub struct OverClause {
+    pub over_token: Token,
+    pub paren1: Token,
+    pub partition_by: Option<PartitionBy>,
+    pub order_by: Option<OrderBy>,
+    pub paren2: Token,
+}
+
+impl DisplayForTarget for OverClause {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}{}{}",
+            t.f(&self.over_token),
+            t.f(&self.paren1),
+            t.f(&self.partition_by),
+            t.f(&self.order_by),
+            t.f(&self.paren2),
+        )
+    }
+}
+
+/// A `PARTITION BY` clause for a window function.
+#[derive(Debug)]
+pub struct PartitionBy {
+    pub partition_token: Token,
+    pub by_token: Token,
+    pub expressions: NodeVec<Expression>,
+}
+
+impl DisplayForTarget for PartitionBy {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            t.f(&self.partition_token),
+            t.f(&self.by_token),
+            t.f(&self.expressions),
+        )
+    }
+}
+
+/// An `ORDER BY` clause.
+#[derive(Debug)]
+pub struct OrderBy {
+    pub order_token: Token,
+    pub by_token: Token,
+    pub items: NodeVec<OrderByItem>,
+}
+
+impl DisplayForTarget for OrderBy {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            t.f(&self.order_token),
+            t.f(&self.by_token),
+            t.f(&self.items),
+        )
+    }
+}
+
+/// An item in an `ORDER BY` clause.
+#[derive(Debug)]
+pub struct OrderByItem {
+    pub expression: Expression,
+    pub asc_desc: Option<AscDesc>,
+}
+
+impl DisplayForTarget for OrderByItem {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.expression), t.f(&self.asc_desc))
+    }
+}
+
+/// An `ASC` or `DESC` modifier.
+#[derive(Debug)]
+pub struct AscDesc(Token);
+
+impl DisplayForTarget for AscDesc {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", t.f(&self.0))
     }
 }
 
@@ -1271,12 +1602,33 @@ impl DisplayForTarget for WhereClause {
     }
 }
 
+/// A `GROUP BY` clause.
+#[derive(Debug)]
+pub struct GroupBy {
+    pub group_token: Token,
+    pub by_token: Token,
+    pub expressions: NodeVec<Expression>,
+}
+
+impl DisplayForTarget for GroupBy {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            t.f(&self.group_token),
+            t.f(&self.by_token),
+            t.f(&self.expressions)
+        )
+    }
+}
+
 /// A `DELETE FROM` statement.
 #[derive(Debug)]
 pub struct DeleteFromStatement {
     pub delete_token: Token,
     pub from_token: Token,
     pub table_name: TableName,
+    pub alias: Option<Alias>,
     pub where_clause: Option<WhereClause>,
 }
 
@@ -1284,10 +1636,11 @@ impl DisplayForTarget for DeleteFromStatement {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             t.f(&self.delete_token),
             t.f(&self.from_token),
             t.f(&self.table_name),
+            t.f(&self.alias),
             t.f(&self.where_clause)
         )
     }
@@ -1444,6 +1797,65 @@ impl DisplayForTarget for DropViewStatement {
     }
 }
 
+#[derive(Debug)]
+pub struct ParseError {
+    pub source: peg::error::ParseError<peg::str::LineCol>,
+    pub files: SimpleFile<&'static str, String>,
+    pub diagnostic: Diagnostic<()>,
+}
+
+impl ParseError {
+    pub fn emit(&self) -> Result<(), codespan_reporting::files::Error> {
+        let writer = StandardStream::stderr(ColorChoice::Auto);
+        let config = term::Config::default();
+        let result = term::emit(&mut writer.lock(), &config, &self.files, &self.diagnostic);
+        result
+    }
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "parser error: expected {}", self.source)
+    }
+}
+
+impl error::Error for ParseError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Parse BigQuery SQL.
+pub fn parse_sql(sql: &str) -> Result<SqlProgram, Box<ParseError>> {
+    // Parse with or without tracing, as appropriate. The tracing code throws
+    // off error positions, so we don't want to use it unless we're going to
+    // use `pegviz` to visualize the parse.
+    #[cfg(feature = "trace")]
+    let result = sql_program::sql_program_traced(sql);
+    #[cfg(not(feature = "trace"))]
+    let result = sql_program::sql_program(sql);
+
+    match result {
+        Ok(sql_program) => Ok(sql_program),
+        // Prepare a user-friendly error message.
+        Err(e) => {
+            let files = SimpleFile::new("input.sql", sql.to_string());
+            let diagnostic = Diagnostic::error()
+                .with_message("Failed to parse query")
+                .with_labels(vec![Label::primary(
+                    (),
+                    e.location.offset..e.location.offset + 1,
+                )
+                .with_message(format!("expected {}", e.expected))]);
+            Err(Box::new(ParseError {
+                source: e,
+                files,
+                diagnostic,
+            }))
+        }
+    }
+}
+
 // We use `rust-peg` to parse BigQuery SQL. `rustpeg` uses a [Parsing Expression
 // Grammar](https://en.wikipedia.org/wiki/Parsing_expression_grammar), which is
 // conceptually sort of like a recursive regex with named rules.
@@ -1460,16 +1872,20 @@ impl DisplayForTarget for DropViewStatement {
 // it has a learning curve. And in many ways, it's less mature than `rust-peg`.
 //
 // Grammar notes:
-//   - `_` matches optional whitespace.
-//   - `__` matches mandatory whitespace.
-//   - Normally, leading whitespace should be captured by the rule that includes
-//     the actual following token. For example, we should have a rule with `ws:_
-//     "SELECT"`, but not a rule like `ws:_ select:select()`, because the latter
-//     would capture the whitespace before the `SELECT` keyword instead of
-//     leaving it for the `ws:_ "SELECT"` rule.
+//   - Most parsing ultimately goes through `Token`, which contains a single
+//     source token and any trailing whitespace, plus a source position
+//   - Keywords are matched using `k` (eg `k("SELECT")`) and other tokens using
+//     `t` (eg `t("(")`). There is also a `token` rule which can be used to
+//     wrap a more complex lexical rule.
+//   - Tokens are saved into the AST, including whitespace. This allows us to
+//     preserve the original formatting when manipulating the AST.
 peg::parser! {
     /// We parse as much of BigQuery's "Standard SQL" as we can.
     pub grammar sql_program() for str {
+        /// Alternate entry point for tracing the parse with `pegviz`.
+        pub rule sql_program_traced() -> SqlProgram = traced(<sql_program()>)
+
+        /// Main entry point.
         pub rule sql_program() -> SqlProgram
             = leading_ws:t("") statement:statement()
               { SqlProgram { leading_ws, statement } }
@@ -1485,31 +1901,45 @@ peg::parser! {
             = query_expression:query_expression() { QueryStatement { query_expression } }
 
         rule delete_from_statement() -> DeleteFromStatement
-            = delete_token:k("DELETE") from_token:k("FROM") table_name:table_name() where_clause:where_clause()? {
+            = delete_token:k("DELETE") from_token:k("FROM") table_name:table_name() alias:alias()? where_clause:where_clause()? {
                 DeleteFromStatement {
                     delete_token,
                     from_token,
                     table_name,
+                    alias,
                     where_clause,
                 }
             }
 
-        rule query_expression() -> QueryExpression
-            = select_expression:select_expression() { QueryExpression::SelectExpression(select_expression) }
-            / paren1:t("(") query:query_statement() paren2:t(")") {
+        rule query_expression() -> QueryExpression = precedence! {
+            left:(@) set_operator:set_operator() right:@ {
+                QueryExpression::SetOperation {
+                    left: Box::new(left), set_operator, right: Box::new(right)
+                }
+            }
+            --
+            select_expression:select_expression() { QueryExpression::SelectExpression(select_expression) }
+            paren1:t("(") query:query_statement() paren2:t(")") {
                 QueryExpression::Nested {
                     paren1,
                     query: Box::new(query),
                     paren2,
                 }
             }
-            / with_token:k("WITH") ctes:sep_opt_trailing(<common_table_expression()>, ",") query:query_statement() {
+            with_token:k("WITH") ctes:sep_opt_trailing(<common_table_expression()>, ",") query:query_statement() {
                 QueryExpression::With {
                     with_token,
                     ctes,
                     query: Box::new(query),
                 }
             }
+        }
+
+        rule set_operator() -> SetOperator
+            = union_token:k("UNION") all_token:k("ALL") { SetOperator::UnionAll { union_token, all_token } }
+            / union_token:k("UNION") distinct_token:k("DISTINCT") { SetOperator::UnionDistinct { union_token, distinct_token } }
+            / except_token:k("EXCEPT") distinct_token:k("DISTINCT") { SetOperator::ExceptDistinct { except_token, distinct_token } }
+            / intersect_token:k("INTERSECT") distinct_token:k("DISTINCT") { SetOperator::IntersectDistinct { intersect_token, distinct_token } }
 
         rule common_table_expression() -> CommonTableExpression
             = name:ident() as_token:k("AS") paren1:t("(") query:query_statement() paren2:t(")") {
@@ -1527,12 +1957,14 @@ peg::parser! {
               select_list:select_list()
               from_clause:from_clause()?
               where_clause:where_clause()?
+              group_by:group_by()?
             {
                 SelectExpression {
                     select_options,
                     select_list,
                     from_clause,
                     where_clause,
+                    group_by,
                 }
             }
 
@@ -1579,12 +2011,26 @@ peg::parser! {
                 }
             }
 
+        /// Expressions. See the [precedence table][] for details.
+        ///
+        /// [precedence table]: https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#operator_precedence
         rule expression() -> Expression = precedence! {
-            left:(@) and_token:k("AND") right:@ { Expression::And { left: Box::new(left), and_token, right: Box::new(right) } }
             left:(@) or_token:k("OR") right:@ { Expression::Or { left: Box::new(left), or_token, right: Box::new(right) } }
+            --
+            left:(@) and_token:k("AND") right:@ { Expression::And { left: Box::new(left), and_token, right: Box::new(right) } }
             --
             left:(@) is_token:k("IS") right:@ { Expression::Is { left: Box::new(left), is_token, right: Box::new(right) } }
             left:(@) is_token:k("IS") not_token:k("NOT") right:@ { Expression::IsNot { left: Box::new(left), is_token, not_token, right: Box::new(right) } }
+            left:(@) not_token:k("NOT")? in_token:k("IN") paren1:t("(") value_set:in_value_set() paren2:t(")") {
+                Expression::In {
+                    left: Box::new(left),
+                    not_token,
+                    in_token,
+                    paren1,
+                    value_set,
+                    paren2,
+                }
+            }
             left:(@) op_token:t("=") right:@ { Expression::binop(left, op_token, right) }
             left:(@) op_token:t("!=") right:@ { Expression::binop(left, op_token, right) }
             left:(@) op_token:t("<") right:@ { Expression::binop(left, op_token, right) }
@@ -1598,6 +2044,26 @@ peg::parser! {
             left:(@) op_token:t("*") right:@ { Expression::binop(left, op_token, right) }
             left:(@) op_token:t("/") right:@ { Expression::binop(left, op_token, right) }
             --
+            case_token:k("CASE") when_clauses:(case_when_clause()*) else_clause:case_else_clause()? end_token:k("END") {
+                Expression::Case {
+                    case_token,
+                    when_clauses,
+                    else_clause,
+                    end_token,
+                }
+            }
+            if_token:k("IF") paren1:t("(") condition:expression() comma1:t(",") then_expression:expression() comma2:t(",") else_expression:expression() paren2:t(")") {
+                Expression::If {
+                    if_token,
+                    paren1,
+                    condition: Box::new(condition),
+                    comma1,
+                    then_expression: Box::new(then_expression),
+                    comma2,
+                    else_expression: Box::new(else_expression),
+                    paren2,
+                }
+            }
             count_expression:count_expression() { Expression::Count(count_expression) }
             function_call:function_call() { Expression::FunctionCall(function_call) }
             paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
@@ -1621,7 +2087,11 @@ peg::parser! {
 
         rule literal() -> Expression
             // TODO: Check for other floating point notations.
-            = quiet! { token:token("float", <"-"? ['0'..='9']+ "." ['0'..='9']*>) {
+            = quiet! { token:(k("TRUE") / k("FALSE")) {
+                let value = LiteralValue::Bool(token.token_str() == "TRUE");
+                Expression::Literal { token, value }
+            } }
+            / quiet! { token:token("float", <"-"? ['0'..='9']+ "." ['0'..='9']*>) {
                 let value = LiteralValue::Float64(token.token_str().parse().unwrap());
                 Expression::Literal { token, value }
             } }
@@ -1636,6 +2106,28 @@ peg::parser! {
                 Expression::Literal { token, value }
             } }
             / expected!("literal")
+
+        rule in_value_set() -> InValueSet
+            = query_expression:query_expression() { InValueSet::QueryExpression(Box::new(query_expression)) }
+            / expressions:sep(<expression()>, ",") { InValueSet::ExpressionList(expressions) }
+
+        rule case_when_clause() -> CaseWhenClause
+            = when_token:k("WHEN") condition:expression() then_token:k("THEN") result:expression() {
+                CaseWhenClause {
+                    when_token,
+                    condition: Box::new(condition),
+                    then_token,
+                    result: Box::new(result),
+                }
+            }
+
+        rule case_else_clause() -> CaseElseClause
+            = else_token:k("ELSE") result:expression() {
+                CaseElseClause {
+                    else_token,
+                    result: Box::new(result),
+                }
+            }
 
         rule count_expression() -> CountExpression
             = count_token:k("COUNT") paren1:t("(") star:t("*") paren2:t(")") {
@@ -1657,14 +2149,55 @@ peg::parser! {
             }
 
         rule function_call() -> FunctionCall
-            = name:ident() paren1:t("(") args:sep_opt_trailing(<expression()>, ",")? paren2:t(")") {
+            = name:ident() paren1:t("(") args:sep_opt_trailing(<expression()>, ",")? paren2:t(")") over_clause:over_clause()? {
                 FunctionCall {
                     name,
                     paren1,
                     args: args.unwrap_or_default(),
                     paren2,
+                    over_clause,
                 }
             }
+
+        rule over_clause() -> OverClause
+            = over_token:k("OVER") paren1:t("(") partition_by:partition_by()? order_by:order_by()? paren2:t(")") {
+                OverClause {
+                    over_token,
+                    paren1,
+                    partition_by,
+                    order_by,
+                    paren2,
+                }
+            }
+
+        rule partition_by() -> PartitionBy
+            = partition_token:k("PARTITION") by_token:k("BY") expressions:sep(<expression()>, ",") {
+                PartitionBy {
+                    partition_token,
+                    by_token,
+                    expressions,
+                }
+            }
+
+        rule order_by() -> OrderBy
+            = order_token:k("ORDER") by_token:k("BY") items:sep(<order_by_item()>, ",") {
+                OrderBy {
+                    order_token,
+                    by_token,
+                    items,
+                }
+            }
+
+        rule order_by_item() -> OrderByItem
+            = expression:expression() asc_desc:asc_desc()? {
+                OrderByItem {
+                    expression,
+                    asc_desc,
+                }
+            }
+
+        rule asc_desc() -> AscDesc
+            = token:(k("ASC") / k("DESC")) { AscDesc(token) }
 
         rule data_type() -> DataType
             = token:(k("BOOLEAN") / k("BOOL")) { DataType::Bool(token) }
@@ -1757,6 +2290,15 @@ peg::parser! {
                 WhereClause {
                     where_token,
                     expression,
+                }
+            }
+
+        rule group_by() -> GroupBy
+            = group_token:k("GROUP") by_token:k("BY") expressions:sep(<expression()>, ",") {
+                GroupBy {
+                    group_token,
+                    by_token,
+                    expressions,
                 }
             }
 
@@ -1978,7 +2520,10 @@ peg::parser! {
         /// https://github.com/kevinmehall/rust-peg/issues/216#issuecomment-564390313
         rule k(kw: &'static str) -> Token
             = want(kw, &str::eq_ignore_ascii_case)
-              s:position!() input:$([_]*<{kw.len()}>) ws:$(_) e:position!()
+              s:position!() input:$([_]*<{kw.len()}>)
+              !['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
+              ws:$(_) e:position!()
+
             {
                 if !KEYWORDS.contains(kw) {
                     panic!("BUG: {:?} is not in KEYWORDS", kw);
@@ -2025,7 +2570,8 @@ peg::parser! {
                     Err(s)
                 }
             })
-            / expected!("token/keyword")
+            / {? Err(s) }
+            // / expected!("token/keyword")
 
         // Whitespace, including comments. We don't normally want whitespace to
         // show up as an "expected" token in error messages, so we carefully
@@ -2042,6 +2588,19 @@ peg::parser! {
         rule whitespace_char() = quiet! { [' ' | '\t' | '\r' | '\n'] }
         rule line_comment() = quiet! { ("#" / "--") (!['\n'][_])* ( "\n" / ![_] ) }
         rule block_comment() = quiet! { "/*"(!"*/"[_])* } "*/"
+
+        /// Tracing rule for `pegviz`. See
+        /// https://github.com/fasterthanlime/pegviz.
+        rule traced<T>(e: rule<T>) -> T =
+            &(input:$([_]*) {
+                #[cfg(feature = "trace")]
+                println!("[PEG_INPUT_START]\n{}\n[PEG_TRACE_START]", input);
+            })
+            e:e()? {?
+                #[cfg(feature = "trace")]
+                println!("[PEG_TRACE_STOP]");
+                e.ok_or("")
+            }
     }
 }
 
@@ -2071,8 +2630,9 @@ mod tests {
             ("select a, b,from t", None),
             (r#"select p.*, p.a AS c from t as p"#, None),
             (r#"SELECT * EXCEPT(a) FROM t"#, None),
-            // TODO: GROUP BY
-            // TODO: UNION DISTINCT, UNION ALL
+            (r"SELECT a, COUNT(*) AS c FROM t GROUP BY a", None),
+            (r"SELECT * FROM t UNION ALL SELECT * FROM t", None),
+            (r"SELECT * FROM t UNION DISTINCT SELECT * FROM t", None),
             (r"SELECT * FROM t WHERE a IS NULL", None),
             (r"SELECT * FROM t WHERE a IS NOT NULL", None),
             (r"SELECT * FROM t WHERE a < 0", None),
@@ -2081,9 +2641,12 @@ mod tests {
             (r"SELECT * FROM t WHERE a = 0 AND b = 0", None),
             (r"SELECT * FROM t WHERE a = 0 OR b = 0", None),
             (r"SELECT * FROM t WHERE a < 0.0", None),
-            // TODO: IN, NOT IN
-            // TODO: IF, CASE WHEN
-            // TODO: TRUE, FALSE
+            (r"SELECT * FROM t WHERE a IN (1,2)", None),
+            (r"SELECT * FROM t WHERE a NOT IN (1,2)", None),
+            (r"SELECT * FROM t WHERE a IN (SELECT b FROM t)", None),
+            (r"SELECT IF(a = 0, 1, 2) c FROM t", None),
+            (r"SELECT CASE WHEN a = 0 THEN 1 ELSE 2 END c FROM t", None),
+            (r"SELECT TRUE AND FALSE", None),
             (r"SELECT COUNT(*) FROM t", None),
             (r"SELECT COUNT(a) FROM t", None),
             (r"SELECT COUNT(DISTINCT a) FROM t", None),
@@ -2093,7 +2656,10 @@ mod tests {
                 r"SELECT format_datetime('%Y-%Q', current_datetime()) AS uuid",
                 None,
             ),
-            // TODO: RANK() OVER
+            (
+                r"SELECT a, RANK() OVER (PARTITION BY a ORDER BY b ASC) AS rank FROM t",
+                None,
+            ),
             (r#"SELECT * FROM (SELECT a FROM t) AS p"#, None),
             (r#"SELECT * FROM (SELECT a FROM t) p"#, None),
             (
@@ -2112,6 +2678,7 @@ mod tests {
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
             // TODO: INSERT INTO
             (r#"DELETE FROM t WHERE a = 0"#, None),
+            (r#"DELETE FROM t AS t2 WHERE a = 0"#, None),
             (r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#, None),
             (r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#, None),
             //(r#"DROP TABLE t2"#, None),
@@ -2195,10 +2762,16 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
             .expect("failed to create dummy function");
         }
 
-        for (sql, normalized) in sql_examples {
+        for &(sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);
             let normalized = normalized.unwrap_or(sql);
-            let parsed = sql_program::sql_program(sql).unwrap();
+            let parsed = match parse_sql(sql) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    err.emit().unwrap();
+                    panic!("{}", err);
+                }
+            };
             assert_eq!(normalized, &parsed.to_string_for_target(Target::BigQuery));
 
             let sql = parsed.to_string_for_target(Target::SQLite3);
