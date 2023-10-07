@@ -15,5 +15,5 @@ codespan-reporting = "0.11.1"
 csv = "1.2.2"
 peg = "0.8.1"
 phf = { version = "0.11.2", features = ["macros"] }
-rusqlite = { version = "0.29.0", features = ["bundled", "functions"] }
+rusqlite = { version = "0.29.0", features = ["bundled", "functions", "vtab"] }
 serde = { version = "1.0.188", features = ["derive"] }

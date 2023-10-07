@@ -693,20 +693,22 @@ pub struct SelectExpression {
     pub where_clause: Option<WhereClause>,
     pub group_by: Option<GroupBy>,
     // pub having: Option<Having>,
-    // pub order_by: Option<OrderBy>,
-    // pub limit: Option<Limit>,
+    pub order_by: Option<OrderBy>,
+    pub limit: Option<Limit>,
 }
 
 impl DisplayForTarget for SelectExpression {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}{}",
             t.f(&self.select_options),
             t.f(&self.select_list),
             t.f(&self.from_clause),
             t.f(&self.where_clause),
             t.f(&self.group_by),
+            t.f(&self.order_by),
+            t.f(&self.limit),
         )
     }
 }
@@ -1328,6 +1330,19 @@ impl DisplayForTarget for AscDesc {
     }
 }
 
+/// A `LIMIT` clause.
+#[derive(Debug)]
+pub struct Limit {
+    pub limit_token: Token,
+    pub value: Box<Expression>,
+}
+
+impl DisplayForTarget for Limit {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.limit_token), t.f(&self.value))
+    }
+}
+
 /// Data types.
 #[derive(Debug)]
 pub enum DataType {
@@ -1436,6 +1451,14 @@ pub enum FromItem {
         paren2: Token,
         alias: Option<Alias>,
     },
+    /// A `UNNEST` clause.
+    Unnest {
+        unnest_token: Token,
+        paren1: Token,
+        expression: Box<Expression>,
+        paren2: Token,
+        alias: Option<Alias>,
+    },
 }
 
 impl DisplayForTarget for FromItem {
@@ -1459,6 +1482,23 @@ impl DisplayForTarget for FromItem {
                     t.f(alias)
                 )
             }
+            FromItem::Unnest {
+                unnest_token,
+                paren1,
+                expression,
+                paren2,
+                alias,
+            } => {
+                write!(
+                    f,
+                    "{}{}{}{}{}",
+                    t.f(unnest_token),
+                    t.f(paren1),
+                    t.f(expression),
+                    t.f(paren2),
+                    t.f(alias)
+                )
+            }
         }
     }
 }
@@ -1472,6 +1512,12 @@ pub enum JoinOperation {
         join_token: Token,
         from_item: FromItem,
         operator: ConditionJoinOperator,
+    },
+    /// A `CROSS JOIN` clause.
+    CrossJoin {
+        cross_token: Token,
+        join_token: Token,
+        from_item: FromItem,
     },
 }
 
@@ -1491,6 +1537,19 @@ impl DisplayForTarget for JoinOperation {
                     t.f(join_token),
                     t.f(from_item),
                     t.f(operator)
+                )
+            }
+            JoinOperation::CrossJoin {
+                cross_token,
+                join_token,
+                from_item,
+            } => {
+                write!(
+                    f,
+                    "{}{}{}",
+                    t.f(cross_token),
+                    t.f(join_token),
+                    t.f(from_item)
                 )
             }
         }
@@ -1958,6 +2017,8 @@ peg::parser! {
               from_clause:from_clause()?
               where_clause:where_clause()?
               group_by:group_by()?
+              order_by:order_by()?
+              limit:limit()?
             {
                 SelectExpression {
                     select_options,
@@ -1965,6 +2026,8 @@ peg::parser! {
                     from_clause,
                     where_clause,
                     group_by,
+                    order_by,
+                    limit,
                 }
             }
 
@@ -2199,6 +2262,14 @@ peg::parser! {
         rule asc_desc() -> AscDesc
             = token:(k("ASC") / k("DESC")) { AscDesc(token) }
 
+        rule limit() -> Limit
+            = limit_token:k("LIMIT") value:expression() {
+                Limit {
+                    limit_token,
+                    value: Box::new(value),
+                }
+            }
+
         rule data_type() -> DataType
             = token:(k("BOOLEAN") / k("BOOL")) { DataType::Bool(token) }
             / token:k("INT64") { DataType::Int64(token) }
@@ -2241,6 +2312,15 @@ peg::parser! {
                     alias,
                 }
             }
+            / unnest_token:k("UNNEST") paren1:t("(") expression:expression() paren2:t(")") alias:alias()? {
+                FromItem::Unnest {
+                    unnest_token,
+                    paren1,
+                    expression: Box::new(expression),
+                    paren2,
+                    alias,
+                }
+            }
 
         rule join_operations() -> Vec<JoinOperation>
             = join_operations:join_operation()* { join_operations }
@@ -2252,6 +2332,13 @@ peg::parser! {
                     join_token,
                     from_item,
                     operator,
+                }
+            }
+            / cross_token:k("CROSS") join_token:k("JOIN") from_item:from_item() {
+                JoinOperation::CrossJoin {
+                    cross_token,
+                    join_token,
+                    from_item,
                 }
             }
 
@@ -2608,6 +2695,8 @@ peg::parser! {
 mod tests {
     use rusqlite::{functions::FunctionFlags, types, Connection};
 
+    use crate::unnest::register_unnest;
+
     use super::*;
 
     #[test]
@@ -2631,6 +2720,7 @@ mod tests {
             (r#"select p.*, p.a AS c from t as p"#, None),
             (r#"SELECT * EXCEPT(a) FROM t"#, None),
             (r"SELECT a, COUNT(*) AS c FROM t GROUP BY a", None),
+            (r"SELECT * FROM t ORDER BY a LIMIT 10", None),
             (r"SELECT * FROM t UNION ALL SELECT * FROM t", None),
             (r"SELECT * FROM t UNION DISTINCT SELECT * FROM t", None),
             (r"SELECT * FROM t WHERE a IS NULL", None),
@@ -2668,8 +2758,8 @@ mod tests {
             ),
             (r#"SELECT * FROM t AS t1 JOIN t AS t2 USING (a)"#, None),
             (r#"SELECT * FROM t AS t1 JOIN t AS t2 ON t1.a = t2.a"#, None),
-            // TODO: CROSS JOIN
-            // TODO: UNNEST
+            (r#"SELECT * FROM t AS t1 CROSS JOIN t AS t2"#, None),
+            (r#"SELECT * FROM t CROSS JOIN UNNEST(a) AS t2"#, None),
             (r#"select * from `d`.`t`"#, Some(r#"select * from d.t"#)),
             (r#"SELECT a, CAST(NULL AS BOOL) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS c FROM t"#, None),
@@ -2730,6 +2820,24 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
 
         // Set up SQLite3 database for testing transpiled SQL.
         let conn = Connection::open_in_memory().expect("failed to open SQLite3 database");
+
+        // Install our dummy `UNNEST` virtual table.
+        register_unnest(&conn).expect("failed to register UNNEST");
+
+        // Install some dummy functions that always return NULL.
+        let dummy_fns = &[
+            ("generate_uuid", 0),
+            ("format_datetime", 2),
+            ("current_datetime", 0),
+        ];
+        for &(fn_name, n_arg) in dummy_fns {
+            conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
+                Ok(types::Value::Null)
+            })
+            .expect("failed to create dummy function");
+        }
+
+        // Create some fixtures.
         let fixtures = r#"
             CREATE TABLE t (a INT, b INT);
             CREATE TABLE "p-123.d.t" (a INT, b INT);
@@ -2748,19 +2856,6 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         "#;
         conn.execute_batch(fixtures)
             .expect("failed to create SQLite3 fixtures");
-
-        // Install some dummy functions that always return NULL.
-        let dummy_fns = &[
-            ("generate_uuid", 0),
-            ("format_datetime", 2),
-            ("current_datetime", 0),
-        ];
-        for &(fn_name, n_arg) in dummy_fns {
-            conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
-                Ok(types::Value::Null)
-            })
-            .expect("failed to create dummy function");
-        }
 
         for &(sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);

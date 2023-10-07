@@ -5,6 +5,7 @@ use clap::Parser;
 use serde::Deserialize;
 
 mod ast;
+mod unnest;
 
 #[derive(Debug, Parser)]
 struct Opt {
