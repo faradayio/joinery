@@ -692,7 +692,10 @@ pub struct SelectExpression {
     pub from_clause: Option<FromClause>,
     pub where_clause: Option<WhereClause>,
     pub group_by: Option<GroupBy>,
-    // pub having: Option<Having>,
+    pub having: Option<Having>,
+    pub qualify: Option<Qualify>,
+
+    // TODO: Actually these belong in `QueryExpression`?
     pub order_by: Option<OrderBy>,
     pub limit: Option<Limit>,
 }
@@ -701,12 +704,14 @@ impl DisplayForTarget for SelectExpression {
     fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}",
             t.f(&self.select_options),
             t.f(&self.select_list),
             t.f(&self.from_clause),
             t.f(&self.where_clause),
             t.f(&self.group_by),
+            t.f(&self.having),
+            t.f(&self.qualify),
             t.f(&self.order_by),
             t.f(&self.limit),
         )
@@ -1592,7 +1597,7 @@ pub enum JoinOperation {
         join_type: JoinType,
         join_token: Token,
         from_item: FromItem,
-        operator: ConditionJoinOperator,
+        operator: Option<ConditionJoinOperator>,
     },
     /// A `CROSS JOIN` clause.
     CrossJoin {
@@ -1759,6 +1764,39 @@ impl DisplayForTarget for GroupBy {
             t.f(&self.by_token),
             t.f(&self.expressions)
         )
+    }
+}
+
+/// A `HAVING` clause.
+#[derive(Debug)]
+pub struct Having {
+    pub having_token: Token,
+    pub expression: Expression,
+}
+
+impl DisplayForTarget for Having {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", t.f(&self.having_token), t.f(&self.expression))
+    }
+}
+
+/// A `QUALIFY` clause.
+#[derive(Debug)]
+pub struct Qualify {
+    pub qualify_token: Token,
+    pub expression: Expression,
+}
+
+impl DisplayForTarget for Qualify {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if t == Target::SQLite3 {
+            write!(f, "/*")?;
+        }
+        write!(f, "{}{}", t.f(&self.qualify_token), t.f(&self.expression))?;
+        if t == Target::SQLite3 {
+            write!(f, "*/")?;
+        }
+        Ok(())
     }
 }
 
@@ -2098,6 +2136,8 @@ peg::parser! {
               from_clause:from_clause()?
               where_clause:where_clause()?
               group_by:group_by()?
+              having:having()?
+              qualify:qualify()?
               order_by:order_by()?
               limit:limit()?
             {
@@ -2107,6 +2147,8 @@ peg::parser! {
                     from_clause,
                     where_clause,
                     group_by,
+                    having,
+                    qualify,
                     order_by,
                     limit,
                 }
@@ -2447,7 +2489,7 @@ peg::parser! {
             = join_operations:join_operation()* { join_operations }
 
         rule join_operation() -> JoinOperation
-            = join_type:join_type() join_token:k("JOIN") from_item:from_item() operator:condition_join_operator() {
+            = join_type:join_type() join_token:k("JOIN") from_item:from_item() operator:condition_join_operator()? {
                 JoinOperation::ConditionJoin {
                     join_type,
                     join_token,
@@ -2507,6 +2549,22 @@ peg::parser! {
                     group_token,
                     by_token,
                     expressions,
+                }
+            }
+
+        rule having() -> Having
+            = having_token:k("HAVING") expression:expression() {
+                Having {
+                    having_token,
+                    expression,
+                }
+            }
+
+        rule qualify() -> Qualify
+            = qualify_token:k("QUALIFY") expression:expression() {
+                Qualify {
+                    qualify_token,
+                    expression,
                 }
             }
 
@@ -2841,6 +2899,10 @@ mod tests {
             (r#"select p.*, p.a AS c from t as p"#, None),
             (r#"SELECT * EXCEPT(a) FROM t"#, None),
             (r"SELECT a, COUNT(*) AS c FROM t GROUP BY a", None),
+            (
+                r"SELECT a, COUNT(*) AS c FROM t GROUP BY a HAVING c > 5",
+                None,
+            ),
             (r"SELECT * FROM t ORDER BY a LIMIT 10", None),
             (r"SELECT * FROM t UNION ALL SELECT * FROM t", None),
             (r"SELECT * FROM t UNION DISTINCT SELECT * FROM t", None),
@@ -2870,7 +2932,7 @@ mod tests {
                 None,
             ),
             (
-                r"SELECT a, RANK() OVER (PARTITION BY a ORDER BY b ASC) AS rank FROM t",
+                r"SELECT a, RANK() OVER (PARTITION BY a ORDER BY b ASC) AS rank FROM t QUALIFY rank = 1",
                 None,
             ),
             (r#"SELECT * FROM (SELECT a FROM t) AS p"#, None),
@@ -2881,6 +2943,7 @@ mod tests {
             ),
             (r#"SELECT * FROM t AS t1 JOIN t AS t2 USING (a)"#, None),
             (r#"SELECT * FROM t AS t1 JOIN t AS t2 ON t1.a = t2.a"#, None),
+            (r#"SELECT * FROM t AS t1 JOIN t AS t2"#, None),
             (r#"SELECT * FROM t AS t1 CROSS JOIN t AS t2"#, None),
             (r#"SELECT * FROM t CROSS JOIN UNNEST(a) AS t2"#, None),
             (r#"select * from `d`.`t`"#, Some(r#"select * from d.t"#)),
