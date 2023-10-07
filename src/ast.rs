@@ -47,7 +47,7 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     // Types. These aren't really keywords but we treat them as such?
     //
     // TODO: Figure this out.
-    "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING",
+    "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING", "DATETIME",
 
     // Magic functions with parser integration.
     "COUNT",
@@ -894,6 +894,10 @@ pub enum Expression {
         or_token: Token,
         right: Box<Expression>,
     },
+    Not {
+        not_token: Token,
+        expression: Box<Expression>,
+    },
     If {
         if_token: Token,
         paren1: Token,
@@ -920,6 +924,7 @@ pub enum Expression {
         expression: Box<Expression>,
         paren2: Token,
     },
+    Array(ArrayExpression),
     Count(CountExpression),
     FunctionCall(FunctionCall),
 }
@@ -1026,6 +1031,10 @@ impl DisplayForTarget for Expression {
                 or_token,
                 right,
             } => write!(f, "{}{}{}", t.f(left), t.f(or_token), t.f(right)),
+            Expression::Not {
+                not_token,
+                expression,
+            } => write!(f, "{}{}", t.f(not_token), t.f(expression)),
             Expression::If {
                 if_token,
                 paren1,
@@ -1086,6 +1095,9 @@ impl DisplayForTarget for Expression {
             } => {
                 write!(f, "{}{}{}", t.f(paren1), t.f(expression), t.f(paren2))
             }
+            Expression::Array(array_expression) => {
+                write!(f, "{}", t.f(array_expression))
+            }
             Expression::Count(count_expression) => write!(f, "{}", t.f(count_expression)),
             Expression::FunctionCall(function_call) => {
                 write!(f, "{}", t.f(function_call))
@@ -1120,6 +1132,71 @@ impl DisplayForTarget for InValueSet {
                 write!(f, "{}", t.f(expressions))
             }
         }
+    }
+}
+
+/// An `ARRAY` expression. This takes a bunch of different forms in BigQuery.
+///
+/// Not all combinations of our fields are valid. For example, we can't have
+/// a missing `ARRAY` and a `delim1` of `(`. We'll let the parser handle that.
+#[derive(Debug)]
+pub struct ArrayExpression {
+    pub array_token: Option<Token>,
+    pub element_type: Option<ArrayElementType>,
+    pub delim1: Token,
+    pub elements: NodeVec<Expression>,
+    pub delim2: Token,
+}
+
+impl DisplayForTarget for ArrayExpression {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::BigQuery => {
+                write!(
+                    f,
+                    "{}{}{}{}{}",
+                    t.f(&self.array_token),
+                    t.f(&self.element_type),
+                    t.f(&self.delim1),
+                    t.f(&self.elements),
+                    t.f(&self.delim2),
+                )
+            }
+            Target::SQLite3 => {
+                if let Some(array_token) = &self.array_token {
+                    write!(f, "{}", t.f(array_token))?;
+                } else {
+                    write!(f, "ARRAY")?;
+                }
+                write!(
+                    f,
+                    "{}{}{}",
+                    t.f(&self.delim1.with_token_str("(")),
+                    t.f(&self.elements),
+                    t.f(&self.delim2.with_token_str(")"))
+                )
+            }
+        }
+    }
+}
+
+/// The type of the elements in an `ARRAY` expression.
+#[derive(Debug)]
+pub struct ArrayElementType {
+    pub lt: Token,
+    pub elem_type: DataType,
+    pub gt: Token,
+}
+
+impl DisplayForTarget for ArrayElementType {
+    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}{}{}",
+            t.f(&self.lt),
+            t.f(&self.elem_type),
+            t.f(&self.gt)
+        )
     }
 }
 
@@ -1350,6 +1427,7 @@ pub enum DataType {
     Int64(Token),
     Float64(Token),
     String(Token),
+    Datetime(Token),
     Array {
         array_token: Token,
         lt: Token,
@@ -1365,7 +1443,8 @@ impl DisplayForTarget for DataType {
                 DataType::Bool(token)
                 | DataType::Int64(token)
                 | DataType::Float64(token)
-                | DataType::String(token) => {
+                | DataType::String(token)
+                | DataType::Datetime(token) => {
                     write!(f, "{}", t.f(token))
                 }
                 DataType::Array {
@@ -1387,7 +1466,9 @@ impl DisplayForTarget for DataType {
                     write!(f, "{}", t.f(&token.with_token_str("INTEGER")))
                 }
                 DataType::Float64(token) => write!(f, "{}", t.f(&token.with_token_str("REAL"))),
-                DataType::String(token) => write!(f, "{}", t.f(&token.with_token_str("TEXT"))),
+                DataType::String(token) | DataType::Datetime(token) => {
+                    write!(f, "{}", t.f(&token.with_token_str("TEXT")))
+                }
                 DataType::Array { gt, .. } => {
                     write!(
                         f,
@@ -2082,6 +2163,8 @@ peg::parser! {
             --
             left:(@) and_token:k("AND") right:@ { Expression::And { left: Box::new(left), and_token, right: Box::new(right) } }
             --
+            not_token:k("NOT") expression:@ { Expression::Not { not_token, expression: Box::new(expression) } }
+            --
             left:(@) is_token:k("IS") right:@ { Expression::Is { left: Box::new(left), is_token, right: Box::new(right) } }
             left:(@) is_token:k("IS") not_token:k("NOT") right:@ { Expression::IsNot { left: Box::new(left), is_token, not_token, right: Box::new(right) } }
             left:(@) not_token:k("NOT")? in_token:k("IN") paren1:t("(") value_set:in_value_set() paren2:t(")") {
@@ -2127,6 +2210,7 @@ peg::parser! {
                     paren2,
                 }
             }
+            array_expression:array_expression() { Expression::Array(array_expression) }
             count_expression:count_expression() { Expression::Count(count_expression) }
             function_call:function_call() { Expression::FunctionCall(function_call) }
             paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
@@ -2190,6 +2274,42 @@ peg::parser! {
                     else_token,
                     result: Box::new(result),
                 }
+            }
+
+        rule array_expression() -> ArrayExpression
+            = delim1:t("[") elements:sep_opt_trailing(<expression()>, ",")? delim2:t("]") {
+                ArrayExpression {
+                    array_token: None,
+                    element_type: None,
+                    delim1,
+                    elements: elements.unwrap_or_default(),
+                    delim2,
+                }
+            }
+            / array_token:k("ARRAY") element_type:array_element_type()?
+              delim1:t("[") elements:sep_opt_trailing(<expression()>, ",")? delim2:t("]") {
+                ArrayExpression {
+                    array_token: Some(array_token),
+                    element_type,
+                    delim1,
+                    elements: elements.unwrap_or_default(),
+                    delim2,
+                }
+              }
+            / array_token:k("ARRAY") element_type:array_element_type()?
+              delim1:t("(") elements:sep_opt_trailing(<expression()>, ",")? delim2:t(")") {
+                ArrayExpression {
+                    array_token: Some(array_token),
+                    element_type,
+                    delim1,
+                    elements: elements.unwrap_or_default(),
+                    delim2,
+                }
+              }
+
+        rule array_element_type() -> ArrayElementType
+            = lt:t("<") elem_type:data_type() gt:t(">") {
+                ArrayElementType { lt, elem_type, gt }
             }
 
         rule count_expression() -> CountExpression
@@ -2275,6 +2395,7 @@ peg::parser! {
             / token:k("INT64") { DataType::Int64(token) }
             / token:k("FLOAT64") { DataType::Float64(token) }
             / token:k("STRING") { DataType::String(token) }
+            / token:k("DATETIME") { DataType::Datetime(token) }
             / array_token:k("ARRAY") lt:t("<") data_type:data_type() gt:t(">") {
                 DataType::Array {
                     array_token,
@@ -2737,6 +2858,8 @@ mod tests {
             (r"SELECT IF(a = 0, 1, 2) c FROM t", None),
             (r"SELECT CASE WHEN a = 0 THEN 1 ELSE 2 END c FROM t", None),
             (r"SELECT TRUE AND FALSE", None),
+            (r"SELECT TRUE OR FALSE", None),
+            (r"SELECT NOT TRUE", None),
             (r"SELECT COUNT(*) FROM t", None),
             (r"SELECT COUNT(a) FROM t", None),
             (r"SELECT COUNT(DISTINCT a) FROM t", None),
@@ -2765,6 +2888,11 @@ mod tests {
             (r#"SELECT a, CAST(NULL AS ARRAY<INT64>) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS FLOAT64) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS STRING) AS c FROM t"#, None),
+            (r#"SELECT a, CAST(NULL AS DATETIME) AS c FROM t"#, None),
+            (r#"SELECT ARRAY(1, 2)"#, None),
+            (r#"SELECT ARRAY[1, 2]"#, None),
+            (r#"SELECT [1, 2]"#, None),
+            (r#"SELECT ARRAY<INT64>[]"#, None),
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
             // TODO: INSERT INTO
             (r#"DELETE FROM t WHERE a = 0"#, None),
@@ -2826,9 +2954,10 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
 
         // Install some dummy functions that always return NULL.
         let dummy_fns = &[
-            ("generate_uuid", 0),
-            ("format_datetime", 2),
+            ("array", -1),
             ("current_datetime", 0),
+            ("format_datetime", 2),
+            ("generate_uuid", 0),
         ];
         for &(fn_name, n_arg) in dummy_fns {
             conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
