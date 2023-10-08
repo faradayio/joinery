@@ -483,6 +483,7 @@ pub struct SqlProgram {
 pub enum Statement {
     Query(QueryStatement),
     DeleteFrom(DeleteFromStatement),
+    InsertInto(InsertIntoStatement),
     CreateTable(CreateTableStatement),
     CreateView(CreateViewStatement),
     DropView(DropViewStatement),
@@ -1295,6 +1296,15 @@ pub struct DeleteFromStatement {
     pub where_clause: Option<WhereClause>,
 }
 
+/// A `INSERT INTO` statement. We only support the `SELECT` version.
+#[derive(Debug, Emit, EmitDefault)]
+pub struct InsertIntoStatement {
+    pub insert_token: Token,
+    pub into_token: Token,
+    pub table_name: TableName,
+    pub query: QueryExpression,
+}
+
 /// A `CREATE TABLE` statement.
 #[derive(Debug, EmitDefault)]
 pub struct CreateTableStatement {
@@ -1485,6 +1495,7 @@ peg::parser! {
 
         rule statement() -> Statement
             = s:query_statement() { Statement::Query(s) }
+            / i:insert_into_statement() { Statement::InsertInto(i) }
             / d:delete_from_statement() { Statement::DeleteFrom(d) }
             / c:create_table_statement() { Statement::CreateTable(c) }
             / c:create_view_statement() { Statement::CreateView(c) }
@@ -1492,6 +1503,16 @@ peg::parser! {
 
         rule query_statement() -> QueryStatement
             = query_expression:query_expression() { QueryStatement { query_expression } }
+
+        rule insert_into_statement() -> InsertIntoStatement
+            = insert_token:k("INSERT") into_token:k("INTO") table_name:table_name() query:query_expression() {
+                InsertIntoStatement {
+                    insert_token,
+                    into_token,
+                    table_name,
+                    query,
+                }
+            }
 
         rule delete_from_statement() -> DeleteFromStatement
             = delete_token:k("DELETE") from_token:k("FROM") table_name:table_name() alias:alias()? where_clause:where_clause()? {
@@ -2443,7 +2464,7 @@ mod tests {
             // STRUCT(..)
             // STRUCT<..>(..)
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
-            // TODO: INSERT INTO
+            (r#"INSERT INTO t SELECT * FROM t"#, None),
             (r#"DELETE FROM t WHERE a = 0"#, None),
             (r#"DELETE FROM t AS t2 WHERE a = 0"#, None),
             (r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#, None),
