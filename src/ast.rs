@@ -52,6 +52,9 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 
     // Magic functions with parser integration.
     "COUNT",
+
+    // Interval units.
+    "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "HOUR", "MINUTE", "SECOND",
 };
 
 /// We represent a span in our source code using a Rust range. These are easy
@@ -701,6 +704,7 @@ pub enum Expression {
     Null {
         null_token: Token,
     },
+    Interval(IntervalExpression),
     ColumnName(Identifier),
     TableAndColumnName(TableAndColumnName),
     Cast {
@@ -831,6 +835,47 @@ pub enum LiteralValue {
     Int64(i64),
     Float64(f64),
     String(String),
+}
+
+/// An `INTERVAL` expression.
+#[derive(Debug, EmitDefault)]
+pub struct IntervalExpression {
+    pub interval_token: Token,
+    pub number: Token, // Not even bothering to parse this for now.
+    pub date_part: DatePart,
+}
+
+impl Emit for IntervalExpression {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            // Treat these as strings for now.
+            Target::SQLite3 => write!(
+                f,
+                "INTERVAL({}, {})",
+                t.f(&self.number),
+                t.f(&self.date_part)
+            ),
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// A date part in an `INTERVAL` expression.
+#[derive(Debug, EmitDefault)]
+pub struct DatePart {
+    pub date_part_token: Token,
+}
+
+impl Emit for DatePart {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            // Treat these as strings for now.
+            Target::SQLite3 => {
+                write!(f, "'{}'", t.f(&self.date_part_token))
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// A value set for an `IN` expression.
@@ -1541,6 +1586,7 @@ peg::parser! {
             paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { literal }
             null_token:k("NULL") { Expression::Null { null_token } }
+            interval_expression:interval_expression() { Expression::Interval(interval_expression) }
             table_and_column_name:table_and_column_name() {
                 Expression::TableAndColumnName(table_and_column_name)
             }
@@ -1578,6 +1624,20 @@ peg::parser! {
                 Expression::Literal { token, value }
             } }
             / expected!("literal")
+
+        rule interval_expression() -> IntervalExpression
+            = interval_token:k("INTERVAL") number:token("integer", <"-"? ['0'..='9']+>) date_part:date_part() {
+                IntervalExpression {
+                    interval_token,
+                    number,
+                    date_part,
+                }
+            }
+
+        rule date_part() -> DatePart
+            = date_part_token:(k("YEAR") / k("QUARTER") / k("MONTH") / k("WEEK") / k("DAY") / k("HOUR") / k("MINUTE") / k("SECOND")) {
+                DatePart { date_part_token }
+            }
 
         rule in_value_set() -> InValueSet
             = query_expression:query_expression() { InValueSet::QueryExpression(Box::new(query_expression)) }
@@ -2187,6 +2247,7 @@ mod tests {
                 None,
             ),
             (r"SELECT * FROM t ORDER BY a LIMIT 10", None),
+            //(r"SELECT * FROM t ORDER BY a DESC NULLS LAST", None),
             (r"SELECT * FROM t UNION ALL SELECT * FROM t", None),
             (r"SELECT * FROM t UNION DISTINCT SELECT * FROM t", None),
             (r"SELECT * FROM t WHERE a IS NULL", None),
@@ -2197,6 +2258,7 @@ mod tests {
             (r"SELECT * FROM t WHERE a = 0 AND b = 0", None),
             (r"SELECT * FROM t WHERE a = 0 OR b = 0", None),
             (r"SELECT * FROM t WHERE a < 0.0", None),
+            (r"SELECT INTERVAL -3 DAY", None),
             (r"SELECT * FROM t WHERE a IN (1,2)", None),
             (r"SELECT * FROM t WHERE a NOT IN (1,2)", None),
             (r"SELECT * FROM t WHERE a IN (SELECT b FROM t)", None),
@@ -2214,6 +2276,11 @@ mod tests {
                 r"SELECT format_datetime('%Y-%Q', current_datetime()) AS uuid",
                 None,
             ),
+            // CURRENT_DATE()
+            // DATETIME(..)
+            // DATE_DIFF(d1, d2, DAY)
+            // DATETIME_DIFF(d1, d2, DAY)
+            // DATETIME_TRUNC(d1, DAY)
             (
                 r"SELECT a, RANK() OVER (PARTITION BY a ORDER BY b ASC) AS rank FROM t QUALIFY rank = 1",
                 None,
@@ -2235,10 +2302,14 @@ mod tests {
             (r#"SELECT a, CAST(NULL AS FLOAT64) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS STRING) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS DATETIME) AS c FROM t"#, None),
+            //(r#"SELECT a, SAFE_CAST(NULL AS BOOL) AS c FROM t"#, None),
             (r#"SELECT ARRAY(1, 2)"#, None),
             (r#"SELECT ARRAY[1, 2]"#, None),
             (r#"SELECT [1, 2]"#, None),
             (r#"SELECT ARRAY<INT64>[]"#, None),
+            // STRUCT<..> type
+            // STRUCT(..)
+            // STRUCT<..>(..)
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
             // TODO: INSERT INTO
             (r#"DELETE FROM t WHERE a = 0"#, None),
@@ -2304,6 +2375,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
             ("current_datetime", 0),
             ("format_datetime", 2),
             ("generate_uuid", 0),
+            ("interval", 2),
         ];
         for &(fn_name, n_arg) in dummy_fns {
             conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
