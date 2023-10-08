@@ -331,6 +331,13 @@ pub struct Identifier {
 }
 
 impl Identifier {
+    /// Build an identifier from a "simple" token, one which does not need to
+    /// be quoted.
+    pub fn from_simple_token(token: Token) -> Identifier {
+        let text = token.token_str().to_owned();
+        Identifier { token, text }
+    }
+
     /// Is this identifier a keyword?
     fn is_keyword(&self) -> bool {
         KEYWORDS.contains(self.text.to_ascii_uppercase().as_str())
@@ -776,6 +783,7 @@ pub enum Expression {
     },
     Array(ArrayExpression),
     Count(CountExpression),
+    SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
 }
 
@@ -962,14 +970,60 @@ pub struct CaseElseClause {
     pub result: Box<Expression>,
 }
 
+/// Special "functions" that manipulate dates. These all take a [`DatePart`]
+/// as a final argument. So in Lisp sense, these are special forms or macros,
+/// not ordinary function calls.
+#[derive(Debug, Emit, EmitDefault)]
+pub struct SpecialDateFunctionCall {
+    pub function_name: Identifier,
+    pub paren1: Token,
+    pub args: NodeVec<ExpressionOrDatePart>,
+    pub paren2: Token,
+}
+
+/// An expression or a date part.
+#[derive(Debug, Emit, EmitDefault)]
+pub enum ExpressionOrDatePart {
+    Expression(Expression),
+    DatePart(DatePart),
+}
+
 /// A function call.
 #[derive(Debug, Emit, EmitDefault)]
 pub struct FunctionCall {
-    pub name: Identifier,
+    pub name: FunctionName,
     pub paren1: Token,
     pub args: NodeVec<Expression>,
     pub paren2: Token,
     pub over_clause: Option<OverClause>,
+}
+
+/// A function name. Some function names are supposedly keywords, and I'm not
+/// sure what all the implications of that might be. But this is good enough to
+/// handle them for now.
+#[derive(Debug, EmitDefault)]
+pub enum FunctionName {
+    Identifier(Identifier),
+    Keyword(Token),
+}
+
+impl Emit for FunctionName {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FunctionName::Keyword(token) if t == Target::SQLite3 => {
+                // TODO: The actual behavior of these "functions" in SQLite3
+                // is actually much weirder than this, but this is good enough
+                // to at least _parse_.
+                write!(
+                    f,
+                    "\"{}\"{}",
+                    token.token_str().to_ascii_uppercase(),
+                    t.f(&token.with_erased_token_str())
+                )
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// An `OVER` clause for a window function.
@@ -1592,6 +1646,7 @@ peg::parser! {
             }
             array_expression:array_expression() { Expression::Array(array_expression) }
             count_expression:count_expression() { Expression::Count(count_expression) }
+            special_date_function_call:special_date_function_call() { Expression::SpecialDateFunctionCall(special_date_function_call) }
             function_call:function_call() { Expression::FunctionCall(function_call) }
             paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { literal }
@@ -1726,8 +1781,31 @@ peg::parser! {
                 }
             }
 
+        rule special_date_function_call() -> SpecialDateFunctionCall
+            = function_name:special_date_function_name() paren1:t("(")
+              args:sep(<expression_or_date_part()>, ",") paren2:t(")") {
+                SpecialDateFunctionCall {
+                    function_name,
+                    paren1,
+                    args,
+                    paren2,
+                }
+            }
+
+        rule special_date_function_name() -> Identifier
+            = token:(t("DATE_DIFF") / t("DATETIME_DIFF") / t("DATETIME_TRUNC")) {
+                Identifier::from_simple_token(token)
+            }
+
+        rule expression_or_date_part() -> ExpressionOrDatePart
+            = expression:expression() { ExpressionOrDatePart::Expression(expression) }
+            / date_part:date_part() { ExpressionOrDatePart::DatePart(date_part) }
+
         rule function_call() -> FunctionCall
-            = name:ident() paren1:t("(") args:sep_opt_trailing(<expression()>, ",")? paren2:t(")") over_clause:over_clause()? {
+            = name:function_name() paren1:t("(")
+              args:sep_opt_trailing(<expression()>, ",")? paren2:t(")")
+              over_clause:over_clause()?
+            {
                 FunctionCall {
                     name,
                     paren1,
@@ -1736,6 +1814,11 @@ peg::parser! {
                     over_clause,
                 }
             }
+
+        rule function_name() -> FunctionName
+            = ident:ident() { FunctionName::Identifier(ident) }
+            / token:k("CURRENT_DATE") { FunctionName::Keyword(token) }
+            / token:k("DATETIME") { FunctionName::Keyword(token) }
 
         rule over_clause() -> OverClause
             = over_token:k("OVER") paren1:t("(") partition_by:partition_by()? order_by:order_by()? paren2:t(")") {
@@ -2293,11 +2376,17 @@ mod tests {
                 r"SELECT format_datetime('%Y-%Q', current_datetime()) AS uuid",
                 None,
             ),
-            // CURRENT_DATE()
-            // DATETIME(..)
-            // DATE_DIFF(d1, d2, DAY)
-            // DATETIME_DIFF(d1, d2, DAY)
-            // DATETIME_TRUNC(d1, DAY)
+            (r"SELECT CURRENT_DATE()", None),
+            (r"SELECT DATETIME(2008, 12, 25, 05, 30, 00)", None),
+            (
+                r"SELECT DATE_DIFF(CURRENT_DATE(), CURRENT_DATE(), DAY)",
+                None,
+            ),
+            (
+                r"SELECT DATETIME_DIFF(CURRENT_DATETIME(), CURRENT_DATETIME(), DAY)",
+                None,
+            ),
+            (r"SELECT DATETIME_TRUNC(CURRENT_DATETIME(), DAY)", None),
             (
                 r"SELECT a, RANK() OVER (PARTITION BY a ORDER BY b ASC) AS rank FROM t QUALIFY rank = 1",
                 None,
@@ -2390,6 +2479,9 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         let dummy_fns = &[
             ("array", -1),
             ("current_datetime", 0),
+            ("date_diff", 3),
+            ("datetime_diff", 3),
+            ("datetime_trunc", 2),
             ("format_datetime", 2),
             ("generate_uuid", 0),
             ("interval", 2),
