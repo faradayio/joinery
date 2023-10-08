@@ -11,6 +11,7 @@ use codespan_reporting::{
         termcolor::{ColorChoice, StandardStream},
     },
 };
+use joinery_macros::{Emit, EmitDefault};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
 /// [`phf`](https://github.com/rust-phf/rust-phf), which generates "perfect hash
@@ -70,59 +71,81 @@ pub enum Target {
 
 impl Target {
     /// Format this node for the given target.
-    fn f<T: DisplayForTarget>(self, node: &T) -> FormatForTarget<'_, T> {
+    fn f<T: Emit>(self, node: &T) -> FormatForTarget<'_, T> {
         FormatForTarget { target: self, node }
     }
 }
 
 /// Wrapper for formatting a node for a given target.
-struct FormatForTarget<'a, T: DisplayForTarget> {
+struct FormatForTarget<'a, T: Emit> {
     target: Target,
     node: &'a T,
 }
 
-impl<'a, T: DisplayForTarget> fmt::Display for FormatForTarget<'a, T> {
+impl<'a, T: Emit> fmt::Display for FormatForTarget<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.node.fmt(self.target, f)
+        self.node.emit(self.target, f)
     }
 }
 
-/// A version of [`fmt::Display`] that can be customized for different
-/// [`Target`]s.
-pub trait DisplayForTarget: Sized {
-    // The source span corresponding to this node.
-    // fn span(&self) -> Span;
+/// A default version of [`Emit`] which attemps to write the AST back out as
+/// BigQuery SQL, extremely close to the original input.
+///
+/// For most types, you will start by using `#[derive(Emit, EmitDefault)]`. This
+/// will generate:
+///
+/// - An implementation of [`Emit`] which calls [`EmitDefault::emit_default`].
+/// - An implementation of [`EmitDefault`] which tries to output the AST as
+///   close to the original input as possible.
+///
+/// Note that [`EmitDefault`] is an implementation detail, and not all types
+/// will need to implement it. For example, [`Token`] implements [`Emit`]
+/// directly, so it has no need for [`EmitDefault`].
+///
+/// If you need to override the default output for a particular database, you
+/// should use `#[derive(EmitDefault)]` and implement [`Emit::emit`] to handle
+/// the special cases, and to pass through to [`EmitDefault::emit_default`] when
+/// the default behavior is desired.
+pub trait EmitDefault {
+    /// Emit the AST as BigQuery SQL.
+    fn emit_default(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
 
+/// Emit the AST as code for a specific database.
+///
+/// If you use `#[derive(Emit, EmitDefault)]` on a type, then [`Emit::emit`]
+/// will be generated to call [`EmitDefault::emit_default`].
+pub trait Emit: Sized {
     /// Format this node as its SQLite3 equivalent. This would need to be replaced
     /// with something a bit more compiler-like to support full transpilation.
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
     /// Convert this node to a string for the given target.
-    fn to_string_for_target(&self, t: Target) -> String {
+    fn emit_to_string(&self, t: Target) -> String {
         format!("{}", t.f(self))
     }
 }
 
-impl<T: DisplayForTarget> DisplayForTarget for Box<T> {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.as_ref().fmt(t, f)
+impl<T: Emit> Emit for Box<T> {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().emit(t, f)
     }
 }
 
-impl<T: DisplayForTarget> DisplayForTarget for Option<T> {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<T: Emit> Emit for Option<T> {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(node) = self {
-            node.fmt(t, f)
+            node.emit(t, f)
         } else {
             Ok(())
         }
     }
 }
 
-impl<T: DisplayForTarget> DisplayForTarget for Vec<T> {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<T: Emit> Emit for Vec<T> {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for node in self.iter() {
-            node.fmt(t, f)?;
+            node.emit(t, f)?;
         }
         Ok(())
     }
@@ -226,8 +249,8 @@ impl Token {
     }
 }
 
-impl DisplayForTarget for Token {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for Token {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::BigQuery => write!(f, "{}", self.text),
             Target::SQLite3 => {
@@ -273,8 +296,8 @@ impl<T: fmt::Debug> Default for NodeVec<T> {
     }
 }
 
-impl<T: fmt::Debug + DisplayForTarget> DisplayForTarget for NodeVec<T> {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<T: fmt::Debug + Emit> Emit for NodeVec<T> {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, node) in self.nodes.iter().enumerate() {
             write!(f, "{}", t.f(node))?;
             if i < self.separators.len() {
@@ -326,8 +349,8 @@ impl Identifier {
     }
 }
 
-impl DisplayForTarget for Identifier {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for Identifier {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.needs_quotes() {
             match t {
                 Target::BigQuery => {
@@ -374,7 +397,7 @@ fn escape_for_sqlite3(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 }
 
 /// A table name.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub enum TableName {
     ProjectDatasetTable {
         project: Identifier,
@@ -393,36 +416,9 @@ pub enum TableName {
     },
 }
 
-impl DisplayForTarget for TableName {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for TableName {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => match self {
-                TableName::ProjectDatasetTable {
-                    project,
-                    dot1,
-                    dataset,
-                    dot2,
-                    table,
-                } => {
-                    write!(
-                        f,
-                        "{}{}{}{}{}",
-                        t.f(project),
-                        t.f(dot1),
-                        t.f(dataset),
-                        t.f(dot2),
-                        t.f(table)
-                    )
-                }
-                TableName::DatasetTable {
-                    dataset,
-                    dot,
-                    table,
-                } => {
-                    write!(f, "{}{}{}", t.f(dataset), t.f(dot), t.f(table))
-                }
-                TableName::Table { table } => write!(f, "{}", t.f(table)),
-            },
             Target::SQLite3 => match self {
                 TableName::ProjectDatasetTable {
                     project,
@@ -447,32 +443,21 @@ impl DisplayForTarget for TableName {
                 }
                 TableName::Table { table } => write!(f, "{}", t.f(table)),
             },
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// A table and a column name.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct TableAndColumnName {
     pub table_name: TableName,
     pub dot: Token,
     pub column_name: Identifier,
 }
 
-impl DisplayForTarget for TableAndColumnName {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            t.f(&self.table_name),
-            t.f(&self.dot),
-            t.f(&self.column_name)
-        )
-    }
-}
-
 /// An entire SQL program.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct SqlProgram {
     /// Any whitespace that appears before the first statement. This is represented
     /// as a token with an empty `token_str()`.
@@ -483,14 +468,8 @@ pub struct SqlProgram {
     pub statement: Statement,
 }
 
-impl DisplayForTarget for SqlProgram {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.leading_ws), t.f(&self.statement))
-    }
-}
-
 /// A statement in our abstract syntax tree.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum Statement {
     Query(QueryStatement),
     DeleteFrom(DeleteFromStatement),
@@ -499,28 +478,10 @@ pub enum Statement {
     DropView(DropViewStatement),
 }
 
-impl DisplayForTarget for Statement {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Statement::Query(s) => write!(f, "{}", t.f(s)),
-            Statement::DeleteFrom(s) => write!(f, "{}", t.f(s)),
-            Statement::CreateTable(s) => write!(f, "{}", t.f(s)),
-            Statement::CreateView(s) => write!(f, "{}", t.f(s)),
-            Statement::DropView(s) => write!(f, "{}", t.f(s)),
-        }
-    }
-}
-
 /// A query statement. This exists mainly because it's in the official grammar.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct QueryStatement {
     pub query_expression: QueryExpression,
-}
-
-impl DisplayForTarget for QueryStatement {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", t.f(&self.query_expression))
-    }
 }
 
 /// A query expression is a `SELECT` statement, plus some other optional
@@ -529,7 +490,7 @@ impl DisplayForTarget for QueryStatement {
 ///
 /// [official grammar]:
 ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#sql_syntax.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub enum QueryExpression {
     SelectExpression(SelectExpression),
     Nested {
@@ -549,10 +510,9 @@ pub enum QueryExpression {
     },
 }
 
-impl DisplayForTarget for QueryExpression {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for QueryExpression {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            QueryExpression::SelectExpression(s) => write!(f, "{}", t.f(s)),
             QueryExpression::Nested {
                 paren1,
                 query,
@@ -567,31 +527,13 @@ impl DisplayForTarget for QueryExpression {
                     t.f(&paren2.with_erased_token_str())
                 )
             }
-            QueryExpression::Nested {
-                paren1,
-                query,
-                paren2,
-            } => write!(f, "{}{}{}", t.f(paren1), t.f(query), t.f(paren2)),
-            QueryExpression::With {
-                with_token,
-                ctes,
-                query,
-            } => {
-                write!(f, "{}{}{}", t.f(with_token), t.f(ctes), t.f(query))
-            }
-            QueryExpression::SetOperation {
-                left: query1,
-                set_operator,
-                right: query2,
-            } => {
-                write!(f, "{}{}{}", t.f(query1), t.f(set_operator), t.f(query2))
-            }
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// Common table expressions (CTEs).
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct CommonTableExpression {
     pub name: Identifier,
     pub as_token: Token,
@@ -600,22 +542,8 @@ pub struct CommonTableExpression {
     pub paren2: Token,
 }
 
-impl DisplayForTarget for CommonTableExpression {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}{}",
-            t.f(&self.name),
-            t.f(&self.as_token),
-            t.f(&self.paren1),
-            t.f(&self.query),
-            t.f(&self.paren2)
-        )
-    }
-}
-
 /// Set operators.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub enum SetOperator {
     UnionAll {
         union_token: Token,
@@ -635,27 +563,9 @@ pub enum SetOperator {
     },
 }
 
-impl DisplayForTarget for SetOperator {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for SetOperator {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => match self {
-                SetOperator::UnionAll {
-                    union_token,
-                    all_token,
-                } => write!(f, "{}{}", t.f(union_token), t.f(all_token)),
-                SetOperator::UnionDistinct {
-                    union_token,
-                    distinct_token,
-                } => write!(f, "{}{}", t.f(union_token), t.f(distinct_token)),
-                SetOperator::IntersectDistinct {
-                    intersect_token,
-                    distinct_token,
-                } => write!(f, "{}{}", t.f(intersect_token), t.f(distinct_token)),
-                SetOperator::ExceptDistinct {
-                    except_token,
-                    distinct_token,
-                } => write!(f, "{}{}", t.f(except_token), t.f(distinct_token)),
-            },
             // SQLite3 only supports `UNION` and `INTERSECT`. We'll keep the
             // whitespace from the first token in those cases. In other cases,
             // we'll substitute `UNION` with a comment saying what it really
@@ -680,12 +590,13 @@ impl DisplayForTarget for SetOperator {
                     )
                 }
             },
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// A `SELECT` expression.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct SelectExpression {
     pub select_options: SelectOptions,
     pub select_list: SelectList,
@@ -700,47 +611,17 @@ pub struct SelectExpression {
     pub limit: Option<Limit>,
 }
 
-impl DisplayForTarget for SelectExpression {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}{}{}{}{}{}",
-            t.f(&self.select_options),
-            t.f(&self.select_list),
-            t.f(&self.from_clause),
-            t.f(&self.where_clause),
-            t.f(&self.group_by),
-            t.f(&self.having),
-            t.f(&self.qualify),
-            t.f(&self.order_by),
-            t.f(&self.limit),
-        )
-    }
-}
-
 /// The head of a `SELECT`, including any modifiers.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct SelectOptions {
     pub select_token: Token,
     pub distinct: Option<Distinct>,
 }
 
-impl DisplayForTarget for SelectOptions {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.select_token), t.f(&self.distinct))
-    }
-}
-
 /// The `DISTINCT` modifier.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct Distinct {
     pub distinct_token: Token,
-}
-
-impl DisplayForTarget for Distinct {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", t.f(&self.distinct_token))
-    }
 }
 
 /// The list of columns in a `SELECT` statement.
@@ -761,19 +642,13 @@ impl DisplayForTarget for Distinct {
 ///   select_expression:
 ///     expression [ [ AS ] alias ]
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct SelectList {
     pub items: NodeVec<SelectListItem>,
 }
 
-impl DisplayForTarget for SelectList {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", t.f(&self.items))
-    }
-}
-
 /// A single item in a `SELECT` list.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum SelectListItem {
     /// An expression, optionally with an alias.
     Expression {
@@ -791,36 +666,8 @@ pub enum SelectListItem {
     },
 }
 
-impl DisplayForTarget for SelectListItem {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SelectListItem::Expression {
-                expression, alias, ..
-            } => {
-                write!(f, "{}{}", t.f(expression), t.f(alias))
-            }
-            SelectListItem::Wildcard { star, except } => write!(f, "{}{}", &t.f(star), t.f(except)),
-            SelectListItem::TableNameWildcard {
-                table_name,
-                dot,
-                star,
-                except,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(table_name),
-                    t.f(dot),
-                    t.f(star),
-                    t.f(except),
-                )
-            }
-        }
-    }
-}
-
 /// An `EXCEPT` clause.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub struct Except {
     pub except_token: Token,
     pub paren1: Token,
@@ -828,33 +675,27 @@ pub struct Except {
     pub paren2: Token,
 }
 
-impl DisplayForTarget for Except {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for Except {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(&self.except_token),
-                    t.f(&self.paren1),
-                    t.f(&self.columns),
-                    t.f(&self.paren2)
-                )
-            }
             Target::SQLite3 => {
                 // TODO: Implement `EXCEPT` by inspecting the database schema.
                 // For now, erase it.
-                Ok(())
+                write!(f, "/* ")?;
+                self.emit_default(t, f)?;
+                write!(f, " */")
             }
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// An SQL expression.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub enum Expression {
     Literal {
         token: Token,
+        #[emit(skip)]
         value: LiteralValue,
     },
     Null {
@@ -945,8 +786,8 @@ impl Expression {
     }
 }
 
-impl DisplayForTarget for Expression {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for Expression {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             // SQLite3 does not support `TRUE` or `FALSE`.
             Expression::Literal {
@@ -962,151 +803,23 @@ impl DisplayForTarget for Expression {
                         .as_ref())
                 )
             }
-            Expression::Literal { token, .. } => write!(f, "{}", t.f(token)),
-            Expression::Null { null_token } => write!(f, "{}", t.f(null_token)),
-            Expression::ColumnName(ident) => write!(f, "{}", t.f(ident)),
-            Expression::TableAndColumnName(table_and_column_name) => {
-                write!(f, "{}", t.f(table_and_column_name))
-            }
-            Expression::Cast {
-                cast_token,
-                paren1,
-                expression,
-                as_token,
-                data_type,
-                paren2,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}{}{}",
-                    t.f(cast_token),
-                    t.f(paren1),
-                    t.f(expression),
-                    t.f(as_token),
-                    t.f(data_type),
-                    t.f(paren2)
-                )
-            }
-            Expression::Is {
-                left,
-                is_token,
-                right,
-            } => {
-                write!(f, "{}{}{}", t.f(left), t.f(is_token), t.f(right))
-            }
-            Expression::IsNot {
-                left,
-                is_token,
-                not_token,
-                right,
-            } => write!(
-                f,
-                "{}{}{}{}",
-                t.f(left),
-                t.f(is_token),
-                t.f(not_token),
-                t.f(right)
-            ),
-            Expression::In {
-                left,
-                not_token,
-                in_token,
-                paren1,
-                value_set,
-                paren2,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}{}{}",
-                    t.f(left),
-                    t.f(not_token),
-                    t.f(in_token),
-                    t.f(paren1),
-                    t.f(value_set),
-                    t.f(paren2)
-                )
-            }
-            Expression::And {
-                left,
-                and_token,
-                right,
-            } => write!(f, "{}{}{}", t.f(left), t.f(and_token), t.f(right)),
-            Expression::Or {
-                left,
-                or_token,
-                right,
-            } => write!(f, "{}{}{}", t.f(left), t.f(or_token), t.f(right)),
-            Expression::Not {
-                not_token,
-                expression,
-            } => write!(f, "{}{}", t.f(not_token), t.f(expression)),
             Expression::If {
                 if_token,
-                paren1,
                 condition,
-                comma1,
                 then_expression,
-                comma2,
                 else_expression,
                 paren2,
-            } => match t {
-                Target::BigQuery => write!(
-                    f,
-                    "{}{}{}{}{}{}{}{}",
-                    t.f(if_token),
-                    t.f(paren1),
-                    t.f(condition),
-                    t.f(comma1),
-                    t.f(then_expression),
-                    t.f(comma2),
-                    t.f(else_expression),
-                    t.f(paren2)
-                ),
-                // SQLite3 only supports `CASE` expressions, not `IF`.
-                Target::SQLite3 => write!(
-                    f,
-                    "{}WHEN {} THEN {} ELSE {} {}",
-                    t.f(if_token.with_token_str("CASE").ensure_ws().as_ref()),
-                    t.f(condition),
-                    t.f(then_expression),
-                    t.f(else_expression),
-                    t.f(paren2.with_token_str("END").ensure_ws().as_ref()),
-                ),
-            },
-            Expression::Case {
-                case_token,
-                when_clauses,
-                else_clause,
-                end_token,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(case_token),
-                    t.f(when_clauses),
-                    t.f(else_clause),
-                    t.f(end_token),
-                )
-            }
-            Expression::Binop {
-                left,
-                op_token,
-                right,
-            } => write!(f, "{}{}{}", t.f(left), t.f(op_token), t.f(right)),
-            Expression::Parens {
-                paren1,
-                expression,
-                paren2,
-            } => {
-                write!(f, "{}{}{}", t.f(paren1), t.f(expression), t.f(paren2))
-            }
-            Expression::Array(array_expression) => {
-                write!(f, "{}", t.f(array_expression))
-            }
-            Expression::Count(count_expression) => write!(f, "{}", t.f(count_expression)),
-            Expression::FunctionCall(function_call) => {
-                write!(f, "{}", t.f(function_call))
-            }
+                ..
+            } if t == Target::SQLite3 => write!(
+                f,
+                "{}WHEN {} THEN {} ELSE {} {}",
+                t.f(if_token.with_token_str("CASE").ensure_ws().as_ref()),
+                t.f(condition),
+                t.f(then_expression),
+                t.f(else_expression),
+                t.f(paren2.with_token_str("END").ensure_ws().as_ref()),
+            ),
+            _ => self.emit_default(t, f),
         }
     }
 }
@@ -1121,30 +834,17 @@ pub enum LiteralValue {
 }
 
 /// A value set for an `IN` expression.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum InValueSet {
     QueryExpression(Box<QueryExpression>),
     ExpressionList(NodeVec<Expression>),
-}
-
-impl DisplayForTarget for InValueSet {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            InValueSet::QueryExpression(query_expression) => {
-                write!(f, "{}", t.f(query_expression))
-            }
-            InValueSet::ExpressionList(expressions) => {
-                write!(f, "{}", t.f(expressions))
-            }
-        }
-    }
 }
 
 /// An `ARRAY` expression. This takes a bunch of different forms in BigQuery.
 ///
 /// Not all combinations of our fields are valid. For example, we can't have
 /// a missing `ARRAY` and a `delim1` of `(`. We'll let the parser handle that.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub struct ArrayExpression {
     pub array_token: Option<Token>,
     pub element_type: Option<ArrayElementType>,
@@ -1153,20 +853,9 @@ pub struct ArrayExpression {
     pub delim2: Token,
 }
 
-impl DisplayForTarget for ArrayExpression {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for ArrayExpression {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => {
-                write!(
-                    f,
-                    "{}{}{}{}{}",
-                    t.f(&self.array_token),
-                    t.f(&self.element_type),
-                    t.f(&self.delim1),
-                    t.f(&self.elements),
-                    t.f(&self.delim2),
-                )
-            }
             Target::SQLite3 => {
                 if let Some(array_token) = &self.array_token {
                     write!(f, "{}", t.f(array_token))?;
@@ -1181,32 +870,21 @@ impl DisplayForTarget for ArrayExpression {
                     t.f(&self.delim2.with_token_str(")"))
                 )
             }
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// The type of the elements in an `ARRAY` expression.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct ArrayElementType {
     pub lt: Token,
     pub elem_type: DataType,
     pub gt: Token,
 }
 
-impl DisplayForTarget for ArrayElementType {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            t.f(&self.lt),
-            t.f(&self.elem_type),
-            t.f(&self.gt)
-        )
-    }
-}
-
 /// A `COUNT` expression.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum CountExpression {
     CountStar {
         count_token: Token,
@@ -1223,47 +901,8 @@ pub enum CountExpression {
     },
 }
 
-impl DisplayForTarget for CountExpression {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CountExpression::CountStar {
-                count_token,
-                paren1,
-                star,
-                paren2,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(count_token),
-                    t.f(paren1),
-                    t.f(star),
-                    t.f(paren2)
-                )
-            }
-            CountExpression::CountExpression {
-                count_token,
-                paren1,
-                distinct,
-                expression,
-                paren2,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}{}",
-                    t.f(count_token),
-                    t.f(paren1),
-                    t.f(distinct),
-                    t.f(expression),
-                    t.f(paren2)
-                )
-            }
-        }
-    }
-}
-
 /// A `CASE WHEN` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct CaseWhenClause {
     pub when_token: Token,
     pub condition: Box<Expression>,
@@ -1271,34 +910,15 @@ pub struct CaseWhenClause {
     pub result: Box<Expression>,
 }
 
-impl DisplayForTarget for CaseWhenClause {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}",
-            t.f(&self.when_token),
-            t.f(&self.condition),
-            t.f(&self.then_token),
-            t.f(&self.result)
-        )
-    }
-}
-
 /// A `CASE ELSE` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct CaseElseClause {
     pub else_token: Token,
     pub result: Box<Expression>,
 }
 
-impl DisplayForTarget for CaseElseClause {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.else_token), t.f(&self.result))
-    }
-}
-
 /// A function call.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct FunctionCall {
     pub name: Identifier,
     pub paren1: Token,
@@ -1307,26 +927,12 @@ pub struct FunctionCall {
     pub over_clause: Option<OverClause>,
 }
 
-impl DisplayForTarget for FunctionCall {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}{}",
-            t.f(&self.name),
-            t.f(&self.paren1),
-            t.f(&self.args),
-            t.f(&self.paren2),
-            t.f(&self.over_clause),
-        )
-    }
-}
-
 /// An `OVER` clause for a window function.
 ///
 /// See the [official grammar][]. We only implement part of this.
 ///
 /// [official grammar]: https://cloud.google.com/bigquery/docs/reference/standard-sql/window-function-calls#syntax
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct OverClause {
     pub over_token: Token,
     pub paren1: Token,
@@ -1335,98 +941,42 @@ pub struct OverClause {
     pub paren2: Token,
 }
 
-impl DisplayForTarget for OverClause {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}{}",
-            t.f(&self.over_token),
-            t.f(&self.paren1),
-            t.f(&self.partition_by),
-            t.f(&self.order_by),
-            t.f(&self.paren2),
-        )
-    }
-}
-
 /// A `PARTITION BY` clause for a window function.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct PartitionBy {
     pub partition_token: Token,
     pub by_token: Token,
     pub expressions: NodeVec<Expression>,
 }
 
-impl DisplayForTarget for PartitionBy {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            t.f(&self.partition_token),
-            t.f(&self.by_token),
-            t.f(&self.expressions),
-        )
-    }
-}
-
 /// An `ORDER BY` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct OrderBy {
     pub order_token: Token,
     pub by_token: Token,
     pub items: NodeVec<OrderByItem>,
 }
 
-impl DisplayForTarget for OrderBy {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            t.f(&self.order_token),
-            t.f(&self.by_token),
-            t.f(&self.items),
-        )
-    }
-}
-
 /// An item in an `ORDER BY` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct OrderByItem {
     pub expression: Expression,
     pub asc_desc: Option<AscDesc>,
 }
 
-impl DisplayForTarget for OrderByItem {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.expression), t.f(&self.asc_desc))
-    }
-}
-
 /// An `ASC` or `DESC` modifier.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct AscDesc(Token);
 
-impl DisplayForTarget for AscDesc {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", t.f(&self.0))
-    }
-}
-
 /// A `LIMIT` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct Limit {
     pub limit_token: Token,
     pub value: Box<Expression>,
 }
 
-impl DisplayForTarget for Limit {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.limit_token), t.f(&self.value))
-    }
-}
-
 /// Data types.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub enum DataType {
     Bool(Token),
     Int64(Token),
@@ -1441,31 +991,9 @@ pub enum DataType {
     },
 }
 
-impl DisplayForTarget for DataType {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for DataType {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => match self {
-                DataType::Bool(token)
-                | DataType::Int64(token)
-                | DataType::Float64(token)
-                | DataType::String(token)
-                | DataType::Datetime(token) => {
-                    write!(f, "{}", t.f(token))
-                }
-                DataType::Array {
-                    array_token,
-                    lt,
-                    data_type,
-                    gt,
-                } => write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(array_token),
-                    t.f(lt),
-                    t.f(data_type),
-                    t.f(gt)
-                ),
-            },
             Target::SQLite3 => match self {
                 DataType::Bool(token) | DataType::Int64(token) => {
                     write!(f, "{}", t.f(&token.with_token_str("INTEGER")))
@@ -1484,45 +1012,28 @@ impl DisplayForTarget for DataType {
                     )
                 }
             },
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// An `AS` alias.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct Alias {
     pub as_token: Option<Token>,
     pub ident: Identifier,
 }
 
-impl DisplayForTarget for Alias {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.as_token), t.f(&self.ident))
-    }
-}
-
 /// The `FROM` clause.
-///
-/// TODO: We're keeping this simple for now.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct FromClause {
     pub from_token: Token,
     pub from_item: FromItem,
     pub join_operations: Vec<JoinOperation>,
 }
 
-impl DisplayForTarget for FromClause {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.from_token), t.f(&self.from_item))?;
-        for join_operation in &self.join_operations {
-            write!(f, "{}", t.f(join_operation))?;
-        }
-        Ok(())
-    }
-}
-
 /// Items which may appear in a `FROM` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum FromItem {
     /// A table name, optionally with an alias.
     TableName {
@@ -1547,50 +1058,8 @@ pub enum FromItem {
     },
 }
 
-impl DisplayForTarget for FromItem {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FromItem::TableName { table_name, alias } => {
-                write!(f, "{}{}", t.f(table_name), t.f(alias))
-            }
-            FromItem::Subquery {
-                paren1,
-                query,
-                paren2,
-                alias,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(paren1),
-                    t.f(query),
-                    t.f(paren2),
-                    t.f(alias)
-                )
-            }
-            FromItem::Unnest {
-                unnest_token,
-                paren1,
-                expression,
-                paren2,
-                alias,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}{}",
-                    t.f(unnest_token),
-                    t.f(paren1),
-                    t.f(expression),
-                    t.f(paren2),
-                    t.f(alias)
-                )
-            }
-        }
-    }
-}
-
 /// A join operation.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum JoinOperation {
     /// A `JOIN` clause.
     ConditionJoin {
@@ -1607,43 +1076,8 @@ pub enum JoinOperation {
     },
 }
 
-impl DisplayForTarget for JoinOperation {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JoinOperation::ConditionJoin {
-                join_type,
-                join_token,
-                from_item,
-                operator,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(join_type),
-                    t.f(join_token),
-                    t.f(from_item),
-                    t.f(operator)
-                )
-            }
-            JoinOperation::CrossJoin {
-                cross_token,
-                join_token,
-                from_item,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}",
-                    t.f(cross_token),
-                    t.f(join_token),
-                    t.f(from_item)
-                )
-            }
-        }
-    }
-}
-
 /// The type of a join.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum JoinType {
     Inner {
         inner_token: Option<Token>,
@@ -1662,37 +1096,8 @@ pub enum JoinType {
     },
 }
 
-impl DisplayForTarget for JoinType {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // TODO: Clean this up with support for printing `Option<T>`.
-        match self {
-            JoinType::Inner { inner_token } => {
-                write!(f, "{}", t.f(inner_token))
-            }
-            JoinType::Left {
-                left_token,
-                outer_token,
-            } => {
-                write!(f, "{}{}", t.f(left_token), t.f(outer_token))
-            }
-            JoinType::Right {
-                right_token,
-                outer_token,
-            } => {
-                write!(f, "{}{}", t.f(right_token), t.f(outer_token))
-            }
-            JoinType::Full {
-                full_token,
-                outer_token,
-            } => {
-                write!(f, "{}{}", t.f(full_token), t.f(outer_token))
-            }
-        }
-    }
-}
-
 /// The condition used for a `JOIN`.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum ConditionJoinOperator {
     Using {
         using_token: Token,
@@ -1706,102 +1111,50 @@ pub enum ConditionJoinOperator {
     },
 }
 
-impl DisplayForTarget for ConditionJoinOperator {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConditionJoinOperator::Using {
-                using_token,
-                paren1,
-                column_names,
-                paren2,
-            } => {
-                write!(
-                    f,
-                    "{}{}{}{}",
-                    t.f(using_token),
-                    t.f(paren1),
-                    t.f(column_names),
-                    t.f(paren2),
-                )
-            }
-            ConditionJoinOperator::On {
-                on_token,
-                expression,
-            } => {
-                write!(f, "{}{}", t.f(on_token), t.f(expression))
-            }
-        }
-    }
-}
-
 /// A `WHERE` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct WhereClause {
     pub where_token: Token,
     pub expression: Expression,
 }
 
-impl DisplayForTarget for WhereClause {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.where_token), t.f(&self.expression))
-    }
-}
-
 /// A `GROUP BY` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct GroupBy {
     pub group_token: Token,
     pub by_token: Token,
     pub expressions: NodeVec<Expression>,
 }
 
-impl DisplayForTarget for GroupBy {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            t.f(&self.group_token),
-            t.f(&self.by_token),
-            t.f(&self.expressions)
-        )
-    }
-}
-
 /// A `HAVING` clause.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct Having {
     pub having_token: Token,
     pub expression: Expression,
 }
 
-impl DisplayForTarget for Having {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.having_token), t.f(&self.expression))
-    }
-}
-
 /// A `QUALIFY` clause.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub struct Qualify {
     pub qualify_token: Token,
     pub expression: Expression,
 }
 
-impl DisplayForTarget for Qualify {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if t == Target::SQLite3 {
-            write!(f, "/*")?;
+impl Emit for Qualify {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::SQLite3 => {
+                write!(f, "/* ")?;
+                self.emit_default(t, f)?;
+                write!(f, " */")
+            }
+            _ => self.emit_default(t, f),
         }
-        write!(f, "{}{}", t.f(&self.qualify_token), t.f(&self.expression))?;
-        if t == Target::SQLite3 {
-            write!(f, "*/")?;
-        }
-        Ok(())
     }
 }
 
 /// A `DELETE FROM` statement.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct DeleteFromStatement {
     pub delete_token: Token,
     pub from_token: Token,
@@ -1810,22 +1163,8 @@ pub struct DeleteFromStatement {
     pub where_clause: Option<WhereClause>,
 }
 
-impl DisplayForTarget for DeleteFromStatement {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}{}{}",
-            t.f(&self.delete_token),
-            t.f(&self.from_token),
-            t.f(&self.table_name),
-            t.f(&self.alias),
-            t.f(&self.where_clause)
-        )
-    }
-}
-
 /// A `CREATE TABLE` statement.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub struct CreateTableStatement {
     pub create_token: Token,
     pub or_replace: Option<OrReplace>,
@@ -1834,8 +1173,8 @@ pub struct CreateTableStatement {
     pub definition: CreateTableDefinition,
 }
 
-impl DisplayForTarget for CreateTableStatement {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for CreateTableStatement {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::SQLite3 if self.or_replace.is_some() => {
                 // We need to convert this to a `DROP TABLE IF EXISTS` statement.
@@ -1843,20 +1182,12 @@ impl DisplayForTarget for CreateTableStatement {
             }
             _ => {}
         }
-        write!(
-            f,
-            "{}{}{}{}{}",
-            t.f(&self.create_token),
-            t.f(&self.or_replace),
-            t.f(&self.table_token),
-            t.f(&self.table_name),
-            t.f(&self.definition),
-        )
+        self.emit_default(t, f)
     }
 }
 
 /// A `CREATE VIEW` statement.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub struct CreateViewStatement {
     pub create_token: Token,
     pub or_replace: Option<OrReplace>,
@@ -1867,8 +1198,8 @@ pub struct CreateViewStatement {
     pub query: QueryStatement,
 }
 
-impl DisplayForTarget for CreateViewStatement {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for CreateViewStatement {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::SQLite3 if self.or_replace.is_some() => {
                 // We need to convert add a `DROP VIEW IF EXISTS` statement.
@@ -1876,38 +1207,28 @@ impl DisplayForTarget for CreateViewStatement {
             }
             _ => {}
         }
-
-        write!(
-            f,
-            "{}{}{}{}{}{}",
-            t.f(&self.create_token),
-            t.f(&self.or_replace),
-            t.f(&self.view_token),
-            t.f(&self.view_name),
-            t.f(&self.as_token),
-            t.f(&self.query),
-        )
+        self.emit_default(t, f)
     }
 }
 
 /// The `OR REPLACE` modifier.
-#[derive(Debug)]
+#[derive(Debug, EmitDefault)]
 pub struct OrReplace {
     pub or_token: Token,
     pub replace_token: Token,
 }
 
-impl DisplayForTarget for OrReplace {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Emit for OrReplace {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::BigQuery => write!(f, "{}{}", t.f(&self.or_token), t.f(&self.replace_token)),
             Target::SQLite3 => Ok(()),
+            _ => self.emit_default(t, f),
         }
     }
 }
 
 /// The part of a `CREATE TABLE` statement that defines the columns.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub enum CreateTableDefinition {
     /// ( column_definition [, ...] )
     Columns {
@@ -1922,57 +1243,19 @@ pub enum CreateTableDefinition {
     },
 }
 
-impl DisplayForTarget for CreateTableDefinition {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CreateTableDefinition::Columns {
-                paren1,
-                columns,
-                paren2,
-            } => {
-                write!(f, "{}{}{}", t.f(paren1), t.f(columns), t.f(paren2))
-            }
-            CreateTableDefinition::As {
-                as_token,
-                query_statement,
-            } => {
-                write!(f, "{}{}", t.f(as_token), t.f(query_statement))
-            }
-        }
-    }
-}
-
 /// A column definition.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct ColumnDefinition {
     pub name: Identifier,
     pub data_type: DataType,
 }
 
-impl DisplayForTarget for ColumnDefinition {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}", t.f(&self.name), t.f(&self.data_type))
-    }
-}
-
 /// A `DROP VIEW` statement.
-#[derive(Debug)]
+#[derive(Debug, Emit, EmitDefault)]
 pub struct DropViewStatement {
     pub drop_token: Token,
     pub view_token: Token,
     pub view_name: TableName,
-}
-
-impl DisplayForTarget for DropViewStatement {
-    fn fmt(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}{}{}",
-            t.f(&self.drop_token),
-            t.f(&self.view_token),
-            t.f(&self.view_name)
-        )
-    }
 }
 
 #[derive(Debug)]
@@ -3059,9 +2342,9 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
                     panic!("{}", err);
                 }
             };
-            assert_eq!(normalized, &parsed.to_string_for_target(Target::BigQuery));
+            assert_eq!(normalized, &parsed.emit_to_string(Target::BigQuery));
 
-            let sql = parsed.to_string_for_target(Target::SQLite3);
+            let sql = parsed.emit_to_string(Target::SQLite3);
             println!("  SQLite3: {}", sql);
             if let Err(err) = conn.execute_batch(&sql) {
                 panic!("failed to execute with SQLite3:\n{}\n{}", sql, err);
