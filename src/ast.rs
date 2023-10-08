@@ -51,7 +51,7 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING", "DATETIME",
 
     // Magic functions with parser integration.
-    "COUNT",
+    "COUNT", "SAFE_CAST",
 
     // Interval units.
     "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "HOUR", "MINUTE", "SECOND",
@@ -714,14 +714,7 @@ pub enum Expression {
     Interval(IntervalExpression),
     ColumnName(Identifier),
     TableAndColumnName(TableAndColumnName),
-    Cast {
-        cast_token: Token,
-        paren1: Token,
-        expression: Box<Expression>,
-        as_token: Token,
-        data_type: DataType,
-        paren2: Token,
-    },
+    Cast(Cast),
     Is {
         left: Box<Expression>,
         is_token: Token,
@@ -881,6 +874,36 @@ impl Emit for DatePart {
             Target::SQLite3 => {
                 write!(f, "'{}'", t.f(&self.date_part_token))
             }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// A cast expression.
+#[derive(Debug, EmitDefault)]
+pub struct Cast {
+    cast_token: Token,
+    paren1: Token,
+    expression: Box<Expression>,
+    as_token: Token,
+    data_type: DataType,
+    paren2: Token,
+}
+
+impl Emit for Cast {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            // For SQLite2, convert `SAFE_CAST` to `CAST`.
+            Target::SQLite3 => write!(
+                f,
+                "{}{}{}{}{}{}",
+                t.f(&self.cast_token.with_token_str("CAST")),
+                t.f(&self.paren1),
+                t.f(&self.expression),
+                t.f(&self.as_token),
+                t.f(&self.data_type),
+                t.f(&self.paren2),
+            ),
             _ => self.emit_default(t, f),
         }
     }
@@ -1656,16 +1679,7 @@ peg::parser! {
                 Expression::TableAndColumnName(table_and_column_name)
             }
             column_name:ident() { Expression::ColumnName(column_name) }
-            cast_token:k("CAST") paren1:t("(") expression:expression() as_token:k("AS") data_type:data_type() paren2:t(")") {
-                Expression::Cast {
-                    cast_token,
-                    paren1,
-                    expression: Box::new(expression),
-                    as_token,
-                    data_type,
-                    paren2,
-                }
-            }
+            cast:cast() { Expression::Cast(cast) }
         }
 
         rule literal() -> Expression
@@ -1872,6 +1886,18 @@ peg::parser! {
                 Limit {
                     limit_token,
                     value: Box::new(value),
+                }
+            }
+
+        rule cast() -> Cast
+            = cast_token:(k("CAST") / k("SAFE_CAST")) paren1:t("(") expression:expression() as_token:k("AS") data_type:data_type() paren2:t(")") {
+                Cast {
+                    cast_token,
+                    paren1,
+                    expression: Box::new(expression),
+                    as_token,
+                    data_type,
+                    paren2,
                 }
             }
 
@@ -2408,7 +2434,7 @@ mod tests {
             (r#"SELECT a, CAST(NULL AS FLOAT64) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS STRING) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS DATETIME) AS c FROM t"#, None),
-            //(r#"SELECT a, SAFE_CAST(NULL AS BOOL) AS c FROM t"#, None),
+            (r#"SELECT a, SAFE_CAST(NULL AS BOOL) AS c FROM t"#, None),
             (r#"SELECT ARRAY(1, 2)"#, None),
             (r#"SELECT ARRAY[1, 2]"#, None),
             (r#"SELECT [1, 2]"#, None),
