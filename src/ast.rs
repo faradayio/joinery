@@ -1011,7 +1011,17 @@ pub struct OrderByItem {
 
 /// An `ASC` or `DESC` modifier.
 #[derive(Debug, Emit, EmitDefault)]
-pub struct AscDesc(Token);
+pub struct AscDesc {
+    direction: Token,
+    nulls_clause: Option<NullsClause>,
+}
+
+/// A `NULLS FIRST` or `NULLS LAST` modifier.
+#[derive(Debug, Emit, EmitDefault)]
+pub struct NullsClause {
+    nulls_token: Token,
+    first_last_token: Token,
+}
 
 /// A `LIMIT` clause.
 #[derive(Debug, Emit, EmitDefault)]
@@ -1765,7 +1775,14 @@ peg::parser! {
             }
 
         rule asc_desc() -> AscDesc
-            = token:(k("ASC") / k("DESC")) { AscDesc(token) }
+            = direction:(k("ASC") / k("DESC")) nulls_clause:nulls_clause()? {
+                AscDesc { direction, nulls_clause }
+            }
+
+        rule nulls_clause() -> NullsClause
+            = nulls_token:k("NULLS") first_last_token:(k("FIRST") / k("LAST")) {
+                NullsClause { nulls_token, first_last_token }
+            }
 
         rule limit() -> Limit
             = limit_token:k("LIMIT") value:expression() {
@@ -2247,7 +2264,7 @@ mod tests {
                 None,
             ),
             (r"SELECT * FROM t ORDER BY a LIMIT 10", None),
-            //(r"SELECT * FROM t ORDER BY a DESC NULLS LAST", None),
+            (r"SELECT * FROM t ORDER BY a DESC NULLS LAST", None),
             (r"SELECT * FROM t UNION ALL SELECT * FROM t", None),
             (r"SELECT * FROM t UNION DISTINCT SELECT * FROM t", None),
             (r"SELECT * FROM t WHERE a IS NULL", None),
