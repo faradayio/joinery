@@ -776,6 +776,7 @@ pub enum Expression {
         paren2: Token,
     },
     Array(ArrayExpression),
+    Struct(StructExpression),
     Count(CountExpression),
     SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
@@ -952,6 +953,30 @@ impl Emit for ArrayExpression {
     }
 }
 
+/// A struct expression.
+#[derive(Debug, EmitDefault)]
+pub struct StructExpression {
+    pub struct_token: Token,
+    pub paren1: Token,
+    pub fields: SelectList,
+    pub paren2: Token,
+}
+
+impl Emit for StructExpression {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            Target::SQLite3 => {
+                self.struct_token.emit(t, f)?;
+                self.paren1.emit(t, f)?;
+                // TODO: Output without AS. Do we want to add `map`?
+                write!(f, "/* TODO STRUCT FIELDS */")?;
+                self.paren2.emit(t, f)
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
 /// The type of the elements in an `ARRAY` expression.
 #[derive(Debug, Emit, EmitDefault)]
 pub struct ArrayElementType {
@@ -1122,6 +1147,12 @@ pub enum DataType {
         data_type: Box<DataType>,
         gt: Token,
     },
+    Struct {
+        struct_token: Token,
+        lt: Token,
+        fields: NodeVec<StructField>,
+        gt: Token,
+    },
 }
 
 impl Emit for DataType {
@@ -1135,7 +1166,7 @@ impl Emit for DataType {
                 DataType::String(token) | DataType::Datetime(token) => {
                     write!(f, "{}", t.f(&token.with_token_str("TEXT")))
                 }
-                DataType::Array { gt, .. } => {
+                DataType::Array { gt, .. } | DataType::Struct { gt, .. } => {
                     write!(
                         f,
                         "{}",
@@ -1148,6 +1179,13 @@ impl Emit for DataType {
             _ => self.emit_default(t, f),
         }
     }
+}
+
+/// A field in a `STRUCT` type.
+#[derive(Debug, Emit, EmitDefault)]
+pub struct StructField {
+    pub name: Option<Identifier>,
+    pub data_type: DataType,
 }
 
 /// An `AS` alias.
@@ -1689,6 +1727,7 @@ peg::parser! {
                 }
             }
             array_expression:array_expression() { Expression::Array(array_expression) }
+            struct_expression:struct_expression() { Expression::Struct(struct_expression) }
             count_expression:count_expression() { Expression::Count(count_expression) }
             special_date_function_call:special_date_function_call() { Expression::SpecialDateFunctionCall(special_date_function_call) }
             function_call:function_call() { Expression::FunctionCall(function_call) }
@@ -1791,6 +1830,16 @@ peg::parser! {
                     delim2,
                 }
               }
+
+        rule struct_expression() -> StructExpression
+            = struct_token:k("STRUCT") paren1:t("(") fields:select_list() paren2:t(")") {
+                StructExpression {
+                    struct_token,
+                    paren1,
+                    fields,
+                    paren2,
+                }
+            }
 
         rule array_element_type() -> ArrayElementType
             = lt:t("<") elem_type:data_type() gt:t(">") {
@@ -1934,6 +1983,22 @@ peg::parser! {
                     lt,
                     data_type: Box::new(data_type),
                     gt,
+                }
+            }
+            / struct_token:k("STRUCT") lt:t("<") fields:sep_opt_trailing(<struct_field()>, ",") gt:t(">") {
+                DataType::Struct {
+                    struct_token,
+                    lt,
+                    fields,
+                    gt,
+                }
+            }
+
+        rule struct_field() -> StructField
+            = name:ident()? data_type:data_type() {
+                StructField {
+                    name,
+                    data_type,
                 }
             }
 
@@ -2460,9 +2525,10 @@ mod tests {
             (r#"SELECT ARRAY[1, 2]"#, None),
             (r#"SELECT [1, 2]"#, None),
             (r#"SELECT ARRAY<INT64>[]"#, None),
-            // STRUCT<..> type
-            // STRUCT(..)
-            // STRUCT<..>(..)
+            (r#"SELECT ARRAY<STRUCT<INT64, INT64>>[]"#, None),
+            (r#"SELECT ARRAY<STRUCT<a INT64, b INT64>>[]"#, None),
+            (r#"SELECT STRUCT(a, b) FROM t"#, None),
+            (r#"SELECT STRUCT(a AS c) FROM t"#, None),
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
             (r#"INSERT INTO t SELECT * FROM t"#, None),
             (r#"DELETE FROM t WHERE a = 0"#, None),
@@ -2532,6 +2598,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
             ("format_datetime", 2),
             ("generate_uuid", 0),
             ("interval", 2),
+            ("struct", -1),
         ];
         for &(fn_name, n_arg) in dummy_fns {
             conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
