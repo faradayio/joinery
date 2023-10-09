@@ -10,7 +10,7 @@ Check out:
 ## Installing
 
 ```bash
-cargo install --release --path .
+cargo install --path .
 ```
 
 ## Running

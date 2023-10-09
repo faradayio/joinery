@@ -11,10 +11,12 @@ use errors::{Context, Error, Result, SourceError};
 
 #[derive(Debug, Parser)]
 enum Opt {
+    /// Parse SQL from a CSV file containing `id` and `query` columns.
     Parse {
         /// A CSV file containing `id` and `query` columns.
         csv_path: PathBuf,
     },
+    /// Run SQL tests from a directory.
     SqlTest {
         /// A directory containing SQL test files.
         dir_path: PathBuf,
