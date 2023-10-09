@@ -1544,9 +1544,7 @@ peg::parser! {
             }
 
         rule inserted_data() -> InsertedData
-            = select_token:k("SELECT") query:query_expression() {
-                InsertedData::Select { query }
-            }
+            = query:query_expression() { InsertedData::Select { query } }
             / values_token:k("VALUES") rows:sep_opt_trailing(<row()>, ",") {
                 InsertedData::Values {
                     values_token,
@@ -2438,9 +2436,8 @@ peg::parser! {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::{functions::FunctionFlags, types, Connection};
 
-    use crate::unnest::register_unnest;
+    use crate::drivers::driver_for_target;
 
     use super::*;
 
@@ -2541,7 +2538,8 @@ mod tests {
             (r#"SELECT STRUCT(a, b) FROM t"#, None),
             (r#"SELECT STRUCT(a AS c) FROM t"#, None),
             (r#"WITH t2 AS (SELECT * FROM t) SELECT * FROM t2"#, None),
-            (r#"INSERT INTO t SELECT * FROM t"#, None),
+            (r#"INSERT INTO t VALUES (1, 2), (3,4)"#, None),
+            (r#"INSERT INTO t (SELECT * FROM t)"#, None),
             (r#"DELETE FROM t WHERE a = 0"#, None),
             (r#"DELETE FROM t AS t2 WHERE a = 0"#, None),
             (r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#, None),
@@ -2594,29 +2592,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         ];
 
         // Set up SQLite3 database for testing transpiled SQL.
-        let conn = Connection::open_in_memory().expect("failed to open SQLite3 database");
-
-        // Install our dummy `UNNEST` virtual table.
-        register_unnest(&conn).expect("failed to register UNNEST");
-
-        // Install some dummy functions that always return NULL.
-        let dummy_fns = &[
-            ("array", -1),
-            ("current_datetime", 0),
-            ("date_diff", 3),
-            ("datetime_diff", 3),
-            ("datetime_trunc", 2),
-            ("format_datetime", 2),
-            ("generate_uuid", 0),
-            ("interval", 2),
-            ("struct", -1),
-        ];
-        for &(fn_name, n_arg) in dummy_fns {
-            conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
-                Ok(types::Value::Null)
-            })
-            .expect("failed to create dummy function");
-        }
+        let conn = driver_for_target(Target::SQLite3).unwrap();
 
         // Create some fixtures.
         let fixtures = r#"
@@ -2635,7 +2611,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
                 join_id INT
             );
         "#;
-        conn.execute_batch(fixtures)
+        conn.execute_native_sql(fixtures)
             .expect("failed to create SQLite3 fixtures");
 
         for &(sql, normalized) in sql_examples {
@@ -2652,7 +2628,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
 
             let sql = parsed.emit_to_string(Target::SQLite3);
             println!("  SQLite3: {}", sql);
-            if let Err(err) = conn.execute_batch(&sql) {
+            if let Err(err) = conn.execute_native_sql(&sql) {
                 panic!("failed to execute with SQLite3:\n{}\n{}", sql, err);
             }
         }

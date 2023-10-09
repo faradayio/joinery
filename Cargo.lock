@@ -130,6 +130,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd7cc57abe963c6d3b9d8be5b06ba7c8957a930305ca90304f24ef040aa6f961"
 
 [[package]]
+name = "cli_test_dir"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bc63338a59538d4f4b767dfb6082e4d26736aadb5100894b76039a04d6ad519"
+
+[[package]]
 name = "codespan-reporting"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -288,6 +294,7 @@ name = "joinery"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "cli_test_dir",
  "codespan-reporting",
  "csv",
  "glob",

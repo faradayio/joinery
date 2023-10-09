@@ -20,5 +20,8 @@ rusqlite = { version = "0.29.0", features = ["bundled", "functions", "vtab"] }
 serde = { version = "1.0.188", features = ["derive"] }
 thiserror = "1.0.49"
 
+[dev-dependencies]
+cli_test_dir = "0.1.5"
+
 [workspace]
 members = ["joinery_macros"]

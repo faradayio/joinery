@@ -43,7 +43,7 @@ pub enum Error {
 
 impl Error {
     /// Create a new `Error::Other` from an error value.
-    fn other<E>(e: E) -> Self
+    pub fn other<E>(e: E) -> Self
     where
         E: error::Error + Send + Sync + 'static,
     {
@@ -75,6 +75,16 @@ impl Error {
         }
     }
 }
+
+/// Format an error message.
+macro_rules! format_err {
+    ($($arg:tt)*) => {
+        Error::Other(format!($($arg)*).into())
+    };
+}
+
+// A trick to make `format_err!` accessible from within this crate.
+pub(crate) use format_err;
 
 /// Helper trait used
 pub trait Context<T, E>: Sized {

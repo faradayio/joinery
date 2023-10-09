@@ -4,8 +4,8 @@ use clap::Parser;
 use serde::Deserialize;
 
 mod ast;
+mod drivers;
 mod errors;
-mod unnest;
 
 use errors::{Context, Error, Result, SourceError};
 
@@ -73,6 +73,10 @@ fn cmd_parse(csv_path: &Path) -> Result<()> {
 }
 
 fn cmd_sql_test(dir_path: &Path) -> Result<()> {
+    // Get a database driver for our target.
+    let driver = drivers::driver_for_target(ast::Target::SQLite3)?;
+
+    // Keep track of our test results.
     let mut test_count = 0usize;
     let mut test_failures: Vec<(PathBuf, Box<SourceError>)> = vec![];
 
@@ -86,7 +90,7 @@ fn cmd_sql_test(dir_path: &Path) -> Result<()> {
         let query = std::fs::read_to_string(&path).context("Failed to read test file")?;
 
         // Test query.
-        match ast::parse_sql(&query) {
+        match driver.execute_bigquery_sql(&query) {
             Ok(_) => {
                 print!(".");
             }
