@@ -1,16 +1,24 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use clap::Parser;
 use serde::Deserialize;
 
 mod ast;
+mod errors;
 mod unnest;
 
+use errors::{Context, Error, Result, SourceError};
+
 #[derive(Debug, Parser)]
-struct Opt {
-    /// A CSV file containing `id` and `query` columns.
-    csv_path: PathBuf,
+enum Opt {
+    Parse {
+        /// A CSV file containing `id` and `query` columns.
+        csv_path: PathBuf,
+    },
+    SqlTest {
+        /// A directory containing SQL test files.
+        dir_path: PathBuf,
+    },
 }
 
 /// A row in our CSV file.
@@ -24,8 +32,13 @@ struct Row {
 
 fn main() -> Result<()> {
     let opt = Opt::parse();
-    let csv_path = &opt.csv_path;
+    match opt {
+        Opt::Parse { csv_path } => cmd_parse(&csv_path),
+        Opt::SqlTest { dir_path } => cmd_sql_test(&dir_path),
+    }
+}
 
+fn cmd_parse(csv_path: &Path) -> Result<()> {
     // Keep track of how many rows we've processed and how many queries we've
     // successfully parsed.
     let mut row_count = 0;
@@ -47,7 +60,7 @@ fn main() -> Result<()> {
             }
             Err(e) => {
                 println!("ERR {}", row.id);
-                e.emit()?;
+                e.emit();
             }
         }
     }
@@ -55,4 +68,50 @@ fn main() -> Result<()> {
     println!("Parsed {} of {} queries", ok_count, row_count);
 
     Ok(())
+}
+
+fn cmd_sql_test(dir_path: &Path) -> Result<()> {
+    let mut test_count = 0usize;
+    let mut test_failures: Vec<(PathBuf, Box<SourceError>)> = vec![];
+
+    // Read directory using `glob`.
+    let pattern = format!("{}/**/*.sql", dir_path.display());
+    for entry in glob::glob(&pattern).context("Failed to read test directory")? {
+        let path = entry.context("Failed to read test file")?;
+        test_count += 1;
+
+        // Read file.
+        let query = std::fs::read_to_string(&path).context("Failed to read test file")?;
+
+        // Test query.
+        match ast::parse_sql(&query) {
+            Ok(_) => {
+                print!(".");
+            }
+            Err(Error::Source(e)) => {
+                print!("E");
+                test_failures.push((path, e));
+            }
+            Err(err) => return Err(err),
+        }
+        println!();
+    }
+
+    if test_count == 0 {
+        Err(Error::Other("No tests found".into()))
+    } else if test_failures.is_empty() {
+        println!("OK: {} tests passed", test_count);
+        Ok(())
+    } else {
+        println!(
+            "FAIL: {} of {} tests failed",
+            test_failures.len(),
+            test_count
+        );
+        for (i, (path, e)) in test_failures.iter().enumerate() {
+            println!("FAILED {}: {}", i + 1, path.display());
+            e.emit();
+        }
+        Err(Error::Other("Some tests failed".into()))
+    }
 }

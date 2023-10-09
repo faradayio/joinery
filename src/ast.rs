@@ -1,17 +1,15 @@
 // Don't bother with `Box`-ing everything for now. Allow huge enum values.
 #![allow(clippy::large_enum_variant)]
 
-use std::{borrow::Cow, error, fmt, ops::Range};
+use std::{borrow::Cow, fmt, ops::Range};
 
 use codespan_reporting::{
     diagnostic::{Diagnostic, Label},
     files::SimpleFile,
-    term::{
-        self,
-        termcolor::{ColorChoice, StandardStream},
-    },
 };
 use joinery_macros::{Emit, EmitDefault};
+
+use crate::errors::{Result, SourceError};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
 /// [`phf`](https://github.com/rust-phf/rust-phf), which generates "perfect hash
@@ -475,7 +473,7 @@ pub struct SqlProgram {
 
     /// For now, just handle single statements; BigQuery DDL is messy and maybe
     /// out of scope.
-    pub statement: Statement,
+    pub statements: NodeVec<Statement>,
 }
 
 /// A statement in our abstract syntax tree.
@@ -1340,7 +1338,27 @@ pub struct InsertIntoStatement {
     pub insert_token: Token,
     pub into_token: Token,
     pub table_name: TableName,
-    pub query: QueryExpression,
+    pub inserted_data: InsertedData,
+}
+
+/// The data to be inserted into a table.
+#[derive(Debug, Emit, EmitDefault)]
+pub enum InsertedData {
+    /// A `SELECT` statement.
+    Select { query: QueryExpression },
+    /// A `VALUES` clause.
+    Values {
+        values_token: Token,
+        rows: NodeVec<Row>,
+    },
+}
+
+/// A row in a `VALUES` clause.
+#[derive(Debug, Emit, EmitDefault)]
+pub struct Row {
+    pub paren1: Token,
+    pub expressions: NodeVec<Expression>,
+    pub paren2: Token,
 }
 
 /// A `CREATE TABLE` statement.
@@ -1438,36 +1456,8 @@ pub struct DropViewStatement {
     pub view_name: TableName,
 }
 
-#[derive(Debug)]
-pub struct ParseError {
-    pub source: peg::error::ParseError<peg::str::LineCol>,
-    pub files: SimpleFile<&'static str, String>,
-    pub diagnostic: Diagnostic<()>,
-}
-
-impl ParseError {
-    pub fn emit(&self) -> Result<(), codespan_reporting::files::Error> {
-        let writer = StandardStream::stderr(ColorChoice::Auto);
-        let config = term::Config::default();
-        let result = term::emit(&mut writer.lock(), &config, &self.files, &self.diagnostic);
-        result
-    }
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "parser error: expected {}", self.source)
-    }
-}
-
-impl error::Error for ParseError {
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        Some(&self.source)
-    }
-}
-
 /// Parse BigQuery SQL.
-pub fn parse_sql(sql: &str) -> Result<SqlProgram, Box<ParseError>> {
+pub fn parse_sql(sql: &str) -> Result<SqlProgram> {
     // Parse with or without tracing, as appropriate. The tracing code throws
     // off error positions, so we don't want to use it unless we're going to
     // use `pegviz` to visualize the parse.
@@ -1488,11 +1478,12 @@ pub fn parse_sql(sql: &str) -> Result<SqlProgram, Box<ParseError>> {
                     e.location.offset..e.location.offset + 1,
                 )
                 .with_message(format!("expected {}", e.expected))]);
-            Err(Box::new(ParseError {
+            Err(Box::new(SourceError {
                 source: e,
                 files,
                 diagnostic,
-            }))
+            })
+            .into())
         }
     }
 }
@@ -1528,8 +1519,8 @@ peg::parser! {
 
         /// Main entry point.
         pub rule sql_program() -> SqlProgram
-            = leading_ws:t("") statement:statement()
-              { SqlProgram { leading_ws, statement } }
+            = leading_ws:t("") statements:sep_opt_trailing(<statement()>, ";")
+              { SqlProgram { leading_ws, statements } }
 
         rule statement() -> Statement
             = s:query_statement() { Statement::Query(s) }
@@ -1543,12 +1534,32 @@ peg::parser! {
             = query_expression:query_expression() { QueryStatement { query_expression } }
 
         rule insert_into_statement() -> InsertIntoStatement
-            = insert_token:k("INSERT") into_token:k("INTO") table_name:table_name() query:query_expression() {
+            = insert_token:k("INSERT") into_token:k("INTO") table_name:table_name() inserted_data:inserted_data() {
                 InsertIntoStatement {
                     insert_token,
                     into_token,
                     table_name,
-                    query,
+                    inserted_data,
+                }
+            }
+
+        rule inserted_data() -> InsertedData
+            = select_token:k("SELECT") query:query_expression() {
+                InsertedData::Select { query }
+            }
+            / values_token:k("VALUES") rows:sep_opt_trailing(<row()>, ",") {
+                InsertedData::Values {
+                    values_token,
+                    rows,
+                }
+            }
+
+        rule row() -> Row
+            = paren1:t("(") expressions:sep_opt_trailing(<expression()>, ",") paren2:t(")") {
+                Row {
+                    paren1,
+                    expressions,
+                    paren2,
                 }
             }
 
@@ -2633,7 +2644,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
             let parsed = match parse_sql(sql) {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    err.emit().unwrap();
+                    err.emit();
                     panic!("{}", err);
                 }
             };

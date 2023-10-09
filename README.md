@@ -7,6 +7,23 @@ Check out:
 - `dbt-core`
 - `sqlglot`
 
+## Installing
+
+```bash
+cargo install --release --path .
+```
+
+## Running
+
+```bash
+joinery --help
+joinery parse example_queries.csv
+joinery sql-test tests/sql/
+```
+
+For the `sql-test` test format, see the [test format
+docs](./tests/sql/README.md).
+
 ## Grammar tracing
 
 Run tests with tracing enabled:
