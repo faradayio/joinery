@@ -1,3 +1,19 @@
+//! Our abstract syntax tree and parser.
+//!
+//! Many nodes in this tree implement the following types:
+//!
+//! - [`Emit`]: Emit the AST as code for a specific database. This will normally
+//!   call [`EmitDefault::emit_default`], but it can be customized.
+//! - [`EmitDefault`]: Emit the AST as BigQuery SQL, extremely close to the
+//!   original input. This is optional, and only required if that type's
+//!   [`Emit`] implementation wants to use it.
+//! - [`Drive`]: Provided by the [`derive-visitor`
+//!   crate](https://github.com/nikis05/derive-visitor). This provides an API to
+//!   traverse the AST generically, using the [`derive_visitor::Visitor`] trait.
+//!   This is honestly deep Rust magic, but it prevents us from needing to
+//!   implement custom traversal code from scratch every time we want to walk
+//!   the AST for some useful information.
+
 // Don't bother with `Box`-ing everything for now. Allow huge enum values.
 #![allow(clippy::large_enum_variant)]
 
@@ -7,6 +23,7 @@ use codespan_reporting::{
     diagnostic::{Diagnostic, Label},
     files::SimpleFile,
 };
+use derive_visitor::Drive;
 use joinery_macros::{Emit, EmitDefault};
 
 use crate::errors::{Result, SourceError};
@@ -153,10 +170,13 @@ impl<T: Emit> Emit for Vec<T> {
 }
 
 /// Our basic token type. This is used for all punctuation and keywords.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Drive)]
 pub struct Token {
+    #[drive(skip)]
     pub span: Span,
+    #[drive(skip)]
     pub ws_offset: usize,
+    #[drive(skip)]
     pub text: String,
 }
 
@@ -282,6 +302,15 @@ impl Emit for Token {
 /// A vector which contains a list of nodes, along with any whitespace that
 /// appears after a node but before any separating punctuation. This can be
 /// used either with or without a final trailing separator.
+///
+/// ## Note for [`Drive`]
+///
+/// Because of how [`Drive`] is defined, it uses `IntoIterator` to iterate
+/// over any collection type, and we can't customize that. So currently we
+/// do not send [`Vistor`] events for the separators. If we wanted to fix
+/// this, we would need to modify [`IntoIterator`] to return interleaved
+/// nodes and separators, and define custom node-only and separator-only
+/// iterators.
 #[derive(Debug)]
 pub struct NodeVec<T: fmt::Debug> {
     pub nodes: Vec<T>,
@@ -335,12 +364,13 @@ impl<T: fmt::Debug + Emit> Emit for NodeVec<T> {
 }
 
 /// An identifier, such as a column name.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Drive)]
 pub struct Identifier {
     /// Our original token.
     pub token: Token,
 
     /// Our unescaped text.
+    #[drive(skip)]
     pub text: String,
 }
 
@@ -370,6 +400,11 @@ impl Identifier {
     // Does this identifier need to be quoted?
     fn needs_quotes(&self) -> bool {
         self.is_keyword() || !self.is_c_ident()
+    }
+
+    // Get the unescaped identifier name.
+    pub fn unescaped_bigquery(&self) -> &str {
+        &self.text
     }
 }
 
@@ -421,7 +456,7 @@ fn escape_for_sqlite3(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 }
 
 /// A table name.
-#[derive(Clone, Debug, EmitDefault)]
+#[derive(Clone, Debug, Drive, EmitDefault)]
 pub enum TableName {
     ProjectDatasetTable {
         project: Identifier,
@@ -491,7 +526,7 @@ impl Emit for TableName {
 }
 
 /// A table and a column name.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct TableAndColumnName {
     pub table_name: TableName,
     pub dot: Token,
@@ -499,7 +534,7 @@ pub struct TableAndColumnName {
 }
 
 /// An entire SQL program.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct SqlProgram {
     /// Any whitespace that appears before the first statement. This is represented
     /// as a token with an empty `token_str()`.
@@ -511,7 +546,7 @@ pub struct SqlProgram {
 }
 
 /// A statement in our abstract syntax tree.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum Statement {
     Query(QueryStatement),
     DeleteFrom(DeleteFromStatement),
@@ -522,7 +557,7 @@ pub enum Statement {
 }
 
 /// A query statement. This exists mainly because it's in the official grammar.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct QueryStatement {
     pub query_expression: QueryExpression,
 }
@@ -533,7 +568,7 @@ pub struct QueryStatement {
 ///
 /// [official grammar]:
 ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#sql_syntax.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub enum QueryExpression {
     SelectExpression(SelectExpression),
     Nested {
@@ -574,7 +609,7 @@ impl Emit for QueryExpression {
 }
 
 /// Common table expressions (CTEs).
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct CommonTableExpression {
     pub name: Identifier,
     pub as_token: Token,
@@ -584,7 +619,7 @@ pub struct CommonTableExpression {
 }
 
 /// Set operators.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub enum SetOperator {
     UnionAll {
         union_token: Token,
@@ -631,7 +666,7 @@ impl Emit for SetOperator {
 }
 
 /// A `SELECT` expression.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct SelectExpression {
     pub select_options: SelectOptions,
     pub select_list: SelectList,
@@ -647,14 +682,14 @@ pub struct SelectExpression {
 }
 
 /// The head of a `SELECT`, including any modifiers.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct SelectOptions {
     pub select_token: Token,
     pub distinct: Option<Distinct>,
 }
 
 /// The `DISTINCT` modifier.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct Distinct {
     pub distinct_token: Token,
 }
@@ -677,13 +712,13 @@ pub struct Distinct {
 ///   select_expression:
 ///     expression [ [ AS ] alias ]
 /// ```
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct SelectList {
     pub items: NodeVec<SelectListItem>,
 }
 
 /// A single item in a `SELECT` list.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum SelectListItem {
     /// An expression, optionally with an alias.
     Expression {
@@ -702,7 +737,7 @@ pub enum SelectListItem {
 }
 
 /// An `EXCEPT` clause.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct Except {
     pub except_token: Token,
     pub paren1: Token,
@@ -726,7 +761,7 @@ impl Emit for Except {
 }
 
 /// An SQL expression.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub enum Expression {
     Literal {
         token: Token,
@@ -856,16 +891,16 @@ impl Emit for Expression {
 }
 
 /// A literal value.
-#[derive(Debug)]
+#[derive(Debug, Drive)]
 pub enum LiteralValue {
-    Bool(bool),
-    Int64(i64),
-    Float64(f64),
-    String(String),
+    Bool(#[drive(skip)] bool),
+    Int64(#[drive(skip)] i64),
+    Float64(#[drive(skip)] f64),
+    String(#[drive(skip)] String),
 }
 
 /// An `INTERVAL` expression.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct IntervalExpression {
     pub interval_token: Token,
     pub number: Token, // Not even bothering to parse this for now.
@@ -888,7 +923,7 @@ impl Emit for IntervalExpression {
 }
 
 /// A date part in an `INTERVAL` expression.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct DatePart {
     pub date_part_token: Token,
 }
@@ -906,7 +941,7 @@ impl Emit for DatePart {
 }
 
 /// A cast expression.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct Cast {
     cast_token: Token,
     paren1: Token,
@@ -936,7 +971,7 @@ impl Emit for Cast {
 }
 
 /// A value set for an `IN` expression.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum InValueSet {
     QueryExpression(Box<QueryExpression>),
     ExpressionList(NodeVec<Expression>),
@@ -946,7 +981,7 @@ pub enum InValueSet {
 ///
 /// Not all combinations of our fields are valid. For example, we can't have
 /// a missing `ARRAY` and a `delim1` of `(`. We'll let the parser handle that.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct ArrayExpression {
     pub array_token: Option<Token>,
     pub element_type: Option<ArrayElementType>,
@@ -978,7 +1013,7 @@ impl Emit for ArrayExpression {
 }
 
 /// A struct expression.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct StructExpression {
     pub struct_token: Token,
     pub paren1: Token,
@@ -1002,7 +1037,7 @@ impl Emit for StructExpression {
 }
 
 /// The type of the elements in an `ARRAY` expression.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct ArrayElementType {
     pub lt: Token,
     pub elem_type: DataType,
@@ -1010,7 +1045,7 @@ pub struct ArrayElementType {
 }
 
 /// A `COUNT` expression.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum CountExpression {
     CountStar {
         count_token: Token,
@@ -1028,7 +1063,7 @@ pub enum CountExpression {
 }
 
 /// A `CASE WHEN` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct CaseWhenClause {
     pub when_token: Token,
     pub condition: Box<Expression>,
@@ -1037,7 +1072,7 @@ pub struct CaseWhenClause {
 }
 
 /// A `CASE ELSE` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct CaseElseClause {
     pub else_token: Token,
     pub result: Box<Expression>,
@@ -1046,7 +1081,7 @@ pub struct CaseElseClause {
 /// Special "functions" that manipulate dates. These all take a [`DatePart`]
 /// as a final argument. So in Lisp sense, these are special forms or macros,
 /// not ordinary function calls.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct SpecialDateFunctionCall {
     pub function_name: Identifier,
     pub paren1: Token,
@@ -1055,14 +1090,14 @@ pub struct SpecialDateFunctionCall {
 }
 
 /// An expression or a date part.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum ExpressionOrDatePart {
     Expression(Expression),
     DatePart(DatePart),
 }
 
 /// A function call.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct FunctionCall {
     pub name: FunctionName,
     pub paren1: Token,
@@ -1074,10 +1109,20 @@ pub struct FunctionCall {
 /// A function name. Some function names are supposedly keywords, and I'm not
 /// sure what all the implications of that might be. But this is good enough to
 /// handle them for now.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub enum FunctionName {
     Identifier(Identifier),
     Keyword(Token),
+}
+
+impl FunctionName {
+    /// Get the unescaped function name, in the original BigQuery form.
+    pub fn unescaped_bigquery(&self) -> String {
+        match self {
+            FunctionName::Identifier(ident) => ident.unescaped_bigquery().to_owned(),
+            FunctionName::Keyword(token) => token.token_str().to_ascii_uppercase(),
+        }
+    }
 }
 
 impl Emit for FunctionName {
@@ -1104,7 +1149,7 @@ impl Emit for FunctionName {
 /// See the [official grammar][]. We only implement part of this.
 ///
 /// [official grammar]: https://cloud.google.com/bigquery/docs/reference/standard-sql/window-function-calls#syntax
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct OverClause {
     pub over_token: Token,
     pub paren1: Token,
@@ -1114,7 +1159,7 @@ pub struct OverClause {
 }
 
 /// A `PARTITION BY` clause for a window function.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct PartitionBy {
     pub partition_token: Token,
     pub by_token: Token,
@@ -1122,7 +1167,7 @@ pub struct PartitionBy {
 }
 
 /// An `ORDER BY` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct OrderBy {
     pub order_token: Token,
     pub by_token: Token,
@@ -1130,35 +1175,35 @@ pub struct OrderBy {
 }
 
 /// An item in an `ORDER BY` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct OrderByItem {
     pub expression: Expression,
     pub asc_desc: Option<AscDesc>,
 }
 
 /// An `ASC` or `DESC` modifier.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct AscDesc {
     direction: Token,
     nulls_clause: Option<NullsClause>,
 }
 
 /// A `NULLS FIRST` or `NULLS LAST` modifier.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct NullsClause {
     nulls_token: Token,
     first_last_token: Token,
 }
 
 /// A `LIMIT` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct Limit {
     pub limit_token: Token,
     pub value: Box<Expression>,
 }
 
 /// Data types.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub enum DataType {
     Bool(Token),
     Int64(Token),
@@ -1206,21 +1251,21 @@ impl Emit for DataType {
 }
 
 /// A field in a `STRUCT` type.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct StructField {
     pub name: Option<Identifier>,
     pub data_type: DataType,
 }
 
 /// An `AS` alias.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct Alias {
     pub as_token: Option<Token>,
     pub ident: Identifier,
 }
 
 /// The `FROM` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct FromClause {
     pub from_token: Token,
     pub from_item: FromItem,
@@ -1228,7 +1273,7 @@ pub struct FromClause {
 }
 
 /// Items which may appear in a `FROM` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum FromItem {
     /// A table name, optionally with an alias.
     TableName {
@@ -1254,7 +1299,7 @@ pub enum FromItem {
 }
 
 /// A join operation.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum JoinOperation {
     /// A `JOIN` clause.
     ConditionJoin {
@@ -1272,7 +1317,7 @@ pub enum JoinOperation {
 }
 
 /// The type of a join.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum JoinType {
     Inner {
         inner_token: Option<Token>,
@@ -1292,7 +1337,7 @@ pub enum JoinType {
 }
 
 /// The condition used for a `JOIN`.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum ConditionJoinOperator {
     Using {
         using_token: Token,
@@ -1307,14 +1352,14 @@ pub enum ConditionJoinOperator {
 }
 
 /// A `WHERE` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct WhereClause {
     pub where_token: Token,
     pub expression: Expression,
 }
 
 /// A `GROUP BY` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct GroupBy {
     pub group_token: Token,
     pub by_token: Token,
@@ -1322,14 +1367,14 @@ pub struct GroupBy {
 }
 
 /// A `HAVING` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct Having {
     pub having_token: Token,
     pub expression: Expression,
 }
 
 /// A `QUALIFY` clause.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct Qualify {
     pub qualify_token: Token,
     pub expression: Expression,
@@ -1349,7 +1394,7 @@ impl Emit for Qualify {
 }
 
 /// A `DELETE FROM` statement.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct DeleteFromStatement {
     pub delete_token: Token,
     pub from_token: Token,
@@ -1359,7 +1404,7 @@ pub struct DeleteFromStatement {
 }
 
 /// A `INSERT INTO` statement. We only support the `SELECT` version.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct InsertIntoStatement {
     pub insert_token: Token,
     pub into_token: Token,
@@ -1368,7 +1413,7 @@ pub struct InsertIntoStatement {
 }
 
 /// The data to be inserted into a table.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum InsertedData {
     /// A `SELECT` statement.
     Select { query: QueryExpression },
@@ -1380,7 +1425,7 @@ pub enum InsertedData {
 }
 
 /// A row in a `VALUES` clause.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct Row {
     pub paren1: Token,
     pub expressions: NodeVec<Expression>,
@@ -1388,7 +1433,7 @@ pub struct Row {
 }
 
 /// A `CREATE TABLE` statement.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct CreateTableStatement {
     pub create_token: Token,
     pub or_replace: Option<OrReplace>,
@@ -1411,7 +1456,7 @@ impl Emit for CreateTableStatement {
 }
 
 /// A `CREATE VIEW` statement.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct CreateViewStatement {
     pub create_token: Token,
     pub or_replace: Option<OrReplace>,
@@ -1436,7 +1481,7 @@ impl Emit for CreateViewStatement {
 }
 
 /// The `OR REPLACE` modifier.
-#[derive(Debug, EmitDefault)]
+#[derive(Debug, Drive, EmitDefault)]
 pub struct OrReplace {
     pub or_token: Token,
     pub replace_token: Token,
@@ -1452,7 +1497,7 @@ impl Emit for OrReplace {
 }
 
 /// The part of a `CREATE TABLE` statement that defines the columns.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum CreateTableDefinition {
     /// ( column_definition [, ...] )
     Columns {
@@ -1468,14 +1513,14 @@ pub enum CreateTableDefinition {
 }
 
 /// A column definition.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct ColumnDefinition {
     pub name: Identifier,
     pub data_type: DataType,
 }
 
 /// A `DROP VIEW` statement.
-#[derive(Debug, Emit, EmitDefault)]
+#[derive(Debug, Drive, Emit, EmitDefault)]
 pub struct DropViewStatement {
     pub drop_token: Token,
     pub view_token: Token,

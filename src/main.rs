@@ -2,6 +2,7 @@ use std::{path::PathBuf, process::exit};
 
 use clap::Parser;
 
+mod analyze;
 mod ast;
 mod cmd;
 mod drivers;
@@ -15,6 +16,10 @@ enum Opt {
     Parse {
         /// A CSV file containing `id` and `query` columns.
         csv_path: PathBuf,
+
+        /// Count function calls.
+        #[clap(long, alias = "funcs")]
+        count_function_calls: bool,
     },
     /// Run SQL tests from a directory.
     SqlTest {
@@ -26,7 +31,10 @@ enum Opt {
 fn main() {
     let opt = Opt::parse();
     let result = match opt {
-        Opt::Parse { csv_path } => cmd_parse(&csv_path),
+        Opt::Parse {
+            csv_path,
+            count_function_calls,
+        } => cmd_parse(&csv_path, count_function_calls),
         Opt::SqlTest { dir_path } => cmd_sql_test(&dir_path),
     };
     if let Err(e) = result {
