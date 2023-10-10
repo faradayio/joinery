@@ -288,12 +288,28 @@ pub struct NodeVec<T: fmt::Debug> {
     pub separators: Vec<Token>,
 }
 
+impl<T: fmt::Debug> NodeVec<T> {
+    /// Iterate over the nodes in this [`NodeVec`].
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.nodes.iter()
+    }
+}
+
 impl<T: fmt::Debug> Default for NodeVec<T> {
     fn default() -> Self {
         NodeVec {
             nodes: Vec::new(),
             separators: Vec::new(),
         }
+    }
+}
+
+impl<'a, T: fmt::Debug> IntoIterator for &'a NodeVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.nodes.iter()
     }
 }
 
@@ -319,7 +335,7 @@ impl<T: fmt::Debug + Emit> Emit for NodeVec<T> {
 }
 
 /// An identifier, such as a column name.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Identifier {
     /// Our original token.
     pub token: Token,
@@ -405,7 +421,7 @@ fn escape_for_sqlite3(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 }
 
 /// A table name.
-#[derive(Debug, EmitDefault)]
+#[derive(Clone, Debug, EmitDefault)]
 pub enum TableName {
     ProjectDatasetTable {
         project: Identifier,
@@ -422,6 +438,24 @@ pub enum TableName {
     Table {
         table: Identifier,
     },
+}
+
+impl TableName {
+    /// Get the unescaped table name, in the original BigQuery form.
+    pub fn unescaped_bigquery(&self) -> String {
+        match self {
+            TableName::ProjectDatasetTable {
+                project,
+                dataset,
+                table,
+                ..
+            } => format!("{}.{}.{}", project.text, dataset.text, table.text,),
+            TableName::DatasetTable { dataset, table, .. } => {
+                format!("{}.{}", dataset.text, table.text,)
+            }
+            TableName::Table { table } => table.text.clone(),
+        }
+    }
 }
 
 impl Emit for TableName {
