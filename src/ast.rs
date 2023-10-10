@@ -556,19 +556,17 @@ pub enum QueryExpression {
 impl Emit for QueryExpression {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // Nested needs special handling on SQLite3.
             QueryExpression::Nested {
                 paren1,
                 query,
                 paren2,
             } if t == Target::SQLite3 => {
-                // Throw in extra spaces for the erased parens.
-                write!(
-                    f,
-                    "{}{}{}",
-                    t.f(&paren1.with_erased_token_str()),
-                    t.f(query),
-                    t.f(&paren2.with_erased_token_str())
-                )
+                // Add a leading space in case the previous token is an
+                // identifier.
+                paren1.with_token_str(" SELECT * FROM (").emit(t, f)?;
+                query.emit(t, f)?;
+                paren2.emit(t, f)
             }
             _ => self.emit_default(t, f),
         }
@@ -614,24 +612,18 @@ impl Emit for SetOperator {
             // we'll substitute `UNION` with a comment saying what it really
             // should be.
             Target::SQLite3 => match self {
-                SetOperator::UnionAll { union_token, .. } => write!(f, "{}", t.f(union_token)),
-                SetOperator::UnionDistinct { union_token, .. } => {
-                    write!(
-                        f,
-                        "{}",
-                        t.f(&union_token.with_token_str("UNION/*DISTINCT*/"))
-                    )
+                SetOperator::UnionAll {
+                    union_token,
+                    all_token,
+                } => {
+                    union_token.emit(t, f)?;
+                    all_token.emit(t, f)
                 }
+                SetOperator::UnionDistinct { union_token, .. } => union_token.emit(t, f),
                 SetOperator::IntersectDistinct {
                     intersect_token, ..
-                } => write!(f, "{}", t.f(intersect_token)),
-                SetOperator::ExceptDistinct { except_token, .. } => {
-                    write!(
-                        f,
-                        "{}",
-                        t.f(&except_token.with_token_str("UNION/*EXCEPT DISTINCT*/"))
-                    )
-                }
+                } => intersect_token.emit(t, f),
+                SetOperator::ExceptDistinct { except_token, .. } => except_token.emit(t, f),
             },
             _ => self.emit_default(t, f),
         }
@@ -2202,7 +2194,7 @@ peg::parser! {
             }
 
         rule create_table_definition() -> CreateTableDefinition
-            = paren1:t("(") columns:sep(<column_definition()>, ",") paren2:t(")") {
+            = paren1:t("(") columns:sep_opt_trailing(<column_definition()>, ",") paren2:t(")") {
                 CreateTableDefinition::Columns {
                     paren1,
                     columns,

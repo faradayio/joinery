@@ -65,6 +65,7 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
 
 fn run_test(driver: &dyn Driver, sql: &str) -> std::result::Result<(), Error> {
     let ast = parse_sql(sql)?;
+    //eprintln!("SQLite3: {}", ast.emit_to_string(Target::SQLite3));
     let output_tables = find_output_tables(&ast)?;
 
     // TODO: Verify that all non-output tables are temporary.
@@ -91,7 +92,7 @@ fn run_test(driver: &dyn Driver, sql: &str) -> std::result::Result<(), Error> {
 
 /// Tables output by a test suite. This normally stores `ast::TableName`s, but
 /// we use `Option<TableName>` while extracting the table names from the AST.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct OutputTablePair<Name: Clone + fmt::Debug = ast::TableName> {
     result: Name,
     expected: Name,
