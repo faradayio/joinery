@@ -837,6 +837,7 @@ pub enum Expression {
     Array(ArrayExpression),
     Struct(StructExpression),
     Count(CountExpression),
+    CurrentDate(CurrentDate),
     SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
 }
@@ -986,7 +987,7 @@ pub struct ArrayExpression {
     pub array_token: Option<Token>,
     pub element_type: Option<ArrayElementType>,
     pub delim1: Token,
-    pub elements: NodeVec<Expression>,
+    pub definition: Option<ArrayDefinition>,
     pub delim2: Token,
 }
 
@@ -1003,9 +1004,31 @@ impl Emit for ArrayExpression {
                     f,
                     "{}{}{}",
                     t.f(&self.delim1.with_token_str("(")),
-                    t.f(&self.elements),
+                    t.f(&self.definition),
                     t.f(&self.delim2.with_token_str(")"))
                 )
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// An `ARRAY` definition. Either a `SELECT` expression or a list of
+/// expressions.
+#[derive(Debug, Drive, EmitDefault)]
+pub enum ArrayDefinition {
+    Query(Box<QueryExpression>),
+    Elements(NodeVec<Expression>),
+}
+
+impl Emit for ArrayDefinition {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // No query expressions in SQLite3.
+        match self {
+            ArrayDefinition::Query(_) if t == Target::SQLite3 => {
+                write!(f, "/*")?;
+                self.emit_default(t, f)?;
+                write!(f, "*/")
             }
             _ => self.emit_default(t, f),
         }
@@ -1076,6 +1099,31 @@ pub struct CaseWhenClause {
 pub struct CaseElseClause {
     pub else_token: Token,
     pub result: Box<Expression>,
+}
+
+/// `CURRENT_DATE` may appear as either `CURRENT_DATE` or `CURRENT_DATE()`.
+/// And different databases seem to support one or the other or both.
+#[derive(Debug, Drive, EmitDefault)]
+pub struct CurrentDate {
+    pub current_date_token: Token,
+    pub empty_parens: Option<EmptyParens>,
+}
+
+impl Emit for CurrentDate {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            // SQLite3 only supports the keyword form.
+            Target::SQLite3 => self.current_date_token.ensure_ws().emit(t, f),
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// An empty `()` expression.
+#[derive(Debug, Drive, Emit, EmitDefault)]
+pub struct EmptyParens {
+    pub paren1: Token,
+    pub paren2: Token,
 }
 
 /// Special "functions" that manipulate dates. These all take a [`DatePart`]
@@ -1809,6 +1857,7 @@ peg::parser! {
             array_expression:array_expression() { Expression::Array(array_expression) }
             struct_expression:struct_expression() { Expression::Struct(struct_expression) }
             count_expression:count_expression() { Expression::Count(count_expression) }
+            current_date:current_date() { Expression::CurrentDate(current_date) }
             special_date_function_call:special_date_function_call() { Expression::SpecialDateFunctionCall(special_date_function_call) }
             function_call:function_call() { Expression::FunctionCall(function_call) }
             paren1:t("(") expression:expression() paren2:t(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
@@ -1881,35 +1930,39 @@ peg::parser! {
             }
 
         rule array_expression() -> ArrayExpression
-            = delim1:t("[") elements:sep_opt_trailing(<expression()>, ",")? delim2:t("]") {
+            = delim1:t("[") definition:array_definition()? delim2:t("]") {
                 ArrayExpression {
                     array_token: None,
                     element_type: None,
                     delim1,
-                    elements: elements.unwrap_or_default(),
+                    definition,
                     delim2,
                 }
             }
             / array_token:k("ARRAY") element_type:array_element_type()?
-              delim1:t("[") elements:sep_opt_trailing(<expression()>, ",")? delim2:t("]") {
+              delim1:t("[") definition:array_definition()? delim2:t("]") {
                 ArrayExpression {
                     array_token: Some(array_token),
                     element_type,
                     delim1,
-                    elements: elements.unwrap_or_default(),
+                    definition,
                     delim2,
                 }
               }
             / array_token:k("ARRAY") element_type:array_element_type()?
-              delim1:t("(") elements:sep_opt_trailing(<expression()>, ",")? delim2:t(")") {
+              delim1:t("(") definition:array_definition()? delim2:t(")") {
                 ArrayExpression {
                     array_token: Some(array_token),
                     element_type,
                     delim1,
-                    elements: elements.unwrap_or_default(),
+                    definition,
                     delim2,
                 }
               }
+
+        rule array_definition() -> ArrayDefinition
+            = query:query_expression() { ArrayDefinition::Query(Box::new(query)) }
+            / expressions:sep(<expression()>, ",") { ArrayDefinition::Elements(expressions) }
 
         rule struct_expression() -> StructExpression
             = struct_token:k("STRUCT") paren1:t("(") fields:select_list() paren2:t(")") {
@@ -1945,6 +1998,19 @@ peg::parser! {
                 }
             }
 
+        rule current_date() -> CurrentDate
+            = current_date_token:k("CURRENT_DATE") empty_parens:empty_parens()? {
+                CurrentDate {
+                    current_date_token,
+                    empty_parens,
+                }
+            }
+
+        rule empty_parens() -> EmptyParens
+            = paren1:t("(") paren2:t(")") {
+                EmptyParens { paren1, paren2 }
+            }
+
         rule special_date_function_call() -> SpecialDateFunctionCall
             = function_name:special_date_function_name() paren1:t("(")
               args:sep(<expression_or_date_part()>, ",") paren2:t(")") {
@@ -1957,7 +2023,7 @@ peg::parser! {
             }
 
         rule special_date_function_name() -> Identifier
-            = token:(t("DATE_DIFF") / t("DATETIME_DIFF") / t("DATETIME_TRUNC")) {
+            = token:(t("DATE_DIFF") / t("DATE_TRUNC") / t("DATETIME_DIFF") / t("DATETIME_TRUNC")) {
                 Identifier::from_simple_token(token)
             }
 
@@ -1981,7 +2047,6 @@ peg::parser! {
 
         rule function_name() -> FunctionName
             = ident:ident() { FunctionName::Identifier(ident) }
-            / token:k("CURRENT_DATE") { FunctionName::Keyword(token) }
             / token:k("DATETIME") { FunctionName::Keyword(token) }
 
         rule over_clause() -> OverClause
@@ -2568,6 +2633,7 @@ mod tests {
                 None,
             ),
             (r"SELECT CURRENT_DATE()", None),
+            (r"SELECT CURRENT_DATE", None), // Why not both? Sigh.
             (r"SELECT DATETIME(2008, 12, 25, 05, 30, 00)", None),
             (
                 r"SELECT DATE_DIFF(CURRENT_DATE(), CURRENT_DATE(), DAY)",
@@ -2577,6 +2643,7 @@ mod tests {
                 r"SELECT DATETIME_DIFF(CURRENT_DATETIME(), CURRENT_DATETIME(), DAY)",
                 None,
             ),
+            (r"SELECT DATE_TRUNC(CURRENT_DATE(), DAY)", None),
             (r"SELECT DATETIME_TRUNC(CURRENT_DATETIME(), DAY)", None),
             (
                 r"SELECT a, RANK() OVER (PARTITION BY a ORDER BY b ASC) AS rank FROM t QUALIFY rank = 1",
@@ -2600,6 +2667,7 @@ mod tests {
             (r#"SELECT a, CAST(NULL AS STRING) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS DATETIME) AS c FROM t"#, None),
             (r#"SELECT a, SAFE_CAST(NULL AS BOOL) AS c FROM t"#, None),
+            (r#"SELECT ARRAY(SELECT 1)"#, None),
             (r#"SELECT ARRAY(1, 2)"#, None),
             (r#"SELECT ARRAY[1, 2]"#, None),
             (r#"SELECT [1, 2]"#, None),

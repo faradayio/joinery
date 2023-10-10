@@ -35,6 +35,7 @@ impl SQLite3Driver {
             ("array", -1),
             ("current_datetime", 0),
             ("date_diff", 3),
+            ("date_trunc", 2),
             ("datetime_diff", 3),
             ("datetime_trunc", 2),
             ("format_datetime", 2),
