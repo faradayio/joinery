@@ -1,9 +1,6 @@
 // Our basic error type.
 
-use std::{
-    error::{self, Error as _},
-    fmt, result,
-};
+use std::{error, fmt, result};
 
 use codespan_reporting::{
     diagnostic::Diagnostic,
@@ -27,9 +24,11 @@ pub enum Error {
     #[error(transparent)]
     Source(#[from] Box<SourceError>),
 
+    /// Two tables were not equal.
+    TablesNotEqual { message: String },
+
     /// An error with extra context. We may replace this with more specific
     /// errors later.
-    #[error("{context}")]
     Context {
         context: String,
         #[source]
@@ -42,6 +41,13 @@ pub enum Error {
 }
 
 impl Error {
+    /// Create a new `Error::TablesNotEqual`.
+    pub fn tables_not_equal(message: impl Into<String>) -> Self {
+        Error::TablesNotEqual {
+            message: message.into(),
+        }
+    }
+
     /// Create a new `Error::Other` from an error value.
     pub fn other<E>(e: E) -> Self
     where
@@ -57,21 +63,35 @@ impl Error {
             Error::Source(e) => {
                 e.emit();
             }
-            e => {
-                // Skip transparent errors.
-                let next = match e {
-                    Error::Source(e) => e.source(),
-                    Error::Other(e) => e.source(),
-                    Error::Context { .. } => Some::<&dyn error::Error>(e),
-                }
-                .expect("should always have a source error");
-
-                // Print out the error and its causes.
+            _ => {
+                let next = self.skip_transparent();
                 eprintln!("ERROR: {}", next);
-                while let Some(next) = next.source() {
-                    eprintln!("  caused by: {}", next);
+                while let Some(source) = next.source() {
+                    eprintln!("  caused by: {}", source);
                 }
             }
+        }
+    }
+
+    /// Skip "transparent" errors, like `Source` and `Other`.
+    pub fn skip_transparent(&self) -> &(dyn error::Error + 'static) {
+        match self {
+            Error::Source(e) => e.as_ref(),
+            Error::Other(e) => e.as_ref(),
+            Error::TablesNotEqual { .. } | Error::Context { .. } => self,
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // We include transparent errors here, in case someone prints them
+        // without a full chain.
+        match self {
+            Error::Source(e) => write!(f, "{}", e),
+            Error::TablesNotEqual { message } => write!(f, "{}", message),
+            Error::Context { context, source } => write!(f, "{}: {}", context, source),
+            Error::Other(e) => write!(f, "{}", e),
         }
     }
 }

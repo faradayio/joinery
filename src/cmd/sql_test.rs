@@ -8,7 +8,7 @@ use std::{
 use crate::{
     ast::{self, parse_sql, CreateTableStatement, CreateViewStatement},
     drivers::{self, Driver},
-    errors::{format_err, Context, Error, Result, SourceError},
+    errors::{format_err, Context, Error, Result},
 };
 
 /// Run our SQL test suite.
@@ -18,7 +18,7 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
 
     // Keep track of our test results.
     let mut test_count = 0usize;
-    let mut test_failures: Vec<(PathBuf, Box<SourceError>)> = vec![];
+    let mut test_failures: Vec<(PathBuf, Error)> = vec![];
 
     // Read directory using `glob`.
     let pattern = format!("{}/**/*.sql", dir_path.display());
@@ -34,7 +34,7 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
             Ok(_) => {
                 print!(".");
             }
-            Err(Error::Source(e)) => {
+            Err(e @ Error::Source(_)) | Err(e @ Error::TablesNotEqual { .. }) => {
                 print!("E");
                 test_failures.push((path, e));
             }
@@ -49,23 +49,31 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
         println!("OK: {} tests passed", test_count);
         Ok(())
     } else {
+        for (i, (path, e)) in test_failures.iter().enumerate() {
+            println!("\nFAILED {}: {}", i + 1, path.display());
+            e.emit();
+        }
+
         println!(
             "FAIL: {} of {} tests failed",
             test_failures.len(),
             test_count
         );
-        for (i, (path, e)) in test_failures.iter().enumerate() {
-            println!("FAILED {}: {}", i + 1, path.display());
-            e.emit();
-        }
+
         Err(Error::Other("Some tests failed".into()))
     }
 }
 
 fn run_test(driver: &dyn Driver, sql: &str) -> std::result::Result<(), Error> {
     let ast = parse_sql(sql)?;
-    let _output_tables = find_output_tables(&ast)?;
-    driver.execute_ast(&ast)
+    let output_tables = find_output_tables(&ast)?;
+    driver.execute_ast(&ast)?;
+    for OutputTablePair { result, expected } in output_tables {
+        let result = result.unescaped_bigquery();
+        let expected = expected.unescaped_bigquery();
+        driver.compare_tables(&result, &expected)?;
+    }
+    Ok(())
 }
 
 /// Tables output by a test suite. This normally stores `ast::TableName`s, but

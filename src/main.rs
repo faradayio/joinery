@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, process::exit};
 
 use clap::Parser;
 
@@ -8,7 +8,6 @@ mod drivers;
 mod errors;
 
 use cmd::{parse::cmd_parse, sql_test::cmd_sql_test};
-use errors::Result;
 
 #[derive(Debug, Parser)]
 enum Opt {
@@ -24,10 +23,14 @@ enum Opt {
     },
 }
 
-fn main() -> Result<()> {
+fn main() {
     let opt = Opt::parse();
-    match opt {
+    let result = match opt {
         Opt::Parse { csv_path } => cmd_parse(&csv_path),
         Opt::SqlTest { dir_path } => cmd_sql_test(&dir_path),
+    };
+    if let Err(e) = result {
+        e.emit();
+        exit(1);
     }
 }
