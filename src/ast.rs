@@ -66,7 +66,7 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING", "DATETIME",
 
     // Magic functions with parser integration.
-    "COUNT", "SAFE_CAST",
+    "COUNT", "SAFE_CAST", "ORDINAL",
 
     // Interval units.
     "YEAR", "QUARTER", "MONTH", "WEEK", "DAY", "HOUR", "MINUTE", "SECOND",
@@ -790,9 +790,15 @@ pub enum Expression {
         left: Box<Expression>,
         not_token: Option<Token>,
         in_token: Token,
-        paren1: Token,
         value_set: InValueSet,
-        paren2: Token,
+    },
+    Between {
+        left: Box<Expression>,
+        not_token: Option<Token>,
+        between_token: Token,
+        middle: Box<Expression>,
+        and_token: Token,
+        right: Box<Expression>,
     },
     And {
         left: Box<Expression>,
@@ -840,6 +846,7 @@ pub enum Expression {
     CurrentDate(CurrentDate),
     SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
+    Index(IndexExpression),
 }
 
 impl Expression {
@@ -971,11 +978,29 @@ impl Emit for Cast {
     }
 }
 
-/// A value set for an `IN` expression.
+/// A value set for an `IN` expression. See the [official grammar][].
+///
+/// [official grammar]:
+///     https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#in_operators
 #[derive(Debug, Drive, Emit, EmitDefault)]
 pub enum InValueSet {
-    QueryExpression(Box<QueryExpression>),
-    ExpressionList(NodeVec<Expression>),
+    QueryExpression {
+        paren1: Token,
+        query: Box<QueryExpression>,
+        paren2: Token,
+    },
+    ExpressionList {
+        paren1: Token,
+        expressions: NodeVec<Expression>,
+        paren2: Token,
+    },
+    /// `IN UNNEST` is handled using a special grammar rule.
+    Unnest {
+        unnest_token: Token,
+        paren1: Token,
+        expression: Box<Expression>,
+        paren2: Token,
+    },
 }
 
 /// An `ARRAY` expression. This takes a bunch of different forms in BigQuery.
@@ -1303,6 +1328,70 @@ impl Emit for DataType {
 pub struct StructField {
     pub name: Option<Identifier>,
     pub data_type: DataType,
+}
+
+/// An array index expression.
+#[derive(Debug, Drive, EmitDefault)]
+pub struct IndexExpression {
+    pub expression: Box<Expression>,
+    pub bracket1: Token,
+    pub index: IndexOffset,
+    pub bracket2: Token,
+}
+
+impl Emit for IndexExpression {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match t {
+            // SQLite3 doesn't support array indexing.
+            Target::SQLite3 => {
+                write!(f, "ARRAY_INDEX(")?;
+                self.expression.emit(t, f)?;
+                write!(f, ", ")?;
+                self.index.emit(t, f)?;
+                self.bracket2.with_token_str(")").emit(t, f)
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// Different ways to index arrays.
+#[derive(Debug, Drive, EmitDefault)]
+pub enum IndexOffset {
+    Simple(Box<Expression>),
+    Offset {
+        offset_token: Token,
+        paren1: Token,
+        expression: Box<Expression>,
+        paren2: Token,
+    },
+    Ordinal {
+        ordinal_token: Token,
+        paren1: Token,
+        expression: Box<Expression>,
+        paren2: Token,
+    },
+}
+
+impl Emit for IndexOffset {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Convert everything to `Simple` for SQLite3.
+        match self {
+            IndexOffset::Offset { expression, .. } if t == Target::SQLite3 => expression.emit(t, f),
+            IndexOffset::Ordinal {
+                paren1,
+                expression,
+                paren2,
+                ..
+            } if t == Target::SQLite3 => {
+                paren1.emit(t, f)?;
+                expression.emit(t, f)?;
+                paren2.emit(t, f)?;
+                write!(f, " - 1")
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// An `AS` alias.
@@ -1801,24 +1890,42 @@ peg::parser! {
 
         /// Expressions. See the [precedence table][] for details.
         ///
-        /// [precedence table]: https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#operator_precedence
+        /// We split `expression` and `expression_no_and` because `AND` also
+        /// appears in `x BETWEEN y AND z`, and we don't want to parse that as
+        /// `x BETWEEN (y AND z)`. But `peg` is greedy and will do that if we
+        /// let it.
+        ///
+        /// [precedence table]:
+        ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#operator_precedence
         rule expression() -> Expression = precedence! {
             left:(@) or_token:k("OR") right:@ { Expression::Or { left: Box::new(left), or_token, right: Box::new(right) } }
             --
             left:(@) and_token:k("AND") right:@ { Expression::And { left: Box::new(left), and_token, right: Box::new(right) } }
             --
+            expr:expression_no_and() { expr }
+        }
+
+        rule expression_no_and() -> Expression = precedence! {
             not_token:k("NOT") expression:@ { Expression::Not { not_token, expression: Box::new(expression) } }
             --
             left:(@) is_token:k("IS") right:@ { Expression::Is { left: Box::new(left), is_token, right: Box::new(right) } }
             left:(@) is_token:k("IS") not_token:k("NOT") right:@ { Expression::IsNot { left: Box::new(left), is_token, not_token, right: Box::new(right) } }
-            left:(@) not_token:k("NOT")? in_token:k("IN") paren1:t("(") value_set:in_value_set() paren2:t(")") {
+            left:(@) not_token:k("NOT")? in_token:k("IN") value_set:in_value_set() {
                 Expression::In {
                     left: Box::new(left),
                     not_token,
                     in_token,
-                    paren1,
                     value_set,
-                    paren2,
+                }
+            }
+            left:(@) not_token:k("NOT")? between_token:k("BETWEEN") middle:expression_no_and() and_token:k("AND") right:@ {
+                Expression::Between {
+                    left: Box::new(left),
+                    not_token,
+                    between_token,
+                    middle: Box::new(middle),
+                    and_token,
+                    right: Box::new(right),
                 }
             }
             left:(@) op_token:t("=") right:@ { Expression::binop(left, op_token, right) }
@@ -1833,6 +1940,15 @@ peg::parser! {
             --
             left:(@) op_token:t("*") right:@ { Expression::binop(left, op_token, right) }
             left:(@) op_token:t("/") right:@ { Expression::binop(left, op_token, right) }
+            --
+            arr:(@) bracket1:t("[") index:index_offset() bracket2:t("]") {
+                Expression::Index(IndexExpression {
+                    expression: Box::new(arr),
+                    bracket1,
+                    index,
+                    bracket2,
+                })
+            }
             --
             case_token:k("CASE") when_clauses:(case_when_clause()*) else_clause:case_else_clause()? end_token:k("END") {
                 Expression::Case {
@@ -1908,8 +2024,28 @@ peg::parser! {
             }
 
         rule in_value_set() -> InValueSet
-            = query_expression:query_expression() { InValueSet::QueryExpression(Box::new(query_expression)) }
-            / expressions:sep(<expression()>, ",") { InValueSet::ExpressionList(expressions) }
+            = paren1:t("(") query_expression:query_expression() paren2:t(")") {
+                InValueSet::QueryExpression {
+                    paren1,
+                    query: Box::new(query_expression),
+                    paren2,
+                }
+            }
+            / paren1:t("(") expressions:sep(<expression()>, ",") paren2:t(")") {
+                InValueSet::ExpressionList {
+                    paren1,
+                    expressions,
+                    paren2,
+                }
+            }
+            / unnest_token:k("UNNEST") paren1:t("(") expression:expression() paren2:t(")") {
+                InValueSet::Unnest {
+                    unnest_token,
+                    paren1,
+                    expression: Box::new(expression),
+                    paren2,
+                }
+            }
 
         rule case_when_clause() -> CaseWhenClause
             = when_token:k("WHEN") condition:expression() then_token:k("THEN") result:expression() {
@@ -1928,6 +2064,25 @@ peg::parser! {
                     result: Box::new(result),
                 }
             }
+
+        rule index_offset() -> IndexOffset
+            = offset_token:k("OFFSET") paren1:t("(") expression:expression() paren2:t(")") {
+                IndexOffset::Offset {
+                    offset_token,
+                    paren1,
+                    expression: Box::new(expression),
+                    paren2,
+                }
+            }
+            / ordinal_token:k("ORDINAL") paren1:t("(") expression:expression() paren2:t(")") {
+                IndexOffset::Ordinal {
+                    ordinal_token,
+                    paren1,
+                    expression: Box::new(expression),
+                    paren2,
+                }
+            }
+            / expression:expression() { IndexOffset::Simple(Box::new(expression)) }
 
         rule array_expression() -> ArrayExpression
             = delim1:t("[") definition:array_definition()? delim2:t("]") {
@@ -2614,10 +2769,13 @@ mod tests {
             (r"SELECT * FROM t WHERE a = 0 AND b = 0", None),
             (r"SELECT * FROM t WHERE a = 0 OR b = 0", None),
             (r"SELECT * FROM t WHERE a < 0.0", None),
+            (r"SELECT * FROM t WHERE a BETWEEN 1 AND 10", None),
+            (r"SELECT * FROM t WHERE a NOT BETWEEN 1 AND 10", None),
             (r"SELECT INTERVAL -3 DAY", None),
             (r"SELECT * FROM t WHERE a IN (1,2)", None),
             (r"SELECT * FROM t WHERE a NOT IN (1,2)", None),
             (r"SELECT * FROM t WHERE a IN (SELECT b FROM t)", None),
+            (r"SELECT * FROM t WHERE a IN UNNEST([1])", None),
             (r"SELECT IF(a = 0, 1, 2) c FROM t", None),
             (r"SELECT CASE WHEN a = 0 THEN 1 ELSE 2 END c FROM t", None),
             (r"SELECT TRUE AND FALSE", None),
@@ -2671,6 +2829,9 @@ mod tests {
             (r#"SELECT ARRAY(1, 2)"#, None),
             (r#"SELECT ARRAY[1, 2]"#, None),
             (r#"SELECT [1, 2]"#, None),
+            (r#"SELECT [1, 2][0]"#, None),
+            (r#"SELECT [1, 2][OFFSET(0)]"#, None),
+            (r#"SELECT [1, 2][ORDINAL(0)]"#, None),
             (r#"SELECT ARRAY<INT64>[]"#, None),
             (r#"SELECT ARRAY<STRUCT<INT64, INT64>>[]"#, None),
             (r#"SELECT ARRAY<STRUCT<a INT64, b INT64>>[]"#, None),

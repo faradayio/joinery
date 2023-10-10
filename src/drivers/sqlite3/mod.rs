@@ -33,6 +33,7 @@ impl SQLite3Driver {
         // Install some dummy functions that always return NULL.
         let dummy_fns = &[
             ("array", -1),
+            ("array_index", 2),
             ("current_datetime", 0),
             ("date_diff", 3),
             ("date_trunc", 2),
