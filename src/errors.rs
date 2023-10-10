@@ -1,6 +1,9 @@
 // Our basic error type.
 
-use std::{error, fmt, result};
+use std::{
+    error::{self, Error as _},
+    fmt, result,
+};
 
 use codespan_reporting::{
     diagnostic::Diagnostic,
@@ -10,33 +13,26 @@ use codespan_reporting::{
         termcolor::{ColorChoice, StandardStream},
     },
 };
-use thiserror::Error;
 
 /// Our standard result type.
 pub type Result<T, E = Error> = result::Result<T, E>;
 
 /// Our standard error type.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// An error occurred in SQL source code supplied by the user, either at
     /// parse time or later.
-    #[error(transparent)]
-    Source(#[from] Box<SourceError>),
+    Source(Box<SourceError>),
 
     /// Two tables were not equal.
     TablesNotEqual { message: String },
 
     /// An error with extra context. We may replace this with more specific
     /// errors later.
-    Context {
-        context: String,
-        #[source]
-        source: Box<Error>,
-    },
+    Context { context: String, source: Box<Error> },
 
     /// An unknown error occurred.
-    #[error(transparent)]
     Other(Box<dyn error::Error + Send + Sync + 'static>),
 }
 
@@ -64,34 +60,51 @@ impl Error {
                 e.emit();
             }
             _ => {
-                let next = self.skip_transparent();
-                eprintln!("ERROR: {}", next);
-                while let Some(source) = next.source() {
+                let first = if self.is_transparent() {
+                    self.source().unwrap()
+                } else {
+                    self
+                };
+                eprintln!("ERROR: {}", first);
+                while let Some(source) = first.source() {
                     eprintln!("  caused by: {}", source);
                 }
             }
         }
     }
 
-    /// Skip "transparent" errors, like `Source` and `Other`.
-    pub fn skip_transparent(&self) -> &(dyn error::Error + 'static) {
+    /// Should this error be treated as "transparent" in error output?
+    pub fn is_transparent(&self) -> bool {
         match self {
-            Error::Source(e) => e.as_ref(),
-            Error::Other(e) => e.as_ref(),
-            Error::TablesNotEqual { .. } | Error::Context { .. } => self,
+            Error::Source(_) | Error::Other(_) => true,
+            Error::TablesNotEqual { .. } | Error::Context { .. } => false,
         }
+    }
+}
+
+impl From<SourceError> for Error {
+    fn from(e: SourceError) -> Self {
+        Error::Source(Box::new(e))
     }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // We include transparent errors here, in case someone prints them
-        // without a full chain.
         match self {
-            Error::Source(e) => write!(f, "{}", e),
+            Error::Source(e) => e.fmt(f),
             Error::TablesNotEqual { message } => write!(f, "{}", message),
             Error::Context { context, source } => write!(f, "{}: {}", context, source),
-            Error::Other(e) => write!(f, "{}", e),
+            Error::Other(e) => e.fmt(f),
+        }
+    }
+}
+
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Error::Source(e) => Some(e.as_ref()),
+            Error::Other(e) => Some(e.as_ref()),
+            Error::TablesNotEqual { .. } | Error::Context { .. } => None,
         }
     }
 }

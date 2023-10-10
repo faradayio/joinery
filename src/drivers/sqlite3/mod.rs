@@ -64,6 +64,11 @@ impl Driver for SQLite3Driver {
             .context("failed to execute SQL")
     }
 
+    fn drop_table_if_exists(&self, table_name: &str) -> Result<()> {
+        let sql = format!("DROP TABLE IF EXISTS '{}'", sqlite3_escape(table_name));
+        self.execute_native_sql(&sql)
+    }
+
     fn compare_tables(&self, result_table: &str, expected_table: &str) -> Result<()> {
         self.compare_tables_impl(result_table, expected_table)
     }

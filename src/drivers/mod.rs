@@ -45,6 +45,9 @@ pub trait Driver {
         self.execute_native_sql(&sql)
     }
 
+    /// Drop a table if it exists.
+    fn drop_table_if_exists(&self, table_name: &str) -> Result<()>;
+
     /// Compare two tables for equality. This is done by querying all rows
     /// from both tables, sorted by all columns, and comparing the results.
     ///

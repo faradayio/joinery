@@ -34,14 +34,13 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
             Ok(_) => {
                 print!(".");
             }
-            Err(e @ Error::Source(_)) | Err(e @ Error::TablesNotEqual { .. }) => {
+            Err(e) => {
                 print!("E");
                 test_failures.push((path, e));
             }
-            Err(err) => return Err(err),
         }
-        println!();
     }
+    println!();
 
     if test_count == 0 {
         Err(Error::Other("No tests found".into()))
@@ -67,11 +66,25 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
 fn run_test(driver: &dyn Driver, sql: &str) -> std::result::Result<(), Error> {
     let ast = parse_sql(sql)?;
     let output_tables = find_output_tables(&ast)?;
+
+    // TODO: Verify that all non-output tables are temporary.
+
+    // Clean up any output tables from previous runs that we didn't clean up.
+    for OutputTablePair { result, expected } in output_tables.iter() {
+        let result = result.unescaped_bigquery();
+        let expected = expected.unescaped_bigquery();
+        driver.drop_table_if_exists(&result)?;
+        driver.drop_table_if_exists(&expected)?;
+    }
+
+    // Execute the AST and compare output tables.
     driver.execute_ast(&ast)?;
     for OutputTablePair { result, expected } in output_tables {
         let result = result.unescaped_bigquery();
         let expected = expected.unescaped_bigquery();
         driver.compare_tables(&result, &expected)?;
+        driver.drop_table_if_exists(&result)?;
+        driver.drop_table_if_exists(&expected)?;
     }
     Ok(())
 }

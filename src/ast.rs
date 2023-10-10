@@ -1512,11 +1512,11 @@ pub fn parse_sql(sql: &str) -> Result<SqlProgram> {
                     e.location.offset..e.location.offset + 1,
                 )
                 .with_message(format!("expected {}", e.expected))]);
-            Err(Box::new(SourceError {
+            Err(SourceError {
                 source: e,
                 files,
                 diagnostic,
-            })
+            }
             .into())
         }
     }
