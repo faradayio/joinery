@@ -2004,6 +2004,16 @@ peg::parser! {
                     value: LiteralValue::String(String::from_iter(chars)),
                 }
             } }
+            / quiet! { token:token("string", <"r'" [^ '\'']* "'">) {
+                let trimmed = &token.token_str()[2..token.token_str().len() - 1];
+                let value = LiteralValue::String(trimmed.to_string());
+                Expression::Literal { token, value }
+            } }
+            / quiet! { token:token("string", <"r\"" [^ '"']* "\"">) {
+                let trimmed = &token.token_str()[2..token.token_str().len() - 1];
+                let value = LiteralValue::String(trimmed.to_string());
+                Expression::Literal { token, value }
+            } }
             / expected!("literal")
 
         rule interval_expression() -> IntervalExpression
