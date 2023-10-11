@@ -1,6 +1,6 @@
 //! Our SQLite3 driver.
 
-use std::borrow::Cow;
+use std::{fmt, vec};
 
 use rusqlite::{functions::FunctionFlags, types};
 
@@ -67,7 +67,7 @@ impl Driver for SQLite3Driver {
     }
 
     fn drop_table_if_exists(&self, table_name: &str) -> Result<()> {
-        let sql = format!("DROP TABLE IF EXISTS '{}'", sqlite3_escape(table_name));
+        let sql = format!("DROP TABLE IF EXISTS {}", SQLite3Ident(table_name));
         self.execute_native_sql(&sql)
     }
 
@@ -103,7 +103,7 @@ impl DriverImpl for SQLite3Driver {
     ) -> Result<Self::Rows> {
         let column_list = columns
             .iter()
-            .map(|c| format!("\"{}\"", sqlite3_escape(&c.name)))
+            .map(|c| sqlite3_quote_ident(&c.name))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
@@ -141,25 +141,44 @@ impl std::fmt::Display for Value {
             rusqlite::types::Value::Null => write!(f, "NULL"),
             rusqlite::types::Value::Integer(i) => write!(f, "{}", i),
             rusqlite::types::Value::Real(r) => write!(f, "{}", r),
-            rusqlite::types::Value::Text(s) => write!(f, "'{}'", sqlite3_escape(s)),
+            rusqlite::types::Value::Text(s) => write!(f, "{}", SQLite3String(s)),
             rusqlite::types::Value::Blob(b) => write!(f, "{:?}", b),
         }
     }
 }
 
-/// Escape a string or identifier for use in a SQLite3 query. Does not include
-/// opening and closing quotes.
-pub fn sqlite3_escape(s: &str) -> Cow<'_, str> {
-    if s.chars().any(|c| c == '"' || c == '\'') {
-        let mut escaped = String::new();
-        for c in s.chars() {
-            if c == '"' || c == '\'' || c == '\\' {
-                escaped.push('\\');
-            }
-            escaped.push(c);
+/// Escape an identifier for use in a SQLite3 query.
+fn sqlite3_quote_ident(s: &str) -> String {
+    format!("{}", SQLite3Ident(s))
+}
+
+/// Format a single- or double-quoted string for use in a SQLite3 query. SQLite3
+/// does not support backslash escapes.
+fn sqlite3_quote_fmt(s: &str, quote_char: char, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{}", quote_char)?;
+    for c in s.chars() {
+        if c == quote_char {
+            write!(f, "{}", quote_char)?;
         }
-        Cow::Owned(escaped)
-    } else {
-        Cow::Borrowed(s)
+        write!(f, "{}", c)?;
+    }
+    write!(f, "{}", quote_char)
+}
+
+/// Formatting wrapper for single-quoted strings.
+pub struct SQLite3String<'a>(pub &'a str);
+
+impl fmt::Display for SQLite3String<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        sqlite3_quote_fmt(self.0, '\'', f)
+    }
+}
+
+/// Formatting wrapper for double-quoted identifiers.
+pub struct SQLite3Ident<'a>(pub &'a str);
+
+impl fmt::Display for SQLite3Ident<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        sqlite3_quote_fmt(self.0, '"', f)
     }
 }

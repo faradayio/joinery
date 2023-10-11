@@ -17,7 +17,11 @@
 // Don't bother with `Box`-ing everything for now. Allow huge enum values.
 #![allow(clippy::large_enum_variant)]
 
-use std::{borrow::Cow, fmt, ops::Range};
+use std::{
+    borrow::Cow,
+    fmt::{self, Display as _},
+    ops::Range,
+};
 
 use codespan_reporting::{
     diagnostic::{Diagnostic, Label},
@@ -26,7 +30,14 @@ use codespan_reporting::{
 use derive_visitor::Drive;
 use joinery_macros::{Emit, EmitDefault};
 
-use crate::errors::{Result, SourceError};
+use crate::{
+    drivers::{
+        bigquery::BigQueryName,
+        sqlite3::{SQLite3Ident, SQLite3String},
+    },
+    errors::{Result, SourceError},
+    util::is_c_ident,
+};
 
 /// None of these keywords should ever be matched as a bare identifier. We use
 /// [`phf`](https://github.com/rust-phf/rust-phf), which generates "perfect hash
@@ -389,12 +400,7 @@ impl Identifier {
 
     /// Is this a valid C-style identifier?
     fn is_c_ident(&self) -> bool {
-        let mut chars = self.text.chars();
-        match chars.next() {
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-            _ => return false,
-        }
-        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        is_c_ident(&self.text)
     }
 
     // Does this identifier need to be quoted?
@@ -412,47 +418,24 @@ impl Emit for Identifier {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.needs_quotes() {
             match t {
-                Target::BigQuery => {
-                    write!(f, "`")?;
-                    escape_for_bigquery(&self.text, f)?;
-                    write!(f, "`{}", t.f(&self.token.ws_only()))
-                }
-                Target::SQLite3 => {
-                    write!(f, "\"")?;
-                    escape_for_sqlite3(&self.text, f)?;
-                    write!(f, "\"{}", t.f(&self.token.ws_only()))
-                }
+                Target::BigQuery => write!(
+                    f,
+                    "{}{}",
+                    BigQueryName(&self.text),
+                    t.f(&self.token.ws_only())
+                ),
+
+                Target::SQLite3 => write!(
+                    f,
+                    "{}{}",
+                    SQLite3Ident(&self.text),
+                    t.f(&self.token.ws_only())
+                ),
             }
         } else {
             write!(f, "{}{}", self.text, t.f(&self.token.ws_only()))
         }
     }
-}
-
-/// Format `s` as a string literal for BigQuery. Does not include any
-/// surrounding quotes, so you can use it with identifiers or strings.
-fn escape_for_bigquery(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    for c in s.chars() {
-        match c {
-            '\\' => write!(f, "\\\\")?,
-            '"' => write!(f, "\\\"")?,
-            '\'' => write!(f, "\\\'")?,
-            '`' => write!(f, "\\`")?,
-            '\n' => write!(f, "\\n")?,
-            '\r' => write!(f, "\\r")?,
-            _ if c.is_ascii_graphic() || c == ' ' => write!(f, "{}", c)?,
-            _ if c as u32 <= 0xFF => write!(f, "\\x{:02x}", c as u32)?,
-            _ if c as u32 <= 0xFFFF => write!(f, "\\u{:04x}", c as u32)?,
-            _ => write!(f, "\\U{:08x}", c as u32)?,
-        }
-    }
-    Ok(())
-}
-
-/// Escape for SQLite3.
-fn escape_for_sqlite3(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    // TODO: Implement this for real.
-    escape_for_bigquery(s, f)
 }
 
 /// A table name.
@@ -496,30 +479,25 @@ impl TableName {
 impl Emit for TableName {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::SQLite3 => match self {
-                TableName::ProjectDatasetTable {
-                    project,
-                    dataset,
-                    table,
-                    ..
-                } => {
-                    write!(f, "\"")?;
-                    escape_for_sqlite3(&project.text, f)?;
-                    write!(f, ".")?;
-                    escape_for_sqlite3(&dataset.text, f)?;
-                    write!(f, ".")?;
-                    escape_for_sqlite3(&table.text, f)?;
-                    write!(f, "\"{}", t.f(&table.token.ws_only()))
-                }
-                TableName::DatasetTable { dataset, table, .. } => {
-                    write!(f, "\"")?;
-                    escape_for_sqlite3(&dataset.text, f)?;
-                    write!(f, ".")?;
-                    escape_for_sqlite3(&table.text, f)?;
-                    write!(f, "\"{}", t.f(&table.token.ws_only()))
-                }
-                TableName::Table { table } => write!(f, "{}", t.f(table)),
-            },
+            Target::SQLite3 => {
+                let (name, ws) = match self {
+                    TableName::ProjectDatasetTable {
+                        project,
+                        dataset,
+                        table,
+                        ..
+                    } => (
+                        format!("{}.{}.{}", project.text, dataset.text, table.text),
+                        table.token.ws_only(),
+                    ),
+                    TableName::DatasetTable { dataset, table, .. } => (
+                        format!("{}.{}", dataset.text, table.text),
+                        table.token.ws_only(),
+                    ),
+                    TableName::Table { table } => (table.text.clone(), table.token.ws_only()),
+                };
+                write!(f, "{}{}", SQLite3Ident(&name), t.f(&ws))
+            }
             _ => self.emit_default(t, f),
         }
     }
@@ -876,6 +854,14 @@ impl Emit for Expression {
                         .ensure_ws()
                         .as_ref())
                 )
+            }
+            // SQLite3 quotes strings differently.
+            Expression::Literal {
+                token,
+                value: LiteralValue::String(s),
+            } if t == Target::SQLite3 => {
+                SQLite3String(s).fmt(f)?;
+                token.ws_only().emit(t, f)
             }
             Expression::If {
                 if_token,
@@ -2001,11 +1987,22 @@ peg::parser! {
                 let value = LiteralValue::Int64(token.token_str().parse().unwrap());
                 Expression::Literal { token, value }
             } }
-            / quiet! { token:token("string", <"'" ([^ '\\' | '\''] / escape())* "'">) {
-                // TODO: Unescape.
-                let unescaped = token.token_str()[1..token.token_str().len() - 1].to_string();
-                let value = LiteralValue::String(unescaped);
-                Expression::Literal { token, value }
+            / quiet! {
+                s:position!()
+                chars_and_raw:with_slice(<"'" chars:([^ '\\' | '\''] / escape())* "'" { chars }>)
+                ws:$(_)
+                e:position!()
+            {
+                let (chars, raw) = chars_and_raw;
+                let token = Token {
+                    span: s..e,
+                    ws_offset: raw.len(),
+                    text: format!("{}{}", raw, ws),
+                };
+                Expression::Literal {
+                    token,
+                    value: LiteralValue::String(String::from_iter(chars)),
+                }
             } }
             / expected!("literal")
 
@@ -2578,23 +2575,27 @@ peg::parser! {
                             ws_offset: id.len(),
                             text: format!("{}{}", id, ws),
                         },
-                        // TODO: Unescape.
                         text: id.to_string(),
                     })
                 }
             }
-            / s:position!() "`" id:$(([^ '\\' | '`'] / escape())*) "`" ws:$(_) e:position!() {
+            / s:position!() id_and_raw:with_slice(<"`" id:(([^ '\\' | '`'] / escape())*) "`" { id }>) ws:$(_) e:position!() {
+                let (id, raw) = id_and_raw;
                 Identifier {
                     token: Token {
                         span: s..e,
-                        ws_offset: id.len() + 2,
-                        text: format!("`{}`{}", id, ws),
+                        ws_offset: raw.len(),
+                        text: format!("{}{}", raw, ws),
                     },
-                    // TODO: Unescape.
-                    text: id.to_string(),
+                    text: String::from_iter(id),
                 }
             }
             / expected!("identifier")
+
+        /// Return both the value and slice matched by the rule. See
+        /// https://github.com/kevinmehall/rust-peg/issues/283.
+        rule with_slice<T>(r: rule<T>) -> (T, &'input str)
+            = value:&r() input:$(r()) { (value, input) }
 
         /// Low-level rule for matching a C-style identifier.
         rule c_ident() -> String
@@ -2606,11 +2607,40 @@ peg::parser! {
         rule c_ident_start() = ['a'..='z' | 'A'..='Z' | '_']
         rule c_ident_cont() = ['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
 
-        /// Escape sequences.
-        rule escape() = "\\" (octal_escape() / hex_escape() / unicode_escape() / [_])
-        rule octal_escape() = (['0'..='7'] * <3,3>)
-        rule hex_escape() = ("x" / "X") hex_digit() * <2,2>
-        rule unicode_escape() = "u" hex_digit() * <4,4> / "U" hex_digit() * <8,8>
+        /// Escape sequences. The unwrap calls below should never fail because
+        /// the grammar should have already validated the escape sequence.
+        rule escape() -> char =
+            "\\" c:(octal_escape() / hex_escape() / unicode_escape_4() /
+                    unicode_escape_8() / simple_escape()) { c }
+        rule octal_escape() -> char = s:$(['0'..='7'] * <3,3>) {
+            char::try_from(u32::from_str_radix(s, 8).unwrap()).unwrap()
+        }
+        rule hex_escape() -> char = ("x" / "X") s:$(hex_digit() * <2,2>) {
+            char::try_from(u32::from_str_radix(s, 16).unwrap()).unwrap()
+        }
+        rule unicode_escape_4() -> char = "u" s:$(hex_digit() * <4,4>) {?
+            // Not all u32 values are valid Unicode code points.
+            char::try_from(u32::from_str_radix(s, 16).unwrap())
+                .or(Err("valid Unicode code point"))
+        }
+        rule unicode_escape_8() -> char = "U" s:$(hex_digit() * <8,8>) {?
+            // Not all u32 values are valid Unicode code points.
+            char::try_from(u32::from_str_radix(s, 16).unwrap())
+                .or(Err("valid Unicode code point"))
+        }
+        rule simple_escape() -> char
+            = "\\" { '\\' }
+            / "'" { '\'' }
+            / "\"" { '"' }
+            / "`" { '`' }
+            / "a" { '\x07' }
+            / "b" { '\x08' }
+            / "f" { '\x0C' }
+            / "n" { '\n' }
+            / "r" { '\r' }
+            / "t" { '\t' }
+            / "v" { '\x0B' }
+            / "?" { '?' }
         rule hex_digit() = ['0'..='9' | 'a'..='f' | 'A'..='F']
 
         /// Punctuation separated list. Does not allow a trailing separator.
@@ -2644,7 +2674,6 @@ peg::parser! {
               s:position!() input:$([_]*<{kw.len()}>)
               !['a'..='z' | 'A'..='Z' | '0'..='9' | '_']
               ws:$(_) e:position!()
-
             {
                 if !KEYWORDS.contains(kw) {
                     panic!("BUG: {:?} is not in KEYWORDS", kw);

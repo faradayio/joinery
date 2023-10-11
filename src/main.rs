@@ -7,6 +7,7 @@ mod ast;
 mod cmd;
 mod drivers;
 mod errors;
+mod util;
 
 use cmd::{parse::cmd_parse, sql_test::cmd_sql_test};
 

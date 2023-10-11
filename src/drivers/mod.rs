@@ -9,7 +9,8 @@ use crate::{
 
 use self::sqlite3::SQLite3Driver;
 
-mod sqlite3;
+pub mod bigquery;
+pub mod sqlite3;
 
 /// A type that supports basic equality and display, used for comparing
 /// test results.
