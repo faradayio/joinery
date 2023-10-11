@@ -1214,6 +1214,7 @@ pub struct OverClause {
     pub paren1: Token,
     pub partition_by: Option<PartitionBy>,
     pub order_by: Option<OrderBy>,
+    pub window_frame: Option<WindowFrame>,
     pub paren2: Token,
 }
 
@@ -1259,6 +1260,47 @@ pub struct NullsClause {
 pub struct Limit {
     pub limit_token: Token,
     pub value: Box<Expression>,
+}
+
+/// A window frame clause.
+///
+/// See the [official grammar][]. We only implement part of this.
+///
+/// [official grammar]: https://cloud.google.com/bigquery/docs/reference/standard-sql/window-function-calls#def_window_frame
+#[derive(Debug, Drive, Emit, EmitDefault)]
+pub struct WindowFrame {
+    pub rows_token: Token,
+    pub definition: WindowFrameDefinition,
+}
+
+/// A window frame definition.
+#[derive(Debug, Drive, Emit, EmitDefault)]
+pub enum WindowFrameDefinition {
+    Start(WindowFrameStart),
+    Between {
+        between_token: Token,
+        start: WindowFrameStart,
+        and_token: Token,
+        end: WindowFrameEnd,
+    },
+}
+
+/// A window frame start. Keep this simple for now.
+#[derive(Debug, Drive, Emit, EmitDefault)]
+pub enum WindowFrameStart {
+    UnboundedPreceding {
+        unbounded_token: Token,
+        preceding_token: Token,
+    },
+}
+
+/// A window frame end. Keep this simple for now.
+#[derive(Debug, Drive, Emit, EmitDefault)]
+pub enum WindowFrameEnd {
+    CurrentRow {
+        current_token: Token,
+        row_token: Token,
+    },
 }
 
 /// Data types.
@@ -1560,6 +1602,7 @@ pub struct Row {
 pub struct CreateTableStatement {
     pub create_token: Token,
     pub or_replace: Option<OrReplace>,
+    pub temporary: Option<Temporary>,
     pub table_token: Token,
     pub table_name: TableName,
     pub definition: CreateTableDefinition,
@@ -1617,6 +1660,12 @@ impl Emit for OrReplace {
             _ => self.emit_default(t, f),
         }
     }
+}
+
+/// The `TEMPORARY` modifier.
+#[derive(Debug, Drive, Emit, EmitDefault)]
+pub struct Temporary {
+    pub temporary_token: Token,
 }
 
 /// The part of a `CREATE TABLE` statement that defines the columns.
@@ -2212,12 +2261,18 @@ peg::parser! {
             / token:k("DATETIME") { FunctionName::Keyword(token) }
 
         rule over_clause() -> OverClause
-            = over_token:k("OVER") paren1:t("(") partition_by:partition_by()? order_by:order_by()? paren2:t(")") {
+            = over_token:k("OVER") paren1:t("(")
+            partition_by:partition_by()?
+            order_by:order_by()?
+            window_frame:window_frame()?
+            paren2:t(")")
+            {
                 OverClause {
                     over_token,
                     paren1,
                     partition_by,
                     order_by,
+                    window_frame,
                     paren2,
                 }
             }
@@ -2263,6 +2318,43 @@ peg::parser! {
                 Limit {
                     limit_token,
                     value: Box::new(value),
+                }
+            }
+
+        rule window_frame() -> WindowFrame
+            = rows_token:(k("ROWS") / k("RANGE")) definition:window_frame_definition() {
+                WindowFrame {
+                    rows_token,
+                    definition,
+                }
+            }
+
+        rule window_frame_definition() -> WindowFrameDefinition
+            = between_token:k("BETWEEN") start:window_frame_start() and_token:k("AND") end:window_frame_end() {
+                WindowFrameDefinition::Between {
+                    between_token,
+                    start,
+                    and_token,
+                    end,
+                }
+            }
+            / start:window_frame_start() {
+                WindowFrameDefinition::Start(start)
+            }
+
+        rule window_frame_start() -> WindowFrameStart
+            = unbounded_token:k("UNBOUNDED") preceding_token:k("PRECEDING") {
+                WindowFrameStart::UnboundedPreceding {
+                    unbounded_token,
+                    preceding_token,
+                }
+            }
+
+        rule window_frame_end() -> WindowFrameEnd
+            = current_token:k("CURRENT") row_token:k("ROW") {
+                WindowFrameEnd::CurrentRow {
+                    current_token,
+                    row_token,
                 }
             }
 
@@ -2431,7 +2523,9 @@ peg::parser! {
             }
 
         rule create_table_statement() -> CreateTableStatement
-            = create_token:k("CREATE") or_replace:or_replace()?
+            = create_token:k("CREATE")
+              or_replace:or_replace()?
+              temporary:temporary()?
               table_token:k("TABLE") table_name:table_name()
               definition:create_table_definition()
               e:position!()
@@ -2439,6 +2533,7 @@ peg::parser! {
                 CreateTableStatement {
                     create_token,
                     or_replace,
+                    temporary,
                     table_token,
                     table_name,
                     definition,
@@ -2463,6 +2558,11 @@ peg::parser! {
         rule or_replace() -> OrReplace
             = or_token:k("OR") replace_token:k("REPLACE") {
                 OrReplace { or_token, replace_token }
+            }
+
+        rule temporary() -> Temporary
+            = temporary_token:(k("TEMPORARY") / k("TEMP")) {
+                Temporary { temporary_token }
             }
 
         rule create_table_definition() -> CreateTableDefinition
