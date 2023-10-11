@@ -25,6 +25,7 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
     // successfully parsed.
     let mut row_count = 0;
     let mut ok_count = 0;
+    let mut ml_count = 0;
 
     // We can optionally count function calls.
     let mut function_call_counts = FunctionCallCounts::default();
@@ -33,9 +34,17 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
     let mut rdr = csv::Reader::from_path(csv_path)
         .with_context(|| format!("Failed to open CSV file: {}", csv_path.display()))?;
     for result in rdr.deserialize() {
-        row_count += 1;
         let row: Row =
             result.with_context(|| format!("Failed to parse CSV file: {}", csv_path.display()))?;
+
+        // Skip ML queries, which we don't translate to other databases,
+        // anyways.
+        if row.query.contains("FROM ML.") {
+            ml_count += 1;
+            continue;
+        } else {
+            row_count += 1;
+        }
 
         // Parse query.
         match ast::parse_sql(&row.query) {
@@ -53,7 +62,10 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
         }
     }
 
-    println!("Parsed {} of {} queries", ok_count, row_count);
+    println!(
+        "Parsed {} of {} queries, skipped {} with `ML.`",
+        ok_count, row_count, ml_count
+    );
 
     if count_function_calls {
         println!();
