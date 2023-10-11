@@ -152,7 +152,7 @@ where
 #[derive(Debug)]
 pub struct SourceError {
     pub source: peg::error::ParseError<peg::str::LineCol>,
-    pub files: SimpleFile<&'static str, String>,
+    pub files: SimpleFile<String, String>,
     pub diagnostic: Diagnostic<()>,
 }
 

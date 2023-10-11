@@ -480,21 +480,11 @@ impl Emit for TableName {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::SQLite3 => {
-                let (name, ws) = match self {
-                    TableName::ProjectDatasetTable {
-                        project,
-                        dataset,
-                        table,
-                        ..
-                    } => (
-                        format!("{}.{}.{}", project.text, dataset.text, table.text),
-                        table.token.ws_only(),
-                    ),
-                    TableName::DatasetTable { dataset, table, .. } => (
-                        format!("{}.{}", dataset.text, table.text),
-                        table.token.ws_only(),
-                    ),
-                    TableName::Table { table } => (table.text.clone(), table.token.ws_only()),
+                let name = self.unescaped_bigquery();
+                let ws = match self {
+                    TableName::ProjectDatasetTable { table, .. }
+                    | TableName::DatasetTable { table, .. }
+                    | TableName::Table { table } => table.token.ws_only(),
                 };
                 write!(f, "{}{}", SQLite3Ident(&name), t.f(&ws))
             }
@@ -1170,7 +1160,21 @@ pub struct FunctionCall {
 /// handle them for now.
 #[derive(Debug, Drive, EmitDefault)]
 pub enum FunctionName {
-    Identifier(Identifier),
+    ProjectDatasetFunction {
+        project: Identifier,
+        dot1: Token,
+        dataset: Identifier,
+        dot2: Token,
+        function: Identifier,
+    },
+    DatasetFunction {
+        dataset: Identifier,
+        dot: Token,
+        function: Identifier,
+    },
+    Function {
+        function: Identifier,
+    },
     Keyword(Token),
 }
 
@@ -1178,7 +1182,18 @@ impl FunctionName {
     /// Get the unescaped function name, in the original BigQuery form.
     pub fn unescaped_bigquery(&self) -> String {
         match self {
-            FunctionName::Identifier(ident) => ident.unescaped_bigquery().to_owned(),
+            FunctionName::ProjectDatasetFunction {
+                project,
+                dataset,
+                function,
+                ..
+            } => format!("{}.{}.{}", project.text, dataset.text, function.text),
+            FunctionName::DatasetFunction {
+                dataset, function, ..
+            } => {
+                format!("{}.{}", dataset.text, function.text)
+            }
+            FunctionName::Function { function } => function.text.clone(),
             FunctionName::Keyword(token) => token.token_str().to_ascii_uppercase(),
         }
     }
@@ -1186,17 +1201,16 @@ impl FunctionName {
 
 impl Emit for FunctionName {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FunctionName::Keyword(token) if t == Target::SQLite3 => {
-                // TODO: The actual behavior of these "functions" in SQLite3
-                // is actually much weirder than this, but this is good enough
-                // to at least _parse_.
-                write!(
-                    f,
-                    "\"{}\"{}",
-                    token.token_str().to_ascii_uppercase(),
-                    t.f(&token.with_erased_token_str())
-                )
+        match t {
+            Target::SQLite3 => {
+                let name = self.unescaped_bigquery();
+                let ws = match self {
+                    FunctionName::ProjectDatasetFunction { function, .. }
+                    | FunctionName::DatasetFunction { function, .. }
+                    | FunctionName::Function { function } => function.token.ws_only(),
+                    FunctionName::Keyword(token) => token.ws_only(),
+                };
+                write!(f, "{}{}", SQLite3Ident(&name), t.f(&ws))
             }
             _ => self.emit_default(t, f),
         }
@@ -1700,7 +1714,7 @@ pub struct DropViewStatement {
 }
 
 /// Parse BigQuery SQL.
-pub fn parse_sql(sql: &str) -> Result<SqlProgram> {
+pub fn parse_sql(filename: &str, sql: &str) -> Result<SqlProgram> {
     // Parse with or without tracing, as appropriate. The tracing code throws
     // off error positions, so we don't want to use it unless we're going to
     // use `pegviz` to visualize the parse.
@@ -1713,7 +1727,7 @@ pub fn parse_sql(sql: &str) -> Result<SqlProgram> {
         Ok(sql_program) => Ok(sql_program),
         // Prepare a user-friendly error message.
         Err(e) => {
-            let files = SimpleFile::new("input.sql", sql.to_string());
+            let files = SimpleFile::new(filename.to_owned(), sql.to_string());
             let diagnostic = Diagnostic::error()
                 .with_message("Failed to parse query")
                 .with_labels(vec![Label::primary(
@@ -2257,7 +2271,7 @@ peg::parser! {
             }
 
         rule function_name() -> FunctionName
-            = ident:ident() { FunctionName::Identifier(ident) }
+            = dotted:dotted_function_name()
             / token:k("DATETIME") { FunctionName::Keyword(token) }
 
         rule over_clause() -> OverClause
@@ -2667,6 +2681,35 @@ peg::parser! {
                 }
             }
 
+        rule dotted_function_name() -> FunctionName
+            // We handle this manually because of PEG backtracking limitations.
+            = dotted:dotted_name() {?
+                let len = dotted.nodes.len();
+                let mut nodes = dotted.nodes.into_iter();
+                let mut dots = dotted.separators.into_iter();
+                if len == 1 {
+                    Ok(FunctionName::Function {
+                        function: nodes.next().unwrap()
+                    })
+                } else if len == 2 {
+                    Ok(FunctionName::DatasetFunction {
+                        dataset: nodes.next().unwrap(),
+                        dot: dots.next().unwrap(),
+                        function: nodes.next().unwrap(),
+                    })
+                } else if len == 3 {
+                    Ok(FunctionName::ProjectDatasetFunction {
+                        project: nodes.next().unwrap(),
+                        dot1: dots.next().unwrap(),
+                        dataset: nodes.next().unwrap(),
+                        dot2: dots.next().unwrap(),
+                        function: nodes.next().unwrap(),
+                    })
+                } else {
+                    Err("function name")
+                }
+            }
+
         /// A table or column name with internal dots. This requires special
         /// handling with a PEG parser, because PEG parsers are greedy
         /// and backtracking to try alternatives can sometimes be strange.
@@ -2925,6 +2968,7 @@ mod tests {
             (r"SELECT COUNT(DISTINCT a) FROM t", None),
             (r"SELECT COUNT(DISTINCT(a)) FROM t", None),
             (r"SELECT generate_uuid()", None),
+            (r"SELECT function.custom()", None),
             (
                 r"SELECT format_datetime('%Y-%Q', current_datetime()) AS uuid",
                 None,
@@ -3056,7 +3100,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         for &(sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);
             let normalized = normalized.unwrap_or(sql);
-            let parsed = match parse_sql(sql) {
+            let parsed = match parse_sql("test.sq", sql) {
                 Ok(parsed) => parsed,
                 Err(err) => {
                     err.emit();

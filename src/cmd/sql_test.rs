@@ -30,7 +30,7 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
         let query = std::fs::read_to_string(&path).context("Failed to read test file")?;
 
         // Test query.
-        match run_test(&*driver, &query) {
+        match run_test(&*driver, &path, &query) {
             Ok(_) => {
                 print!(".");
             }
@@ -63,8 +63,8 @@ pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
     }
 }
 
-fn run_test(driver: &dyn Driver, sql: &str) -> std::result::Result<(), Error> {
-    let ast = parse_sql(sql)?;
+fn run_test(driver: &dyn Driver, path: &Path, sql: &str) -> std::result::Result<(), Error> {
+    let ast = parse_sql(&path.display().to_string(), sql)?;
     //eprintln!("SQLite3: {}", ast.emit_to_string(Target::SQLite3));
     let output_tables = find_output_tables(&ast)?;
 

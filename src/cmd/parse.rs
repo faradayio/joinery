@@ -24,7 +24,9 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
     // Keep track of how many rows we've processed and how many queries we've
     // successfully parsed.
     let mut row_count = 0;
+    let mut line_count = 0;
     let mut ok_count = 0;
+    let mut ok_line_count = 0;
     let mut ml_count = 0;
 
     // We can optionally count function calls.
@@ -44,12 +46,15 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
             continue;
         } else {
             row_count += 1;
+            line_count += row.query.lines().count();
         }
 
         // Parse query.
-        match ast::parse_sql(&row.query) {
+        let filename = format!("{}/{}", csv_path.display(), row.id);
+        match ast::parse_sql(&filename, &row.query) {
             Ok(sql_program) => {
                 ok_count += 1;
+                ok_line_count += row.query.lines().count();
                 println!("OK {}", row.id);
                 if count_function_calls {
                     function_call_counts.visit(&sql_program);
@@ -63,8 +68,8 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
     }
 
     println!(
-        "Parsed {} of {} queries, skipped {} with `ML.`",
-        ok_count, row_count, ml_count
+        "Parsed {} of {} queries, skipped {} with `ML.`. Parsed {}/{} lines.",
+        ok_count, row_count, ml_count, ok_line_count, line_count
     );
 
     if count_function_calls {

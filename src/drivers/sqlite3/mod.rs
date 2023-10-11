@@ -43,6 +43,7 @@ impl SQLite3Driver {
             ("generate_uuid", 0),
             ("interval", 2),
             ("struct", -1),
+            ("function.custom", 0),
         ];
         for &(fn_name, n_arg) in dummy_fns {
             conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
