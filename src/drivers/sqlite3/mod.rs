@@ -2,6 +2,8 @@
 
 use std::{fmt, str::FromStr, vec};
 
+use async_rusqlite::Connection;
+use async_trait::async_trait;
 use rusqlite::{functions::FunctionFlags, types};
 
 use crate::{
@@ -40,13 +42,14 @@ impl fmt::Display for SQLite3Locator {
     }
 }
 
+#[async_trait]
 impl Locator for SQLite3Locator {
     fn target(&self) -> Target {
         Target::SQLite3
     }
 
-    fn driver(&self) -> Result<Box<dyn Driver>> {
-        Ok(Box::new(SQLite3Driver::from_locator(self)?))
+    async fn driver(&self) -> Result<Box<dyn Driver>> {
+        Ok(Box::new(SQLite3Driver::from_locator(self).await?))
     }
 }
 
@@ -68,94 +71,119 @@ impl FromStr for SQLite3Locator {
 
 /// Our SQLite3 driver.
 pub struct SQLite3Driver {
-    conn: rusqlite::Connection,
+    /// Our database connection.
+    ///
+    /// We use a [`async_rusqlite::Connection`] instead of a
+    /// [`rusqlite::Connection`], because the basic [`rusqlite::Connection`]
+    /// does not implement [`Send`] or [`Sync`]. Which means it can only be used
+    /// from within a single thread, and can't be used in async  code. The
+    /// [`async_rusqlite::Connection`] wrapper actually spawns a single worker
+    /// thread to own a given SQLite3 connection, so that it never needs to move
+    /// between threads. SQLite3 is great, but it's only thread-safe under a
+    /// very specific set of assumptions.
+    conn: Connection,
 }
 
 impl SQLite3Driver {
     /// Create an in-memory SQLite3 database.
     #[allow(dead_code)]
-    pub fn memory() -> Result<Self> {
-        Self::from_locator(&SQLite3Locator::memory())
+    pub async fn memory() -> Result<Self> {
+        Self::from_locator(&SQLite3Locator::memory()).await
     }
 
     /// Create an SQLite3 database from a locator.
-    pub fn from_locator(locator: &SQLite3Locator) -> Result<Self> {
-        let conn = rusqlite::Connection::open(&locator.path)
+    pub async fn from_locator(locator: &SQLite3Locator) -> Result<Self> {
+        let conn = Connection::open(&locator.path)
+            .await
             .with_context(|| format!("failed to open SQLite3 database: {}", locator.path))?;
 
-        // Install our dummy `UNNEST` virtual table. This does nothing useful
-        // yet, but it allows us to parse and execute queries that use `UNNEST`.
-        register_unnest(&conn).expect("failed to register UNNEST");
+        conn.call(|conn| -> Result<()> {
+            // Install our dummy `UNNEST` virtual table. This does nothing useful
+            // yet, but it allows us to parse and execute queries that use `UNNEST`.
+            register_unnest(conn).expect("failed to register UNNEST");
 
-        // Install some dummy functions that always return NULL.
-        let dummy_fns = &[
-            ("array", -1),
-            ("array_index", 2),
-            ("current_datetime", 0),
-            ("date_diff", 3),
-            ("date_trunc", 2),
-            ("datetime_diff", 3),
-            ("datetime_trunc", 2),
-            ("format_datetime", 2),
-            ("generate_uuid", 0),
-            ("interval", 2),
-            ("struct", -1),
-            ("function.custom", 0),
-        ];
-        for &(fn_name, n_arg) in dummy_fns {
-            conn.create_scalar_function(fn_name, n_arg, FunctionFlags::SQLITE_UTF8, move |_ctx| {
-                Ok(types::Value::Null)
-            })
-            .expect("failed to create dummy function");
-        }
+            // Install some dummy functions that always return NULL.
+            let dummy_fns = &[
+                ("array", -1),
+                ("array_index", 2),
+                ("current_datetime", 0),
+                ("date_diff", 3),
+                ("date_trunc", 2),
+                ("datetime_diff", 3),
+                ("datetime_trunc", 2),
+                ("format_datetime", 2),
+                ("generate_uuid", 0),
+                ("interval", 2),
+                ("struct", -1),
+                ("function.custom", 0),
+            ];
+            for &(fn_name, n_arg) in dummy_fns {
+                conn.create_scalar_function(
+                    fn_name,
+                    n_arg,
+                    FunctionFlags::SQLITE_UTF8,
+                    move |_ctx| Ok(types::Value::Null),
+                )
+                .expect("failed to create dummy function");
+            }
+            Ok(())
+        })
+        .await?;
 
         Ok(Self { conn })
     }
 }
 
+#[async_trait]
 impl Driver for SQLite3Driver {
     fn target(&self) -> Target {
         Target::SQLite3
     }
 
-    fn execute_native_sql(&self, sql: &str) -> Result<()> {
+    async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()> {
+        let sql = sql.to_owned();
         self.conn
-            .execute_batch(sql)
-            .context("failed to execute SQL")
+            .call(move |conn| conn.execute_batch(&sql).context("failed to execute SQL"))
+            .await
     }
 
-    fn drop_table_if_exists(&self, table_name: &str) -> Result<()> {
+    async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {
         let sql = format!("DROP TABLE IF EXISTS {}", SQLite3Ident(table_name));
-        self.execute_native_sql(&sql)
+        self.execute_native_sql_statement(&sql).await
     }
 
-    fn compare_tables(&self, result_table: &str, expected_table: &str) -> Result<()> {
-        self.compare_tables_impl(result_table, expected_table)
+    async fn compare_tables(&mut self, result_table: &str, expected_table: &str) -> Result<()> {
+        self.compare_tables_impl(result_table, expected_table).await
     }
 }
 
+#[async_trait]
 impl DriverImpl for SQLite3Driver {
     type Type = String;
     type Value = Value;
-    type Rows = Box<dyn Iterator<Item = Result<Vec<Self::Value>>>>;
+    type Rows = Box<dyn Iterator<Item = Result<Vec<Self::Value>>> + Send + Sync>;
 
-    fn table_columns(&self, table_name: &str) -> Result<Vec<Column<Self::Type>>> {
-        let sql = format!("PRAGMA table_info({})", table_name);
-        let mut stmt = self.conn.prepare(&sql).context("failed to prepare SQL")?;
-        let rows = stmt
-            .query_map([], |row| {
-                let name: String = row.get(1)?;
-                let ty: String = row.get(2)?;
-                Ok(Column { name, ty })
+    async fn table_columns(&mut self, table_name: &str) -> Result<Vec<Column<Self::Type>>> {
+        let sql = format!("PRAGMA table_info({})", SQLite3Ident(table_name));
+        self.conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(&sql).context("failed to prepare SQL")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        let name: String = row.get(1)?;
+                        let ty: String = row.get(2)?;
+                        Ok(Column { name, ty })
+                    })
+                    .map_err(Error::other)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("failed to list table columns")?;
+                Ok(rows)
             })
-            .map_err(Error::other)?
-            .collect::<Result<Vec<_>, _>>()
-            .context("failed to list table columns")?;
-        Ok(rows)
+            .await
     }
 
-    fn query_table_sorted(
-        &self,
+    async fn query_table_sorted(
+        &mut self,
         table_name: &str,
         columns: &[Column<Self::Type>],
     ) -> Result<Self::Rows> {
@@ -166,22 +194,30 @@ impl DriverImpl for SQLite3Driver {
             .join(", ");
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {}",
-            column_list, table_name, column_list
+            column_list,
+            SQLite3Ident(table_name),
+            column_list
         );
-        let mut stmt = self.conn.prepare(&sql).context("failed to prepare SQL")?;
-        let rows = stmt
-            .query_map([], |row| {
-                let mut values = vec![];
-                for i in 0..columns.len() {
-                    let value = row.get(i)?;
-                    values.push(Value(value));
-                }
-                Ok(values)
+        let columns = columns.to_vec();
+        Ok(self
+            .conn
+            .call(move |conn| -> Result<_> {
+                let mut stmt = conn.prepare(&sql).context("failed to prepare SQL")?;
+                let rows = stmt
+                    .query_map([], |row| {
+                        let mut values = vec![];
+                        for i in 0..columns.len() {
+                            let value = row.get(i)?;
+                            values.push(Value(value));
+                        }
+                        Ok(values)
+                    })
+                    .map_err(Error::other)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("failed to query table")?;
+                Ok(Box::new(rows.into_iter().map(Ok)))
             })
-            .map_err(Error::other)?
-            .collect::<Result<Vec<_>, _>>()
-            .context("failed to query table")?;
-        Ok(Box::new(rows.into_iter().map(Ok)))
+            .await?)
     }
 }
 

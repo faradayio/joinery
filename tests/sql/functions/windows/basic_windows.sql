@@ -19,7 +19,7 @@ INSERT INTO groceries VALUES
     ('flour', 'baking', 0.25),
     ('salt', 'baking', 0.75);
 
-CREATE TABLE __result1 AS
+CREATE OR REPLACE TABLE __result1 AS
 SELECT
     item,
     category,
@@ -29,7 +29,7 @@ SELECT
     SUM(price) OVER (PARTITION BY category ORDER BY price ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cummulative_price2,
 FROM groceries;
 
-CREATE TABLE __expected1 (
+CREATE OR REPLACE TABLE __expected1 (
     item STRING,
     category STRING,
     price FLOAT64,

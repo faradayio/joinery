@@ -24,6 +24,22 @@ joinery sql-test tests/sql/
 For the `sql-test` test format, see the [test format
 docs](./tests/sql/README.md).
 
+## Supported databases
+
+### SQLite3
+
+This is the default. You don't need to do anything.
+
+### Snowflake
+
+You can specify Snowflake using
+
+```txt
+--database snowflake://<user>@<organization>-<account>[.privatelink]/<warehouse>/<database>
+```
+
+You'll also need to set the `SNOWFLAKE_PASSWORD` environment variable.
+
 ## Grammar tracing
 
 Run tests with tracing enabled:

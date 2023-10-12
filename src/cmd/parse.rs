@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use serde::Deserialize;
+use tracing::instrument;
 
 use crate::{
     analyze::FunctionCallCounts,
@@ -18,7 +19,7 @@ pub struct ParseOpt {
     csv_path: PathBuf,
 
     /// Count function calls.
-    #[clap(long, alias = "funcs")]
+    #[clap(long, visible_alias = "funcs")]
     count_function_calls: bool,
 }
 
@@ -32,6 +33,7 @@ struct Row {
 }
 
 /// Parse queries from a CSV file.
+#[instrument(skip(opt))]
 pub fn cmd_parse(opt: &ParseOpt) -> Result<()> {
     // Keep track of how many rows we've processed and how many queries we've
     // successfully parsed.

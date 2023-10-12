@@ -2,23 +2,28 @@
 
 use std::{collections::VecDeque, fmt, str::FromStr};
 
+use async_trait::async_trait;
+
 use crate::{
     ast::{Emit, Target},
     errors::{format_err, Error, Result},
 };
 
+use self::snowflake::{SnowflakeLocator, SNOWFLAKE_LOCATOR_PREFIX};
 use self::sqlite3::{SQLite3Locator, SQLITE3_LOCATOR_PREFIX};
 
 pub mod bigquery;
+pub mod snowflake;
 pub mod sqlite3;
 
 /// A URL-like locator for a database.
+#[async_trait]
 pub trait Locator: fmt::Display + fmt::Debug + Send + Sync + 'static {
     /// Get the target for this locator.
     fn target(&self) -> Target;
 
     /// Get the driver for this locator.
-    fn driver(&self) -> Result<Box<dyn Driver>>;
+    async fn driver(&self) -> Result<Box<dyn Driver>>;
 }
 
 impl FromStr for Box<dyn Locator> {
@@ -31,6 +36,7 @@ impl FromStr for Box<dyn Locator> {
         let prefix = &s[..colon_pos + 1];
         match prefix {
             SQLITE3_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SQLite3Locator>()?)),
+            SNOWFLAKE_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SnowflakeLocator>()?)),
             _ => Err(format_err!("unsupported database type: {}", s)),
         }
     }
@@ -38,8 +44,8 @@ impl FromStr for Box<dyn Locator> {
 
 /// A type that supports basic equality and display, used for comparing
 /// test results.
-pub trait Comparable: fmt::Debug + fmt::Display + PartialEq {}
-impl<T> Comparable for T where T: fmt::Debug + fmt::Display + PartialEq {}
+pub trait Comparable: fmt::Debug + fmt::Display + PartialEq + Send + Sync {}
+impl<T> Comparable for T where T: fmt::Debug + fmt::Display + PartialEq + Send + Sync {}
 
 /// A database driver. This is mostly used for running SQL tests.
 ///
@@ -48,33 +54,41 @@ impl<T> Comparable for T where T: fmt::Debug + fmt::Display + PartialEq {}
 /// like `Self::Type` or `Self::Value`, so we have [`DriverImpl`] for that.
 ///
 /// [safe]: https://doc.rust-lang.org/reference/items/traits.html#object-safety
-pub trait Driver {
+#[async_trait]
+pub trait Driver: Send + Sync + 'static {
     /// The target for this database.
     fn target(&self) -> Target;
 
-    /// Execute a SQL query, using native SQL for this database. This may
-    /// contain multiple statements separated by semicolons.
-    fn execute_native_sql(&self, sql: &str) -> Result<()>;
+    /// Execute a single SQL statement, using native SQL for this database. This
+    /// is only guaranteed to work if passed a single statement, although some
+    /// drivers may support multiple statements. Resources created using `CREATE
+    /// TEMP TABLE`, etc., may not persist across calls.
+    async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()>;
 
-    /// Execute a query represented as an AST.
-    fn execute_ast(&self, ast: &crate::ast::SqlProgram) -> Result<()> {
-        let sql = ast.emit_to_string(self.target());
-        self.execute_native_sql(&sql)
+    /// Execute a query represented as an AST. This can execute multiple
+    /// statements.
+    async fn execute_ast(&mut self, ast: &crate::ast::SqlProgram) -> Result<()> {
+        for statement in &ast.statements {
+            let sql = statement.emit_to_string(self.target());
+            self.execute_native_sql_statement(&sql).await?;
+        }
+        Ok(())
     }
 
     /// Drop a table if it exists.
-    fn drop_table_if_exists(&self, table_name: &str) -> Result<()>;
+    async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()>;
 
     /// Compare two tables for equality. This is done by querying all rows
     /// from both tables, sorted by all columns, and comparing the results.
     ///
     /// This is implemented by [`DriverImpl::compare_tables_impl`].
-    fn compare_tables(&self, result_table: &str, expected_table: &str) -> Result<()>;
+    async fn compare_tables(&mut self, result_table: &str, expected_table: &str) -> Result<()>;
 }
 
 /// Extensions to [`Driver`] that are not ["object safe"][safe].
 ///
 /// [safe]: https://doc.rust-lang.org/reference/items/traits.html#object-safety
+#[async_trait]
 pub trait DriverImpl {
     /// A native data type for this database.
     type Type: Comparable;
@@ -83,23 +97,27 @@ pub trait DriverImpl {
     type Value: Comparable;
 
     /// An iterator over the rows of a table.
-    type Rows: Iterator<Item = Result<Vec<Self::Value>>>;
+    type Rows: Iterator<Item = Result<Vec<Self::Value>>> + Send + Sync;
 
     /// Columns of a table.
-    fn table_columns(&self, table_name: &str) -> Result<Vec<Column<Self::Type>>>;
+    async fn table_columns(&mut self, table_name: &str) -> Result<Vec<Column<Self::Type>>>;
 
     /// Query all rows from a table.
-    fn query_table_sorted(
-        &self,
+    async fn query_table_sorted(
+        &mut self,
         table_name: &str,
         columns: &[Column<Self::Type>],
     ) -> Result<Self::Rows>;
 
     /// Implement [`Driver::compare_tables`] for this database.
-    fn compare_tables_impl(&self, result_table: &str, expected_table: &str) -> Result<()> {
+    async fn compare_tables_impl(
+        &mut self,
+        result_table: &str,
+        expected_table: &str,
+    ) -> Result<()> {
         // Get our columns.
-        let result_columns = self.table_columns(result_table)?;
-        let expected_columns = self.table_columns(expected_table)?;
+        let result_columns = self.table_columns(result_table).await?;
+        let expected_columns = self.table_columns(expected_table).await?;
 
         // Compare our columns by name, but not type, because the types of
         // columns built from `SELECT` expressions may be less strict than
@@ -119,8 +137,12 @@ pub trait DriverImpl {
         let mut result_history: VecDeque<Vec<Self::Value>> = VecDeque::with_capacity(HISTORY_SIZE);
 
         // Query rows from both tables, sorted by all columns.
-        let mut result_rows = self.query_table_sorted(result_table, &result_columns)?;
-        let mut expected_rows = self.query_table_sorted(expected_table, &expected_columns)?;
+        let mut result_rows = self
+            .query_table_sorted(result_table, &result_columns)
+            .await?;
+        let mut expected_rows = self
+            .query_table_sorted(expected_table, &expected_columns)
+            .await?;
         let mut row_count = 0usize;
         loop {
             match (result_rows.next(), expected_rows.next()) {
@@ -136,7 +158,7 @@ pub trait DriverImpl {
 
                         return Err(Error::tables_not_equal(format!(
                             "row from {} does not match row from {}:\n{}",
-                            result_table, expected_table, diff
+                            expected_table, result_table, diff
                         )));
                     }
                     row_count += 1;
@@ -176,7 +198,7 @@ pub trait DriverImpl {
 }
 
 /// A database column.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Column<Type: Comparable> {
     /// The name of the column.
     pub name: String,

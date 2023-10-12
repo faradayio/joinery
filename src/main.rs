@@ -13,6 +13,7 @@ use cmd::{
     parse::{cmd_parse, ParseOpt},
     sql_test::{cmd_sql_test, SqlTestOpt},
 };
+use tracing::info_span;
 
 #[derive(Debug, Parser)]
 enum Opt {
@@ -22,11 +23,16 @@ enum Opt {
     SqlTest(SqlTestOpt),
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
+    // Configure tracing.
+    tracing_subscriber::fmt::init();
+    let _span = info_span!("joinery").entered();
+
     let opt = Opt::parse();
     let result = match opt {
         Opt::Parse(parse_opt) => cmd_parse(&parse_opt),
-        Opt::SqlTest(sql_test_opt) => cmd_sql_test(&sql_test_opt),
+        Opt::SqlTest(sql_test_opt) => cmd_sql_test(&sql_test_opt).await,
     };
     if let Err(e) = result {
         e.emit();

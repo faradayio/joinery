@@ -1,5 +1,5 @@
 -- Comparisons
-CREATE TABLE __result1 AS
+CREATE OR REPLACE TABLE __result1 AS
 SELECT
     1 = 1 AS eq,
     1 != 1 AS ne,
@@ -10,7 +10,7 @@ SELECT
     1 IS NULL AS is_null,
     1 IS NOT NULL AS is_not_null;
 
-CREATE TABLE __expected1 (
+CREATE OR REPLACE TABLE __expected1 (
     eq BOOL,
     ne BOOL,
     lt BOOL,

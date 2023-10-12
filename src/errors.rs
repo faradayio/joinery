@@ -5,6 +5,7 @@ use std::{
     fmt, result,
 };
 
+use async_rusqlite::AlreadyClosed;
 use codespan_reporting::{
     diagnostic::Diagnostic,
     files::SimpleFile,
@@ -66,8 +67,10 @@ impl Error {
                     self
                 };
                 eprintln!("ERROR: {}", first);
-                while let Some(source) = first.source() {
-                    eprintln!("  caused by: {}", source);
+                let mut current = first;
+                while let Some(next) = current.source() {
+                    current = next;
+                    eprintln!("  caused by: {}", current);
                 }
             }
         }
@@ -88,12 +91,21 @@ impl From<SourceError> for Error {
     }
 }
 
+impl From<AlreadyClosed> for Error {
+    fn from(e: AlreadyClosed) -> Self {
+        Error::Context {
+            context: "SQLite3 worker thread exited unexpectedly".to_string(),
+            source: Box::new(e.into()),
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Source(e) => e.fmt(f),
             Error::TablesNotEqual { message } => write!(f, "{}", message),
-            Error::Context { context, source } => write!(f, "{}: {}", context, source),
+            Error::Context { context, .. } => write!(f, "{}", context),
             Error::Other(e) => e.fmt(f),
         }
     }
@@ -104,7 +116,8 @@ impl error::Error for Error {
         match self {
             Error::Source(e) => Some(e.as_ref()),
             Error::Other(e) => Some(e.as_ref()),
-            Error::TablesNotEqual { .. } | Error::Context { .. } => None,
+            Error::Context { source, .. } => Some(source.as_ref()),
+            Error::TablesNotEqual { .. } => None,
         }
     }
 }

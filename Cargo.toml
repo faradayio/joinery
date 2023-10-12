@@ -6,9 +6,16 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
+default = ["snowflake"]
+snowflake = []
 trace = ["peg/trace"]
 
 [dependencies]
+# `arrow` must match snowflake-api's arrow version.
+arrow = "42.0.0"
+arrow-json = "42.0.0"
+async-rusqlite = "0.4.0"
+async-trait = "0.1.73"
 clap = { version = "4.4.6", features = ["derive", "wrap_help"] }
 codespan-reporting = "0.11.1"
 csv = "1.2.2"
@@ -21,7 +28,12 @@ phf = { version = "0.11.2", features = ["macros"] }
 regex = "1.10.0"
 rusqlite = { version = "0.29.0", features = ["bundled", "functions", "vtab"] }
 serde = { version = "1.0.188", features = ["derive"] }
+serde_json = "1.0.107"
+snowflake-api = "0.3.0"
 thiserror = "1.0.49"
+tokio = { version = "1.33.0", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 cli_test_dir = "0.1.5"

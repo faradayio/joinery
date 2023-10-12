@@ -1,5 +1,5 @@
 -- IN, NOT IN
-CREATE TABLE __result1 AS
+CREATE OR REPLACE TABLE __result1 AS
 SELECT
     1 IN (1, 2, 3) AS in1,
     1 IN (2, 3) AS in2,
@@ -10,7 +10,7 @@ SELECT
     1 NOT IN (SELECT 1) AS not_in3,
     1 NOT IN (SELECT 2) AS not_in4;
 
-CREATE TABLE __expected1 (
+CREATE OR REPLACE TABLE __expected1 (
     in1 BOOL,
     in2 BOOL,
     in3 BOOL,

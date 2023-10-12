@@ -1,4 +1,4 @@
-CREATE TABLE __result1 AS
+CREATE OR REPLACE TABLE __result1 AS
 SELECT
     NOT TRUE AS not_true,
     NOT FALSE AS not_false,
@@ -6,7 +6,7 @@ SELECT
     TRUE AND FALSE AS `and`,
     TRUE OR FALSE AS `or`;
 
-CREATE TABLE __expected1 (
+CREATE OR REPLACE TABLE __expected1 (
     not_true BOOL,
     not_false BOOL,
     not_null BOOL,

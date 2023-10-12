@@ -33,6 +33,7 @@ use joinery_macros::{Emit, EmitDefault};
 use crate::{
     drivers::{
         bigquery::BigQueryName,
+        snowflake::SnowflakeString,
         sqlite3::{SQLite3Ident, SQLite3String},
     },
     errors::{Result, SourceError},
@@ -95,6 +96,7 @@ type StrCmp = dyn Fn(&str, &str) -> bool;
 #[allow(dead_code)]
 pub enum Target {
     BigQuery,
+    Snowflake,
     SQLite3,
 }
 
@@ -102,6 +104,16 @@ impl Target {
     /// Format this node for the given target.
     fn f<T: Emit>(self, node: &T) -> FormatForTarget<'_, T> {
         FormatForTarget { target: self, node }
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Target::BigQuery => write!(f, "bigquery"),
+            Target::Snowflake => write!(f, "snowflake"),
+            Target::SQLite3 => write!(f, "sqlite3"),
+        }
     }
 }
 
@@ -285,7 +297,7 @@ impl Emit for Token {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::BigQuery => write!(f, "{}", self.text),
-            Target::SQLite3 => {
+            Target::Snowflake | Target::SQLite3 => {
                 // Write out the token itself.
                 write!(f, "{}", self.token_str())?;
 
@@ -365,7 +377,9 @@ impl<T: fmt::Debug + Emit> Emit for NodeVec<T> {
                     // Trailing separator.
                     match t {
                         Target::BigQuery => write!(f, "{}", t.f(sep))?,
-                        Target::SQLite3 => write!(f, "{}", t.f(&sep.with_erased_token_str()))?,
+                        Target::Snowflake | Target::SQLite3 => {
+                            write!(f, "{}", t.f(&sep.with_erased_token_str()))?
+                        }
                     }
                 }
             }
@@ -424,8 +438,10 @@ impl Emit for Identifier {
                     BigQueryName(&self.text),
                     t.f(&self.token.ws_only())
                 ),
-
-                Target::SQLite3 => write!(
+                // Snowflake and SQLite3 use double quoted identifiers and
+                // escape quotes by doubling them. Neither allows backslash
+                // escapes here, though Snowflake does in strings.
+                Target::Snowflake | Target::SQLite3 => write!(
                     f,
                     "{}{}",
                     SQLite3Ident(&self.text),
@@ -614,7 +630,7 @@ impl Emit for SetOperator {
             // whitespace from the first token in those cases. In other cases,
             // we'll substitute `UNION` with a comment saying what it really
             // should be.
-            Target::SQLite3 => match self {
+            Target::Snowflake | Target::SQLite3 => match self {
                 SetOperator::UnionAll {
                     union_token,
                     all_token,
@@ -845,6 +861,14 @@ impl Emit for Expression {
                         .as_ref())
                 )
             }
+            // Snowflake quotes strings differently.
+            Expression::Literal {
+                token,
+                value: LiteralValue::String(s),
+            } if t == Target::Snowflake => {
+                SnowflakeString(s).fmt(f)?;
+                token.ws_only().emit(t, f)
+            }
             // SQLite3 quotes strings differently.
             Expression::Literal {
                 token,
@@ -860,7 +884,7 @@ impl Emit for Expression {
                 else_expression,
                 paren2,
                 ..
-            } if t == Target::SQLite3 => write!(
+            } if t == Target::Snowflake || t == Target::SQLite3 => write!(
                 f,
                 "{}WHEN {} THEN {} ELSE {} {}",
                 t.f(if_token.with_token_str("CASE").ensure_ws().as_ref()),
@@ -1342,6 +1366,16 @@ pub enum DataType {
 impl Emit for DataType {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
+            Target::Snowflake => match self {
+                DataType::Bool(token) => token.with_token_str("BOOLEAN").emit(t, f),
+                DataType::Int64(token) => token.with_token_str("INTEGER").emit(t, f),
+                DataType::Float64(token) => token.with_token_str("FLOAT8").emit(t, f),
+                DataType::String(token) => token.with_token_str("TEXT").emit(t, f),
+                // TODO: I'm not really sure this maps well.
+                DataType::Datetime(token) => token.with_token_str("TIMESTAMP_NTZ").emit(t, f),
+                DataType::Array { gt, .. } => gt.with_token_str("ARRAY").ensure_ws().emit(t, f),
+                DataType::Struct { gt, .. } => gt.with_token_str("OBJECT").ensure_ws().emit(t, f),
+            },
             Target::SQLite3 => match self {
                 DataType::Bool(token) | DataType::Int64(token) => {
                     write!(f, "{}", t.f(&token.with_token_str("INTEGER")))
@@ -2913,8 +2947,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_parser_and_run_with_sqlite3() {
+    #[tokio::test]
+    async fn test_parser_and_run_with_sqlite3() {
         let sql_examples = &[
             // Basic test cases of gradually increasing complexity.
             (r#"SELECT * FROM t"#, None),
@@ -3074,7 +3108,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         ];
 
         // Set up SQLite3 database for testing transpiled SQL.
-        let conn = SQLite3Locator::memory().driver().unwrap();
+        let mut conn = SQLite3Locator::memory().driver().await.unwrap();
 
         // Create some fixtures.
         let fixtures = r#"
@@ -3093,7 +3127,8 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
                 join_id INT
             );
         "#;
-        conn.execute_native_sql(fixtures)
+        conn.execute_native_sql_statement(fixtures)
+            .await
             .expect("failed to create SQLite3 fixtures");
 
         for &(sql, normalized) in sql_examples {
@@ -3110,7 +3145,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
 
             let sql = parsed.emit_to_string(Target::SQLite3);
             println!("  SQLite3: {}", sql);
-            if let Err(err) = conn.execute_native_sql(&sql) {
+            if let Err(err) = conn.execute_native_sql_statement(&sql).await {
                 panic!("failed to execute with SQLite3:\n{}\n{}", sql, err);
             }
         }

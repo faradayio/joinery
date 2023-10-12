@@ -1,5 +1,5 @@
 -- CAST(NULL AS <type>) for common types.
-CREATE TABLE __result1 AS
+CREATE OR REPLACE TABLE __result1 AS
 SELECT
     CAST(NULL AS BOOL) AS null_bool,
     CAST(NULL AS BOOLEAN) AS null_boolean,
@@ -19,7 +19,7 @@ SELECT
     CAST(NULL AS STRUCT<foo INT64, bar STRING>) AS null_struct_with_named_fields,
     CAST(NULL AS STRUCT<INT64, STRING>) AS null_struct_with_unnamed_fields;
 
-CREATE TABLE __expected1 (
+CREATE OR REPLACE TABLE __expected1 (
     null_bool BOOL,
     null_boolean BOOLEAN,
     null_int64 INT64,
