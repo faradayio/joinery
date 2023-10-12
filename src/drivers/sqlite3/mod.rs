@@ -1,19 +1,70 @@
 //! Our SQLite3 driver.
 
-use std::{fmt, vec};
+use std::{fmt, str::FromStr, vec};
 
 use rusqlite::{functions::FunctionFlags, types};
 
 use crate::{
     ast::Target,
-    errors::{Context, Error, Result},
+    errors::{format_err, Context, Error, Result},
 };
 
 use self::unnest::register_unnest;
 
-use super::{Column, Driver, DriverImpl};
+use super::{Column, Driver, DriverImpl, Locator};
 
 mod unnest;
+
+/// Our locator prefix.
+pub const SQLITE3_LOCATOR_PREFIX: &str = "sqlite3:";
+
+/// A locator for an SQLite3 database.
+#[derive(Debug)]
+pub struct SQLite3Locator {
+    /// The path to the SQLite3 database.
+    path: String,
+}
+
+impl SQLite3Locator {
+    /// Create an in-memory SQLite3 database.
+    pub fn memory() -> Self {
+        Self {
+            path: ":memory:".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for SQLite3Locator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", SQLITE3_LOCATOR_PREFIX, self.path)
+    }
+}
+
+impl Locator for SQLite3Locator {
+    fn target(&self) -> Target {
+        Target::SQLite3
+    }
+
+    fn driver(&self) -> Result<Box<dyn Driver>> {
+        Ok(Box::new(SQLite3Driver::from_locator(self)?))
+    }
+}
+
+impl FromStr for SQLite3Locator {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        if !s.starts_with(SQLITE3_LOCATOR_PREFIX) {
+            return Err(format_err!(
+                "SQLite3 locator must start with {}",
+                SQLITE3_LOCATOR_PREFIX
+            ));
+        }
+        Ok(Self {
+            path: s[SQLITE3_LOCATOR_PREFIX.len()..].to_string(),
+        })
+    }
+}
 
 /// Our SQLite3 driver.
 pub struct SQLite3Driver {
@@ -22,9 +73,15 @@ pub struct SQLite3Driver {
 
 impl SQLite3Driver {
     /// Create an in-memory SQLite3 database.
+    #[allow(dead_code)]
     pub fn memory() -> Result<Self> {
-        let conn = rusqlite::Connection::open_in_memory()
-            .context("could not open SQLite3 memory database")?;
+        Self::from_locator(&SQLite3Locator::memory())
+    }
+
+    /// Create an SQLite3 database from a locator.
+    pub fn from_locator(locator: &SQLite3Locator) -> Result<Self> {
+        let conn = rusqlite::Connection::open(&locator.path)
+            .with_context(|| format!("failed to open SQLite3 database: {}", locator.path))?;
 
         // Install our dummy `UNNEST` virtual table. This does nothing useful
         // yet, but it allows us to parse and execute queries that use `UNNEST`.

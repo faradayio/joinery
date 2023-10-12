@@ -2909,8 +2909,7 @@ peg::parser! {
 
 #[cfg(test)]
 mod tests {
-
-    use crate::drivers::driver_for_target;
+    use crate::drivers::{sqlite3::SQLite3Locator, Locator};
 
     use super::*;
 
@@ -3075,7 +3074,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
         ];
 
         // Set up SQLite3 database for testing transpiled SQL.
-        let conn = driver_for_target(Target::SQLite3).unwrap();
+        let conn = SQLite3Locator::memory().driver().unwrap();
 
         // Create some fixtures.
         let fixtures = r#"

@@ -1,7 +1,8 @@
 //! Parse queries from a CSV file.
 
-use std::path::Path;
+use std::path::PathBuf;
 
+use clap::Parser;
 use serde::Deserialize;
 
 use crate::{
@@ -9,6 +10,17 @@ use crate::{
     ast::{self},
     errors::{Context, Result},
 };
+
+/// Parse SQL from a CSV file containing `id` and `query` columns.
+#[derive(Debug, Parser)]
+pub struct ParseOpt {
+    /// A CSV file containing `id` and `query` columns.
+    csv_path: PathBuf,
+
+    /// Count function calls.
+    #[clap(long, alias = "funcs")]
+    count_function_calls: bool,
+}
 
 /// A row in our CSV file.
 #[derive(Debug, Deserialize)]
@@ -20,7 +32,7 @@ struct Row {
 }
 
 /// Parse queries from a CSV file.
-pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
+pub fn cmd_parse(opt: &ParseOpt) -> Result<()> {
     // Keep track of how many rows we've processed and how many queries we've
     // successfully parsed.
     let mut row_count = 0;
@@ -33,11 +45,11 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
     let mut function_call_counts = FunctionCallCounts::default();
 
     // Read CSV file.
-    let mut rdr = csv::Reader::from_path(csv_path)
-        .with_context(|| format!("Failed to open CSV file: {}", csv_path.display()))?;
+    let mut rdr = csv::Reader::from_path(&opt.csv_path)
+        .with_context(|| format!("Failed to open CSV file: {}", opt.csv_path.display()))?;
     for result in rdr.deserialize() {
-        let row: Row =
-            result.with_context(|| format!("Failed to parse CSV file: {}", csv_path.display()))?;
+        let row: Row = result
+            .with_context(|| format!("Failed to parse CSV file: {}", opt.csv_path.display()))?;
 
         // Skip ML queries, which we don't translate to other databases,
         // anyways.
@@ -50,13 +62,13 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
         }
 
         // Parse query.
-        let filename = format!("{}/{}", csv_path.display(), row.id);
+        let filename = format!("{}/{}", opt.csv_path.display(), row.id);
         match ast::parse_sql(&filename, &row.query) {
             Ok(sql_program) => {
                 ok_count += 1;
                 ok_line_count += row.query.lines().count();
                 println!("OK {}", row.id);
-                if count_function_calls {
+                if opt.count_function_calls {
                     function_call_counts.visit(&sql_program);
                 }
             }
@@ -72,7 +84,7 @@ pub fn cmd_parse(csv_path: &Path, count_function_calls: bool) -> Result<()> {
         ok_count, row_count, ml_count, ok_line_count, line_count
     );
 
-    if count_function_calls {
+    if opt.count_function_calls {
         println!();
         println!("Function call counts:");
         for (function_name, count) in function_call_counts.counts() {

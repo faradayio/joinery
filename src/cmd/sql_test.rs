@@ -5,23 +5,43 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use clap::Parser;
+
 use crate::{
     ast::{self, parse_sql, CreateTableStatement, CreateViewStatement},
     drivers::{self, Driver},
     errors::{format_err, Context, Error, Result},
 };
 
+/// Run SQL tests from a directory.
+#[derive(Debug, Parser)]
+pub struct SqlTestOpt {
+    /// A directory containing SQL test files.
+    dir_path: PathBuf,
+
+    /// A database locator to run tests against.
+    #[clap(long, alias = "db", default_value = "sqlite3::memory:")]
+    database: String,
+}
+
 /// Run our SQL test suite.
-pub fn cmd_sql_test(dir_path: &Path) -> Result<()> {
+pub fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     // Get a database driver for our target.
-    let driver = drivers::driver_for_target(ast::Target::SQLite3)?;
+    let locator = opt.database.parse::<Box<dyn drivers::Locator>>()?;
+    let driver = locator.driver()?;
 
     // Keep track of our test results.
     let mut test_count = 0usize;
     let mut test_failures: Vec<(PathBuf, Error)> = vec![];
 
     // Read directory using `glob`.
-    let pattern = format!("{}/**/*.sql", dir_path.display());
+    let dir_path = opt.dir_path.as_os_str().to_str().ok_or_else(|| {
+        format_err!(
+            "Failed to convert path to UTF-8: {}",
+            opt.dir_path.display()
+        )
+    })?;
+    let pattern = format!("{}/**/*.sql", dir_path);
     for entry in glob::glob(&pattern).context("Failed to read test directory")? {
         let path = entry.context("Failed to read test file")?;
         test_count += 1;

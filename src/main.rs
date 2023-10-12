@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::exit};
+use std::process::exit;
 
 use clap::Parser;
 
@@ -9,34 +9,24 @@ mod drivers;
 mod errors;
 mod util;
 
-use cmd::{parse::cmd_parse, sql_test::cmd_sql_test};
+use cmd::{
+    parse::{cmd_parse, ParseOpt},
+    sql_test::{cmd_sql_test, SqlTestOpt},
+};
 
 #[derive(Debug, Parser)]
 enum Opt {
     /// Parse SQL from a CSV file containing `id` and `query` columns.
-    Parse {
-        /// A CSV file containing `id` and `query` columns.
-        csv_path: PathBuf,
-
-        /// Count function calls.
-        #[clap(long, alias = "funcs")]
-        count_function_calls: bool,
-    },
+    Parse(ParseOpt),
     /// Run SQL tests from a directory.
-    SqlTest {
-        /// A directory containing SQL test files.
-        dir_path: PathBuf,
-    },
+    SqlTest(SqlTestOpt),
 }
 
 fn main() {
     let opt = Opt::parse();
     let result = match opt {
-        Opt::Parse {
-            csv_path,
-            count_function_calls,
-        } => cmd_parse(&csv_path, count_function_calls),
-        Opt::SqlTest { dir_path } => cmd_sql_test(&dir_path),
+        Opt::Parse(parse_opt) => cmd_parse(&parse_opt),
+        Opt::SqlTest(sql_test_opt) => cmd_sql_test(&sql_test_opt),
     };
     if let Err(e) = result {
         e.emit();

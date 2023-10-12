@@ -1,29 +1,45 @@
 //! Database drivers.
 
-use std::{collections::VecDeque, fmt};
+use std::{collections::VecDeque, fmt, str::FromStr};
 
 use crate::{
     ast::{Emit, Target},
     errors::{format_err, Error, Result},
 };
 
-use self::sqlite3::SQLite3Driver;
+use self::sqlite3::{SQLite3Locator, SQLITE3_LOCATOR_PREFIX};
 
 pub mod bigquery;
 pub mod sqlite3;
+
+/// A URL-like locator for a database.
+pub trait Locator: fmt::Display + fmt::Debug + Send + Sync + 'static {
+    /// Get the target for this locator.
+    fn target(&self) -> Target;
+
+    /// Get the driver for this locator.
+    fn driver(&self) -> Result<Box<dyn Driver>>;
+}
+
+impl FromStr for Box<dyn Locator> {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let colon_pos = s
+            .find(':')
+            .ok_or_else(|| format_err!("could not find scheme for locator: {}", s))?;
+        let prefix = &s[..colon_pos + 1];
+        match prefix {
+            SQLITE3_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SQLite3Locator>()?)),
+            _ => Err(format_err!("unsupported database type: {}", s)),
+        }
+    }
+}
 
 /// A type that supports basic equality and display, used for comparing
 /// test results.
 pub trait Comparable: fmt::Debug + fmt::Display + PartialEq {}
 impl<T> Comparable for T where T: fmt::Debug + fmt::Display + PartialEq {}
-
-/// Get the driver for the given target.
-pub fn driver_for_target(target: Target) -> Result<Box<dyn Driver>> {
-    match target {
-        Target::SQLite3 => Ok(Box::new(SQLite3Driver::memory()?)),
-        _ => Err(format_err!("no driver for target: {:?}", target)),
-    }
-}
 
 /// A database driver. This is mostly used for running SQL tests.
 ///
