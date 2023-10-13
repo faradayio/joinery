@@ -72,11 +72,6 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
     "UNIQUE", "UNNEST", "UPDATE", "USING", "VACUUM", "VALUES", "VIEW",
     "VIRTUAL", "WHEN", "WHERE", "WINDOW", "WITH", "WITHIN", "WITHOUT",
 
-    // Types. These aren't really keywords but we treat them as such?
-    //
-    // TODO: Figure this out.
-    "BOOL", "BOOLEAN", "INT64", "FLOAT64", "STRING", "DATETIME",
-
     // Magic functions with parser integration.
     "COUNT", "SAFE_CAST", "ORDINAL",
 
@@ -1179,9 +1174,7 @@ pub struct FunctionCall {
     pub over_clause: Option<OverClause>,
 }
 
-/// A function name. Some function names are supposedly keywords, and I'm not
-/// sure what all the implications of that might be. But this is good enough to
-/// handle them for now.
+/// A function name.
 #[derive(Debug, Drive, EmitDefault)]
 pub enum FunctionName {
     ProjectDatasetFunction {
@@ -1199,7 +1192,6 @@ pub enum FunctionName {
     Function {
         function: Identifier,
     },
-    Keyword(Token),
 }
 
 impl FunctionName {
@@ -1218,7 +1210,6 @@ impl FunctionName {
                 format!("{}.{}", dataset.text, function.text)
             }
             FunctionName::Function { function } => function.text.clone(),
-            FunctionName::Keyword(token) => token.token_str().to_ascii_uppercase(),
         }
     }
 }
@@ -1232,7 +1223,6 @@ impl Emit for FunctionName {
                     FunctionName::ProjectDatasetFunction { function, .. }
                     | FunctionName::DatasetFunction { function, .. }
                     | FunctionName::Function { function } => function.token.ws_only(),
-                    FunctionName::Keyword(token) => token.ws_only(),
                 };
                 write!(f, "{}{}", SQLite3Ident(&name), t.f(&ws))
             }
@@ -1345,10 +1335,16 @@ pub enum WindowFrameEnd {
 #[derive(Debug, Drive, EmitDefault)]
 pub enum DataType {
     Bool(Token),
-    Int64(Token),
-    Float64(Token),
-    String(Token),
+    Bytes(Token),
+    Date(Token),
     Datetime(Token),
+    Float64(Token),
+    Geography(Token), // WGS84
+    Int64(Token),
+    Numeric(Token),
+    String(Token),
+    Time(Token),
+    Timestamp(Token),
     Array {
         array_token: Token,
         lt: Token,
@@ -1368,20 +1364,37 @@ impl Emit for DataType {
         match t {
             Target::Snowflake => match self {
                 DataType::Bool(token) => token.with_token_str("BOOLEAN").emit(t, f),
+                DataType::Bytes(token) => token.with_token_str("BINARY").emit(t, f),
                 DataType::Int64(token) => token.with_token_str("INTEGER").emit(t, f),
-                DataType::Float64(token) => token.with_token_str("FLOAT8").emit(t, f),
-                DataType::String(token) => token.with_token_str("TEXT").emit(t, f),
-                // TODO: I'm not really sure this maps well.
+                DataType::Date(token) => token.emit(t, f),
+                // "Wall clock" time with no timezone.
                 DataType::Datetime(token) => token.with_token_str("TIMESTAMP_NTZ").emit(t, f),
+                DataType::Float64(token) => token.with_token_str("FLOAT8").emit(t, f),
+                DataType::Geography(token) => token.emit(t, f),
+                DataType::Numeric(token) => token.emit(t, f),
+                DataType::String(token) => token.with_token_str("TEXT").emit(t, f),
+                DataType::Time(token) => token.emit(t, f),
+                // `TIMESTAMP_TZ` will need very careful timezone handling.
+                DataType::Timestamp(token) => token.with_token_str("TIMESTAMP_TZ").emit(t, f),
                 DataType::Array { gt, .. } => gt.with_token_str("ARRAY").ensure_ws().emit(t, f),
                 DataType::Struct { gt, .. } => gt.with_token_str("OBJECT").ensure_ws().emit(t, f),
             },
             Target::SQLite3 => match self {
                 DataType::Bool(token) | DataType::Int64(token) => {
-                    write!(f, "{}", t.f(&token.with_token_str("INTEGER")))
+                    token.with_token_str("INTEGER").emit(t, f)
+                }
+                // NUMERIC is used when people want accurate math, so we want
+                // either BLOB or TEXT, whatever makes math easier.
+                DataType::Bytes(token) | DataType::Numeric(token) => {
+                    token.with_token_str("BLOB").emit(t, f)
                 }
                 DataType::Float64(token) => write!(f, "{}", t.f(&token.with_token_str("REAL"))),
-                DataType::String(token) | DataType::Datetime(token) => {
+                DataType::String(token)
+                | DataType::Date(token)      // All date types should be strings
+                | DataType::Datetime(token)
+                | DataType::Geography(token) // Use GeoJSON
+                | DataType::Time(token)
+                | DataType::Timestamp(token) => {
                     write!(f, "{}", t.f(&token.with_token_str("TEXT")))
                 }
                 DataType::Array { gt, .. } | DataType::Struct { gt, .. } => {
@@ -2306,7 +2319,6 @@ peg::parser! {
 
         rule function_name() -> FunctionName
             = dotted:dotted_function_name()
-            / token:k("DATETIME") { FunctionName::Keyword(token) }
 
         rule over_clause() -> OverClause
             = over_token:k("OVER") paren1:t("(")
@@ -2419,11 +2431,17 @@ peg::parser! {
             }
 
         rule data_type() -> DataType
-            = token:(k("BOOLEAN") / k("BOOL")) { DataType::Bool(token) }
-            / token:k("INT64") { DataType::Int64(token) }
-            / token:k("FLOAT64") { DataType::Float64(token) }
-            / token:k("STRING") { DataType::String(token) }
-            / token:k("DATETIME") { DataType::Datetime(token) }
+            = token:(ti("BOOLEAN") / ti("BOOL")) { DataType::Bool(token) }
+            / token:ti("BYTES") { DataType::Bytes(token) }
+            / token:ti("DATETIME") { DataType::Datetime(token) }
+            / token:ti("DATE") { DataType::Date(token) }
+            / token:ti("FLOAT64") { DataType::Float64(token) }
+            / token:ti("GEOGRAPHY") { DataType::Geography(token) }
+            / token:ti("INT64") { DataType::Int64(token) }
+            / token:ti("NUMERIC") { DataType::Numeric(token) }
+            / token:ti("STRING") { DataType::String(token) }
+            / token:ti("TIMESTAMP") { DataType::Timestamp(token) }
+            / token:ti("TIME") { DataType::Time(token) }
             / array_token:k("ARRAY") lt:t("<") data_type:data_type() gt:t(">") {
                 DataType::Array {
                     array_token,
@@ -2442,9 +2460,17 @@ peg::parser! {
             }
 
         rule struct_field() -> StructField
-            = name:ident()? data_type:data_type() {
+            // We need to be careful how we parse this because of how `peg`
+            // handles greedy matches. Longest ambigous match must come first.
+            = name:ident() data_type:data_type() {
                 StructField {
-                    name,
+                    name: Some(name),
+                    data_type,
+                }
+            }
+            / data_type:data_type() {
+                StructField {
+                    name: None,
                     data_type,
                 }
             }
@@ -2886,6 +2912,24 @@ peg::parser! {
                     text: format!("{}{}", input, ws),
                 }
             }
+
+        /// Case-insensitive tokens. These are sort of like keywords, but don't
+        /// appear in the `KEYWORDS` set and don't need to be quoted if used
+        /// as a column name.
+        rule ti(token: &'static str) -> Token
+            = want(token, &str::eq_ignore_ascii_case)
+              s:position!() input:$([_]*<{token.len()}>) ws:$(_) e:position!()
+            {
+                if KEYWORDS.contains(token) {
+                    panic!("BUG: {:?} is in KEYWORDS, so parse it with k()", token);
+                }
+                Token {
+                    span: s..e,
+                    ws_offset: input.len(),
+                    text: format!("{}{}", input, ws),
+                }
+            }
+
 
         /// Complex tokens matching a grammar rule.
         rule token<T>(label: &'static str, r: rule<T>) -> Token
