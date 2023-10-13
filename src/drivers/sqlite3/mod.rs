@@ -114,6 +114,8 @@ impl SQLite3Driver {
                 ("format_datetime", 2),
                 ("generate_uuid", 0),
                 ("interval", 2),
+                ("regexp_extract", 2),
+                ("regexp_replace", 3),
                 ("struct", -1),
                 ("function.custom", 0),
             ];

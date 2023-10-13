@@ -12,7 +12,7 @@ use regex::Regex;
 use tracing::instrument;
 
 use crate::{
-    ast::{self, parse_sql, CreateTableStatement, CreateViewStatement},
+    ast::{self, parse_sql, CreateTableStatement, CreateViewStatement, Target},
     drivers::{self, Driver},
     errors::{format_err, Context, Error, Result},
 };
@@ -42,7 +42,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     // Keep track of our test results.
     let mut test_count = 0usize;
     let mut test_failures: Vec<(PathBuf, Error)> = vec![];
-    let mut pending: Vec<(PathBuf, String)> = vec![];
+    let mut pending: Vec<PendingTestInfo> = vec![];
 
     // Build a glob matching our test files, for use with `glob`.
     let dir_path_str = opt.dir_path.as_os_str().to_str().ok_or_else(|| {
@@ -72,26 +72,14 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
 
         // Skip pending tests unless asked to run them.
         if !opt.pending {
-            // Look for lines of the form `-- pending: db1 Comment`.
-            static PENDING_RE: Lazy<Regex> =
-                Lazy::new(|| Regex::new(r"(?m)^--\s*pending:\s*([a-zA-Z0-9_]+)(\s+.*)?").unwrap());
-            let target_string = driver.target().to_string();
-            if let Some(caps) = PENDING_RE.captures(&query) {
-                let db = caps.get(1).unwrap().as_str();
-                let comment = caps.get(2).map_or("", |m| m.as_str().trim());
-                if db == target_string {
-                    print!("P");
-                    let _ = io::stdout().flush();
-
-                    pending.push((
-                        path.strip_prefix(&base_dir)
-                            .unwrap_or_else(|_| &path)
-                            .to_owned(),
-                        comment.to_owned(),
-                    ));
-
-                    continue;
-                }
+            let short_path = path.strip_prefix(&base_dir).unwrap_or(&path);
+            if let Some(pending_test_info) =
+                PendingTestInfo::for_target(driver.target(), short_path, &query)
+            {
+                pending.push(pending_test_info);
+                print!("P");
+                let _ = io::stdout().flush();
+                continue;
             }
         }
 
@@ -117,8 +105,8 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
 
     if !pending.is_empty() {
         println!("\nPending tests:");
-        for (path, comment) in &pending {
-            println!("  {} ({})", path.display(), comment);
+        for p in &pending {
+            println!("  {} ({})", p.path.display(), p.comment);
         }
     }
 
@@ -176,6 +164,42 @@ async fn run_test(
         driver.drop_table_if_exists(&expected).await?;
     }
     Ok(())
+}
+
+/// Information on a pending test.
+struct PendingTestInfo {
+    path: PathBuf,
+    database: String,
+    comment: String,
+}
+
+impl PendingTestInfo {
+    /// Find the `PendingTestInfo` for a given database.
+    fn for_target(target: Target, path: &Path, sql: &str) -> Option<PendingTestInfo> {
+        let database = target.to_string();
+        Self::all_from_test(path, sql)
+            .into_iter()
+            .find(|info| info.database == database)
+    }
+
+    /// Find all `pending:` lines in a test file.
+    fn all_from_test(path: &Path, sql: &str) -> Vec<PendingTestInfo> {
+        // Look for lines of the form `-- pending: db1 Comment`.
+        static PENDING_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"(?m)^--\s*pending:\s*([a-zA-Z0-9_]+)(\s+.*)?").unwrap());
+        PENDING_RE
+            .captures_iter(sql)
+            .map(|cap| {
+                let database = cap.get(1).unwrap().as_str();
+                let comment = cap.get(2).map_or("", |m| m.as_str().trim());
+                PendingTestInfo {
+                    path: path.to_owned(),
+                    database: database.to_owned(),
+                    comment: comment.to_owned(),
+                }
+            })
+            .collect()
+    }
 }
 
 /// Tables output by a test suite. This normally stores `ast::TableName`s, but
