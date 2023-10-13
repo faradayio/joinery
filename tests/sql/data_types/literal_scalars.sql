@@ -1,4 +1,4 @@
--- pending: snowflake
+-- pending: snowflake Test harness Arrow library reads 1.5 as 15
 
 CREATE OR REPLACE TABLE __result1 AS
 SELECT

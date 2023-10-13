@@ -42,7 +42,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     // Keep track of our test results.
     let mut test_count = 0usize;
     let mut test_failures: Vec<(PathBuf, Error)> = vec![];
-    let mut pending_paths: Vec<PathBuf> = vec![];
+    let mut pending: Vec<(PathBuf, String)> = vec![];
 
     // Build a glob matching our test files, for use with `glob`.
     let dir_path_str = opt.dir_path.as_os_str().to_str().ok_or_else(|| {
@@ -72,22 +72,23 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
 
         // Skip pending tests unless asked to run them.
         if !opt.pending {
-            // Look for lines of the form `-- pending: db1, db2, ...`.
-            static PENDING_RE: Lazy<Regex> = Lazy::new(|| {
-                Regex::new(r"(?m)^--\s*pending:\s*([a-zA-Z0-9_][a-zA-Z0-9_, ]*)").unwrap()
-            });
+            // Look for lines of the form `-- pending: db1 Comment`.
+            static PENDING_RE: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"(?m)^--\s*pending:\s*([a-zA-Z0-9_]+)(\s+.*)?").unwrap());
             let target_string = driver.target().to_string();
             if let Some(caps) = PENDING_RE.captures(&query) {
-                let dbs = caps.get(1).unwrap().as_str();
-                if dbs.split(',').any(|db| db.trim() == target_string) {
+                let db = caps.get(1).unwrap().as_str();
+                let comment = caps.get(2).map_or("", |m| m.as_str().trim());
+                if db == target_string {
                     print!("P");
                     let _ = io::stdout().flush();
 
-                    pending_paths.push(
+                    pending.push((
                         path.strip_prefix(&base_dir)
                             .unwrap_or_else(|_| &path)
                             .to_owned(),
-                    );
+                        comment.to_owned(),
+                    ));
 
                     continue;
                 }
@@ -114,10 +115,10 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         e.emit();
     }
 
-    if !pending_paths.is_empty() {
+    if !pending.is_empty() {
         println!("\nPending tests:");
-        for path in &pending_paths {
-            println!("  {}", path.display());
+        for (path, comment) in &pending {
+            println!("  {} ({})", path.display(), comment);
         }
     }
 
@@ -125,8 +126,8 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         Err(Error::Other("No tests found".into()))
     } else if test_failures.is_empty() {
         print!("\nOK: {} tests passed", test_count);
-        if !pending_paths.is_empty() {
-            print!(", {} pending", pending_paths.len());
+        if !pending.is_empty() {
+            print!(", {} pending", pending.len());
         }
         println!();
         Ok(())
@@ -136,8 +137,8 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
             test_failures.len(),
             test_count,
         );
-        if !pending_paths.is_empty() {
-            print!(", {} pending", pending_paths.len());
+        if !pending.is_empty() {
+            print!(", {} pending", pending.len());
         }
         println!();
 
