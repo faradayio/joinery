@@ -9,6 +9,7 @@ use crate::ast::{FunctionName, Identifier};
 // A `phf_map!` of BigQuery function names to Snowflake function names. Use
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "GENERATE_UUID" => "UUID_STRING",
     "REGEXP_EXTRACT" => "REGEXP_SUBSTR",
     "SHA256" => "SHA2_BINARY", // Second argument defaults to SHA256.
 };
@@ -32,6 +33,7 @@ impl Udf {
 /// A `phf_map!` of BigQuery UDF names to Snowflake UDFs. Use this when we
 /// actually need to create a UDF as a helper function.
 static UDFS: phf::Map<&'static str, &'static Udf> = phf::phf_map! {
+    "RAND" => &Udf { decl: "RAND() RETURNS FLOAT", sql: "UNIFORM(0::float, 1::float, RANDOM())" },
     "TO_HEX" => &Udf { decl: "TO_HEX(b BINARY) RETURNS STRING", sql: "HEX_ENCODE(b, 0)" },
 };
 
