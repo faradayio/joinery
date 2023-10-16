@@ -41,6 +41,9 @@ Arrays:
 - [x] ARRAY_TO_STRING(_,_)
 - [x] ARRAY_AGG(_)
 - [x] ARRAY_LENGTH(_)
+- [x] OFFSET
+- [x] ORDINAL
+- [x] ARRAY(SELECT ...)
 
 Special date functions:
 
@@ -56,3 +59,10 @@ Special date functions:
 - [ ] DATETIME_TRUNC(_,_) (special)
 - [ ] FORMAT_DATETIME(_,_)
 - [ ] GENERATE_DATE_ARRAY(_,_,_)
+- [ ] INTERVAL
+
+## Operators and special forms
+
+- [ ] SAFE_CAST
+- [ ] IN UNNEST
+- [ ] IN (SELECT ...)

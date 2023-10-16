@@ -1491,13 +1491,17 @@ impl Emit for IndexOffset {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert everything to `Simple` for SQLite3.
         match self {
-            IndexOffset::Offset { expression, .. } if t == Target::SQLite3 => expression.emit(t, f),
+            IndexOffset::Offset { expression, .. }
+                if t == Target::Snowflake || t == Target::SQLite3 =>
+            {
+                expression.emit(t, f)
+            }
             IndexOffset::Ordinal {
                 paren1,
                 expression,
                 paren2,
                 ..
-            } if t == Target::SQLite3 => {
+            } if t == Target::Snowflake || t == Target::SQLite3 => {
                 paren1.emit(t, f)?;
                 expression.emit(t, f)?;
                 paren2.emit(t, f)?;
