@@ -1,11 +1,11 @@
 //! Database drivers.
 
-use std::{collections::VecDeque, fmt, str::FromStr};
+use std::{borrow::Cow, collections::VecDeque, fmt, str::FromStr};
 
 use async_trait::async_trait;
 
 use crate::{
-    ast::{Emit, Target},
+    ast::{self, Emit, Target},
     errors::{format_err, Error, Result},
 };
 
@@ -67,12 +67,26 @@ pub trait Driver: Send + Sync + 'static {
 
     /// Execute a query represented as an AST. This can execute multiple
     /// statements.
-    async fn execute_ast(&mut self, ast: &crate::ast::SqlProgram) -> Result<()> {
-        for statement in &ast.statements {
-            let sql = statement.emit_to_string(self.target());
+    async fn execute_ast(&mut self, ast: &ast::SqlProgram) -> Result<()> {
+        let rewritten = self.rewrite_ast(ast)?;
+        for sql in rewritten.extra_native_sql {
             self.execute_native_sql_statement(&sql).await?;
         }
-        Ok(())
+        let sql = rewritten.ast.emit_to_string(self.target());
+        self.execute_native_sql_statement(&sql).await
+    }
+
+    /// Rewrite an AST to convert function names, etc., into versions that can
+    /// be passed to [`Emitted::emit_to_string`] for this database. This allows
+    /// us to do less database-specific work in [`Emit::emit`], and more in the
+    /// database drivers themselves. This can't change lexical syntax, but it
+    /// can change the structure of the AST.
+    fn rewrite_ast<'ast>(&self, ast: &'ast ast::SqlProgram) -> Result<RewrittenAst<'ast>> {
+        // Default implementation does nothing.
+        Ok(RewrittenAst {
+            extra_native_sql: vec![],
+            ast: Cow::Borrowed(ast),
+        })
     }
 
     /// Drop a table if it exists.
@@ -83,6 +97,16 @@ pub trait Driver: Send + Sync + 'static {
     ///
     /// This is implemented by [`DriverImpl::compare_tables_impl`].
     async fn compare_tables(&mut self, result_table: &str, expected_table: &str) -> Result<()>;
+}
+
+/// The output of [`Driver::rewrite_ast`].
+pub struct RewrittenAst<'a> {
+    /// Extra native SQL statements to execute before the AST. Probably
+    /// temporary UDFs and things like that.
+    pub extra_native_sql: Vec<String>,
+
+    /// The new AST.
+    pub ast: Cow<'a, ast::SqlProgram>,
 }
 
 /// Extensions to [`Driver`] that are not ["object safe"][safe].

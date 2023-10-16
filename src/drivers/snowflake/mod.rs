@@ -1,21 +1,24 @@
 //! A Snowflake driver.
 
-use std::{env, fmt, str::FromStr};
+use std::{borrow::Cow, env, fmt, str::FromStr};
 
 use arrow_json::writer::record_batches_to_json_rows;
 use async_trait::async_trait;
+use derive_visitor::DriveMut;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 use snowflake_api::{QueryResult, SnowflakeApi};
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use crate::{
-    ast::Target,
+    ast::{self, Emit, Target},
     errors::{format_err, Context, Error, Result},
 };
 
-use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator};
+use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator, RewrittenAst};
+
+mod rename_functions;
 
 /// Locator prefix for Snowflake.
 pub const SNOWFLAKE_LOCATOR_PREFIX: &str = "snowflake:";
@@ -190,11 +193,46 @@ impl Driver for SnowflakeDriver {
 
     #[instrument(skip(self, sql), err)]
     async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()> {
+        debug!(%sql, "executing SQL");
         self.connection
             .exec(sql)
             .await
             .with_context(|| format!("error running SQL: {}", sql))?;
         Ok(())
+    }
+
+    async fn execute_ast(&mut self, ast: &ast::SqlProgram) -> Result<()> {
+        let rewritten = self.rewrite_ast(ast)?;
+        for sql in rewritten.extra_native_sql {
+            self.execute_native_sql_statement(&sql).await?;
+        }
+
+        // We can only execute one statement at a time.
+        for statement in &rewritten.ast.statements {
+            let sql = statement.emit_to_string(self.target());
+            self.execute_native_sql_statement(&sql).await?;
+        }
+
+        // Reset session to drop `TEMP` tables and UDFs.
+        self.connection
+            .close_session()
+            .await
+            .context("could not end Snowflake session")
+    }
+
+    fn rewrite_ast<'ast>(&self, ast: &'ast ast::SqlProgram) -> Result<RewrittenAst<'ast>> {
+        let mut ast = ast.clone();
+        let mut renamer = rename_functions::RenameFunctions::default();
+        ast.drive_mut(&mut renamer);
+        let extra_native_sql = renamer
+            .udfs
+            .values()
+            .map(|udf| udf.to_sql())
+            .collect::<Vec<_>>();
+        Ok(RewrittenAst {
+            extra_native_sql,
+            ast: Cow::Owned(ast),
+        })
     }
 
     #[instrument(skip(self))]

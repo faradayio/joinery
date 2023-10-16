@@ -1,4 +1,3 @@
--- pending: snowflake REGEX_EXTRACT needs to be wrapped with REGEXP_SUBSTR
 -- pending: sqlite3 No regex fuctions
 --
 -- REGEXP_REPLACE, REGEXP_EXTRACT

@@ -4,7 +4,10 @@ use std::{fmt, str::FromStr, vec};
 
 use async_rusqlite::Connection;
 use async_trait::async_trait;
-use rusqlite::{functions::FunctionFlags, types};
+use rusqlite::{
+    functions::{self, FunctionFlags},
+    types,
+};
 
 use crate::{
     ast::Target,
@@ -102,6 +105,10 @@ impl SQLite3Driver {
             // yet, but it allows us to parse and execute queries that use `UNNEST`.
             register_unnest(conn).expect("failed to register UNNEST");
 
+            // Install real functions, where we have them.
+            conn.create_scalar_function("concat", -1, FunctionFlags::SQLITE_UTF8, func_concat)
+                .expect("failed to create concat function");
+
             // Install some dummy functions that always return NULL.
             let dummy_fns = &[
                 ("array", -1),
@@ -157,6 +164,37 @@ impl Driver for SQLite3Driver {
     async fn compare_tables(&mut self, result_table: &str, expected_table: &str) -> Result<()> {
         self.compare_tables_impl(result_table, expected_table).await
     }
+}
+
+/// Concatenate a list of values into a string. Mimics BigQuery's `CONCAT`.
+fn func_concat(ctx: &functions::Context<'_>) -> rusqlite::Result<types::Value> {
+    let mut result = String::new();
+    for idx in 0..ctx.len() {
+        match ctx.get_raw(idx) {
+            types::ValueRef::Null => return Ok(types::Value::Null),
+            types::ValueRef::Integer(i) => {
+                result.push_str(&i.to_string());
+            }
+            types::ValueRef::Real(r) => {
+                result.push_str(&r.to_string());
+            }
+            types::ValueRef::Text(s) => {
+                let s = String::from_utf8(s.to_owned()).map_err(|_| {
+                    rusqlite::Error::InvalidFunctionParameterType(idx, types::Type::Text)
+                })?;
+                result.push_str(&s);
+            }
+            types::ValueRef::Blob(_) => {
+                // `CONCAT` should also support being called with _all_ `BINARY`
+                // values, but you can't mix them with other types.
+                return Err(rusqlite::Error::InvalidFunctionParameterType(
+                    idx,
+                    types::Type::Blob,
+                ));
+            }
+        }
+    }
+    Ok(types::Value::Text(result))
 }
 
 #[async_trait]
