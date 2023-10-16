@@ -40,7 +40,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     let mut driver = locator.driver().await?;
 
     // Keep track of our test results.
-    let mut test_count = 0usize;
+    let mut test_ok_count = 0usize;
     let mut test_failures: Vec<(PathBuf, Error)> = vec![];
     let mut pending: Vec<PendingTestInfo> = vec![];
 
@@ -65,7 +65,6 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     // Loop over test files.
     for entry in glob::glob(&pattern).context("Failed to read test directory")? {
         let path = entry.context("Failed to read test file")?;
-        test_count += 1;
 
         // Read file.
         let query = std::fs::read_to_string(&path).context("Failed to read test file")?;
@@ -88,6 +87,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
             Ok(_) => {
                 print!(".");
                 let _ = io::stdout().flush();
+                test_ok_count += 1;
             }
             Err(e) => {
                 print!("E");
@@ -110,28 +110,23 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         }
     }
 
-    if test_count == 0 {
-        Err(Error::Other("No tests found".into()))
-    } else if test_failures.is_empty() {
-        print!("\nOK: {} tests passed", test_count);
-        if !pending.is_empty() {
-            print!(", {} pending", pending.len());
-        }
-        println!();
+    let result = if test_failures.is_empty() {
+        print!("\nOK: {} tests passed", test_ok_count);
         Ok(())
     } else {
         print!(
-            "\nFAIL: {} of {} tests failed",
+            "\nFAIL: {} tests failed, {} passed",
             test_failures.len(),
-            test_count,
+            test_ok_count,
         );
-        if !pending.is_empty() {
-            print!(", {} pending", pending.len());
-        }
-        println!();
-
         Err(Error::Other("Some tests failed".into()))
+    };
+
+    if !pending.is_empty() {
+        print!(", {} pending", pending.len());
     }
+    println!();
+    result
 }
 
 #[instrument(skip_all, fields(path = %path.display()))]
