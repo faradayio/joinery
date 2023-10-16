@@ -1033,22 +1033,24 @@ pub struct ArrayExpression {
 impl Emit for ArrayExpression {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
+            Target::Snowflake => {
+                self.delim1.with_token_str("[").emit(t, f)?;
+                self.definition.emit(t, f)?;
+                self.delim2.with_token_str("]").emit(t, f)?;
+            }
             Target::SQLite3 => {
                 if let Some(array_token) = &self.array_token {
-                    write!(f, "{}", t.f(array_token))?;
+                    array_token.emit(t, f)?;
                 } else {
                     write!(f, "ARRAY")?;
                 }
-                write!(
-                    f,
-                    "{}{}{}",
-                    t.f(&self.delim1.with_token_str("(")),
-                    t.f(&self.definition),
-                    t.f(&self.delim2.with_token_str(")"))
-                )
+                self.delim1.with_token_str("(").emit(t, f)?;
+                self.definition.emit(t, f)?;
+                self.delim2.with_token_str(")").emit(t, f)?;
             }
-            _ => self.emit_default(t, f),
+            _ => self.emit_default(t, f)?,
         }
+        Ok(())
     }
 }
 

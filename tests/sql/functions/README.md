@@ -38,9 +38,9 @@ generate your own version of this list by running `joinery parse
 
 Arrays:
 
-- [ ] ARRAY_TO_STRING(_,_)
-- [ ] ARRAY_AGG(_)
-- [ ] ARRAY_LENGTH(_)
+- [x] ARRAY_TO_STRING(_,_)
+- [x] ARRAY_AGG(_)
+- [x] ARRAY_LENGTH(_)
 
 Special date functions:
 

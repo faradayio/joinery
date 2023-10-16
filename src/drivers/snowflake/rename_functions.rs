@@ -9,6 +9,7 @@ use crate::ast::{FunctionName, Identifier};
 // A `phf_map!` of BigQuery function names to Snowflake function names. Use
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "ARRAY_LENGTH" => "ARRAY_SIZE",
     "GENERATE_UUID" => "UUID_STRING",
     "REGEXP_EXTRACT" => "REGEXP_SUBSTR",
     "SHA256" => "SHA2_BINARY", // Second argument defaults to SHA256.
