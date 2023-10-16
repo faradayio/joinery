@@ -75,9 +75,8 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
             if let Some(pending_test_info) =
                 PendingTestInfo::for_target(driver.target(), short_path, &query)
             {
+                progress('P');
                 pending.push(pending_test_info);
-                print!("P");
-                let _ = io::stdout().flush();
                 continue;
             }
         }
@@ -85,13 +84,11 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         // Test query.
         match run_test(&mut *driver, &path, &query).await {
             Ok(_) => {
-                print!(".");
-                let _ = io::stdout().flush();
+                progress('.');
                 test_ok_count += 1;
             }
             Err(e) => {
-                print!("E");
-                let _ = io::stdout().flush();
+                progress('E');
                 test_failures.push((path, e));
             }
         }
@@ -127,6 +124,12 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     }
     println!();
     result
+}
+
+/// Print a progress indicator for a single test.
+fn progress(c: char) {
+    print!("{}", c);
+    let _ = io::stdout().flush();
 }
 
 #[instrument(skip_all, fields(path = %path.display()))]
