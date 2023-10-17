@@ -63,6 +63,6 @@ Special date functions:
 
 ## Operators and special forms
 
-- [ ] SAFE_CAST
-- [ ] IN UNNEST
-- [ ] IN (SELECT ...)
+- [x] SAFE_CAST
+- [x] IN UNNEST
+- [x] IN (SELECT ...)

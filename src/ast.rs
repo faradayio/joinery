@@ -965,7 +965,7 @@ impl Emit for DatePart {
 /// A cast expression.
 #[derive(Clone, Debug, Drive, DriveMut, EmitDefault)]
 pub struct Cast {
-    cast_token: Token,
+    cast_type: CastType,
     paren1: Token,
     expression: Box<Expression>,
     as_token: Token,
@@ -980,13 +980,36 @@ impl Emit for Cast {
             Target::SQLite3 => write!(
                 f,
                 "{}{}{}{}{}{}",
-                t.f(&self.cast_token.with_token_str("CAST")),
+                t.f(&self.cast_type),
                 t.f(&self.paren1),
                 t.f(&self.expression),
                 t.f(&self.as_token),
                 t.f(&self.data_type),
                 t.f(&self.paren2),
             ),
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// What type of cast do we want to perform?
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault)]
+pub enum CastType {
+    Cast { cast_token: Token },
+    SafeCast { safe_cast_token: Token },
+}
+
+impl Emit for CastType {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CastType::SafeCast { safe_cast_token } if t == Target::Snowflake => {
+                safe_cast_token.with_token_str("TRY_CAST").emit(t, f)
+            }
+            // TODO: This isn't strictly right, but it's as close as I know how to
+            // get with SQLite3.
+            CastType::SafeCast { safe_cast_token } if t == Target::SQLite3 => {
+                safe_cast_token.with_token_str("CAST").emit(t, f)
+            }
             _ => self.emit_default(t, f),
         }
     }
@@ -2448,9 +2471,9 @@ peg::parser! {
             }
 
         rule cast() -> Cast
-            = cast_token:(k("CAST") / k("SAFE_CAST")) paren1:t("(") expression:expression() as_token:k("AS") data_type:data_type() paren2:t(")") {
+            = cast_type:cast_type() paren1:t("(") expression:expression() as_token:k("AS") data_type:data_type() paren2:t(")") {
                 Cast {
-                    cast_token,
+                    cast_type,
                     paren1,
                     expression: Box::new(expression),
                     as_token,
@@ -2458,6 +2481,10 @@ peg::parser! {
                     paren2,
                 }
             }
+
+        rule cast_type() -> CastType
+            = cast_token:k("CAST") { CastType::Cast { cast_token } }
+            / safe_cast_token:k("SAFE_CAST") { CastType::SafeCast { safe_cast_token } }
 
         rule data_type() -> DataType
             = token:(ti("BOOLEAN") / ti("BOOL")) { DataType::Bool(token) }
