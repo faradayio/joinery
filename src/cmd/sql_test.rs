@@ -37,7 +37,6 @@ pub struct SqlTestOpt {
 pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     // Get a database driver for our target.
     let locator = opt.database.parse::<Box<dyn drivers::Locator>>()?;
-    let mut driver = locator.driver().await?;
 
     // Keep track of our test results.
     let mut test_ok_count = 0usize;
@@ -73,7 +72,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         if !opt.pending {
             let short_path = path.strip_prefix(&base_dir).unwrap_or(&path);
             if let Some(pending_test_info) =
-                PendingTestInfo::for_target(driver.target(), short_path, &query)
+                PendingTestInfo::for_target(locator.target(), short_path, &query)
             {
                 progress('P');
                 pending.push(pending_test_info);
@@ -82,6 +81,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         }
 
         // Test query.
+        let mut driver = locator.driver().await?;
         match run_test(&mut *driver, &path, &query).await {
             Ok(_) => {
                 progress('.');

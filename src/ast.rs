@@ -746,6 +746,12 @@ pub struct Except {
 impl Emit for Except {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
+            Target::Snowflake => {
+                self.except_token.with_token_str("EXCLUDE").emit(t, f)?;
+                self.paren1.ws_only().ensure_ws().emit(t, f)?;
+                self.columns.emit(t, f)?;
+                self.paren2.ws_only().ensure_ws().emit(t, f)
+            }
             Target::SQLite3 => {
                 // TODO: Implement `EXCEPT` by inspecting the database schema.
                 // For now, erase it.
