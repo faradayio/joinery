@@ -14,10 +14,11 @@ pub fn emit_macro_derive(input: TokenStream) -> TokenStream {
 
 fn impl_emit_macro(ast: &syn::DeriveInput) -> TokenStream2 {
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = &ast.generics.split_for_impl();
     quote! {
-        impl Emit for #name {
+        impl #impl_generics Emit for #name #ty_generics #where_clause {
             fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                <#name as EmitDefault>::emit_default(self, t, f)
+                <#name #ty_generics as EmitDefault>::emit_default(self, t, f)
             }
         }
     }
@@ -35,9 +36,10 @@ pub fn emit_default_macro_derive(input: TokenStream) -> TokenStream {
 /// TODO: If we see `#[emit(skip)]` on a field, we should skip it.
 fn impl_emit_default_macro(ast: &syn::DeriveInput) -> TokenStream2 {
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = &ast.generics.split_for_impl();
     let implementation = emit_default_body(name, &ast.data);
     quote! {
-        impl EmitDefault for #name {
+        impl #impl_generics EmitDefault for #name #ty_generics #where_clause {
             fn emit_default(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 #implementation
             }

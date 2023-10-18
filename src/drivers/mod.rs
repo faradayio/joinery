@@ -7,14 +7,19 @@ use async_trait::async_trait;
 use crate::{
     ast::{self, Emit, Target},
     errors::{format_err, Error, Result},
+    transforms::Transform,
 };
 
-use self::snowflake::{SnowflakeLocator, SNOWFLAKE_LOCATOR_PREFIX};
-use self::sqlite3::{SQLite3Locator, SQLITE3_LOCATOR_PREFIX};
+use self::{
+    snowflake::{SnowflakeLocator, SNOWFLAKE_LOCATOR_PREFIX},
+    sqlite3::{SQLite3Locator, SQLITE3_LOCATOR_PREFIX},
+    trino::{TrinoLocator, TRINO_LOCATOR_PREFIX},
+};
 
 pub mod bigquery;
 pub mod snowflake;
 pub mod sqlite3;
+pub mod trino;
 
 /// A URL-like locator for a database.
 #[async_trait]
@@ -37,6 +42,7 @@ impl FromStr for Box<dyn Locator> {
         match prefix {
             SQLITE3_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SQLite3Locator>()?)),
             SNOWFLAKE_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SnowflakeLocator>()?)),
+            TRINO_LOCATOR_PREFIX => Ok(Box::new(s.parse::<TrinoLocator>()?)),
             _ => Err(format_err!("unsupported database type: {}", s)),
         }
     }
@@ -76,17 +82,35 @@ pub trait Driver: Send + Sync + 'static {
         self.execute_native_sql_statement(&sql).await
     }
 
+    /// Get a list of transformations that should be applied to the AST before
+    /// executing it.
+    fn transforms(&self) -> Vec<Box<dyn Transform>> {
+        vec![]
+    }
+
     /// Rewrite an AST to convert function names, etc., into versions that can
     /// be passed to [`Emitted::emit_to_string`] for this database. This allows
     /// us to do less database-specific work in [`Emit::emit`], and more in the
     /// database drivers themselves. This can't change lexical syntax, but it
     /// can change the structure of the AST.
     fn rewrite_ast<'ast>(&self, ast: &'ast ast::SqlProgram) -> Result<RewrittenAst<'ast>> {
-        // Default implementation does nothing.
-        Ok(RewrittenAst {
-            extra_native_sql: vec![],
-            ast: Cow::Borrowed(ast),
-        })
+        let transforms = self.transforms();
+        if transforms.is_empty() {
+            return Ok(RewrittenAst {
+                extra_native_sql: vec![],
+                ast: Cow::Borrowed(ast),
+            });
+        } else {
+            let mut rewritten = ast.clone();
+            let mut extra_native_sql = vec![];
+            for transform in transforms {
+                extra_native_sql.extend(transform.transform(&mut rewritten)?);
+            }
+            Ok(RewrittenAst {
+                extra_native_sql,
+                ast: Cow::Owned(rewritten),
+            })
+        }
     }
 
     /// Drop a table if it exists.

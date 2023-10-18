@@ -37,7 +37,7 @@ impl FunctionCallCounts {
             name.push('*');
         } else {
             // Push '_' separated by ','.
-            for i in 0..function_call.args.nodes.len() {
+            for (i, _) in function_call.args.node_iter().enumerate() {
                 if i > 0 {
                     name.push(',');
                 }
@@ -62,7 +62,7 @@ impl FunctionCallCounts {
                 .unescaped_bigquery()
                 .to_ascii_uppercase(),
         );
-        for i in 0..special_date_function_call.args.nodes.len() {
+        for (i, _) in special_date_function_call.args.node_iter().enumerate() {
             if i > 0 {
                 name.push(',');
             }

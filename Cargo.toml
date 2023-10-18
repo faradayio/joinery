@@ -25,6 +25,8 @@ joinery_macros = { path = "joinery_macros" }
 once_cell = "1.18.0"
 peg = "0.8.1"
 phf = { version = "0.11.2", features = ["macros"] }
+# Waiting on https://github.com/nooberfsh/prusto/issues/33
+prusto = { git = "https://github.com/nooberfsh/prusto.git" }
 regex = "1.10.0"
 rusqlite = { version = "0.29.0", features = ["bundled", "functions", "vtab"] }
 serde = { version = "1.0.188", features = ["derive"] }

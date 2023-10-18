@@ -212,7 +212,7 @@ struct OutputTablePair<Name: Clone + fmt::Debug = ast::TableName> {
 fn find_output_tables(ast: &ast::SqlProgram) -> Result<Vec<OutputTablePair>> {
     let mut tables = Vec::<OutputTablePair<Option<ast::TableName>>>::default();
 
-    for s in &ast.statements {
+    for s in ast.statements.node_iter() {
         let name = match s {
             ast::Statement::CreateTable(CreateTableStatement { table_name, .. }) => table_name,
             ast::Statement::CreateView(CreateViewStatement { view_name, .. }) => view_name,

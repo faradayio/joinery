@@ -1,10 +1,9 @@
 //! A Snowflake driver.
 
-use std::{borrow::Cow, env, fmt, str::FromStr};
+use std::{env, fmt, str::FromStr};
 
 use arrow_json::writer::record_batches_to_json_rows;
 use async_trait::async_trait;
-use derive_visitor::DriveMut;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
@@ -14,14 +13,37 @@ use tracing::{debug, instrument};
 use crate::{
     ast::{self, Emit, Target},
     errors::{format_err, Context, Error, Result},
+    transforms::{self, Transform, Udf},
 };
 
-use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator, RewrittenAst};
-
-mod rename_functions;
+use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator};
 
 /// Locator prefix for Snowflake.
 pub const SNOWFLAKE_LOCATOR_PREFIX: &str = "snowflake:";
+
+// A `phf_map!` of BigQuery function names to Snowflake function names. Use
+// this for simple renaming.
+static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "ARRAY_LENGTH" => "ARRAY_SIZE",
+    "GENERATE_UUID" => "UUID_STRING",
+    "REGEXP_EXTRACT" => "REGEXP_SUBSTR",
+    "SHA256" => "SHA2_BINARY", // Second argument defaults to SHA256.
+};
+
+/// A `phf_map!` of BigQuery UDF names to Snowflake UDFs. Use this when we
+/// actually need to create a UDF as a helper function.
+static UDFS: phf::Map<&'static str, &'static Udf> = phf::phf_map! {
+    "RAND" => &Udf { decl: "RAND() RETURNS FLOAT", sql: "UNIFORM(0::float, 1::float, RANDOM())" },
+    "TO_HEX" => &Udf { decl: "TO_HEX(b BINARY) RETURNS STRING", sql: "HEX_ENCODE(b, 0)" },
+};
+
+/// Format a UDF for use with Snowflake.
+fn format_udf(udf: &Udf) -> String {
+    format!(
+        "CREATE OR REPLACE TEMP FUNCTION {} AS $$\n{}\n$$\n",
+        udf.decl, udf.sql
+    )
+}
 
 /// A locator for a Snowflake database.
 ///
@@ -208,7 +230,7 @@ impl Driver for SnowflakeDriver {
         }
 
         // We can only execute one statement at a time.
-        for statement in &rewritten.ast.statements {
+        for statement in rewritten.ast.statements.node_iter() {
             let sql = statement.emit_to_string(self.target());
             self.execute_native_sql_statement(&sql).await?;
         }
@@ -220,19 +242,12 @@ impl Driver for SnowflakeDriver {
             .context("could not end Snowflake session")
     }
 
-    fn rewrite_ast<'ast>(&self, ast: &'ast ast::SqlProgram) -> Result<RewrittenAst<'ast>> {
-        let mut ast = ast.clone();
-        let mut renamer = rename_functions::RenameFunctions::default();
-        ast.drive_mut(&mut renamer);
-        let extra_native_sql = renamer
-            .udfs
-            .values()
-            .map(|udf| udf.to_sql())
-            .collect::<Vec<_>>();
-        Ok(RewrittenAst {
-            extra_native_sql,
-            ast: Cow::Owned(ast),
-        })
+    fn transforms(&self) -> Vec<Box<dyn Transform>> {
+        vec![Box::new(transforms::RenameFunctions::new(
+            &FUNCTION_NAMES,
+            &UDFS,
+            &format_udf,
+        ))]
     }
 
     #[instrument(skip(self))]

@@ -20,6 +20,7 @@
 use std::{
     borrow::Cow,
     fmt::{self, Display as _},
+    mem::take,
     ops::Range,
 };
 
@@ -83,6 +84,11 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 /// to construct from within our parser.
 type Span = Range<usize>;
 
+/// Used to represent a missing span.
+pub fn span_none() -> Span {
+    usize::MAX..usize::MAX
+}
+
 /// A function that compares two strings for equality.
 type StrCmp = dyn Fn(&str, &str) -> bool;
 
@@ -93,6 +99,7 @@ pub enum Target {
     BigQuery,
     Snowflake,
     SQLite3,
+    Trino,
 }
 
 impl Target {
@@ -108,6 +115,7 @@ impl fmt::Display for Target {
             Target::BigQuery => write!(f, "bigquery"),
             Target::Snowflake => write!(f, "snowflake"),
             Target::SQLite3 => write!(f, "sqlite3"),
+            Target::Trino => write!(f, "trino"),
         }
     }
 }
@@ -292,7 +300,7 @@ impl Emit for Token {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
             Target::BigQuery => write!(f, "{}", self.text),
-            Target::Snowflake | Target::SQLite3 => {
+            Target::Snowflake | Target::SQLite3 | Target::Trino => {
                 // Write out the token itself.
                 write!(f, "{}", self.token_str())?;
 
@@ -317,6 +325,18 @@ impl Emit for Token {
     }
 }
 
+/// A node type, for use with [`NodeVec`].
+pub trait Node: Clone + fmt::Debug + Drive + DriveMut + Emit + 'static {}
+
+impl<T: Clone + fmt::Debug + Drive + DriveMut + Emit + 'static> Node for T {}
+
+/// Either a node or a separator token.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault)]
+pub enum NodeOrSep<T: Node> {
+    Node(T),
+    Sep(Token),
+}
+
 /// A vector which contains a list of nodes, along with any whitespace that
 /// appears after a node but before any separating punctuation. This can be
 /// used either with or without a final trailing separator.
@@ -330,72 +350,140 @@ impl Emit for Token {
 /// nodes and separators, and define custom node-only and separator-only
 /// iterators.
 #[derive(Debug)]
-pub struct NodeVec<T: fmt::Debug> {
-    pub nodes: Vec<T>,
-    pub separators: Vec<Token>,
+pub struct NodeVec<T: Node> {
+    /// The separator to use when adding items.
+    pub separator: &'static str,
+    /// The nodes and separators in this vector.
+    pub items: Vec<NodeOrSep<T>>,
 }
 
-impl<T: fmt::Debug> NodeVec<T> {
-    /// Iterate over the nodes in this [`NodeVec`].
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.nodes.iter()
+impl<T: Node> NodeVec<T> {
+    /// Create a new [`NodeVec`] with the given separator.
+    pub fn new(separator: &'static str) -> NodeVec<T> {
+        NodeVec {
+            separator,
+            items: vec![],
+        }
+    }
+
+    /// Take the elements from this [`NodeVec`], leaving it empty, and return a new
+    /// [`NodeVec`] containing the taken elements.
+    pub fn take(&mut self) -> NodeVec<T> {
+        NodeVec {
+            separator: self.separator,
+            items: take(&mut self.items),
+        }
+    }
+
+    /// Add a node to this [`NodeVec`].
+    pub fn push(&mut self, node: T) {
+        if let Some(NodeOrSep::Node(_)) = self.items.last() {
+            self.items.push(NodeOrSep::Sep(Token {
+                span: span_none(),
+                ws_offset: self.separator.len(),
+                text: self.separator.to_owned(),
+            }));
+        }
+        self.items.push(NodeOrSep::Node(node));
+    }
+
+    /// Add a node or a separator to this [`NodeVec`], inserting or removing
+    /// separators as needed to ensure that the vector is well-formed.
+    pub fn push_node_or_sep(&mut self, node_or_sep: NodeOrSep<T>) {
+        match node_or_sep {
+            NodeOrSep::Node(_) => {
+                if let Some(NodeOrSep::Node(_)) = self.items.last() {
+                    self.items.push(NodeOrSep::Sep(Token {
+                        span: span_none(),
+                        ws_offset: self.separator.len(),
+                        text: self.separator.to_owned(),
+                    }));
+                }
+            }
+            NodeOrSep::Sep(_) => {
+                if let Some(NodeOrSep::Sep(_)) = self.items.last() {
+                    self.items.pop();
+                }
+            }
+        }
+        self.items.push(node_or_sep);
+    }
+
+    /// Iterate over the node and separators in this [`NodeVec`].
+    pub fn iter(&self) -> impl Iterator<Item = &NodeOrSep<T>> {
+        self.items.iter()
+    }
+
+    /// Iterate over just the nodes in this [`NodeVec`].
+    pub fn node_iter(&self) -> impl Iterator<Item = &T> {
+        self.items.iter().filter_map(|item| match item {
+            NodeOrSep::Node(node) => Some(node),
+            NodeOrSep::Sep(_) => None,
+        })
+    }
+
+    /// Iterate over nodes and separators separately. Used internally for
+    /// parsing dotted names.
+    fn into_node_and_sep_iters(self) -> (impl Iterator<Item = T>, impl Iterator<Item = Token>) {
+        let mut nodes = vec![];
+        let mut seps = vec![];
+        for item in self.items {
+            match item {
+                NodeOrSep::Node(node) => nodes.push(node),
+                NodeOrSep::Sep(token) => seps.push(token),
+            }
+        }
+        (nodes.into_iter(), seps.into_iter())
     }
 }
 
-impl<T: fmt::Debug + Clone> Clone for NodeVec<T> {
+impl<T: Node> Clone for NodeVec<T> {
     fn clone(&self) -> Self {
         NodeVec {
-            nodes: self.nodes.clone(),
-            separators: self.separators.clone(),
+            separator: self.separator,
+            items: self.items.clone(),
         }
     }
 }
 
-impl<T: fmt::Debug> Default for NodeVec<T> {
-    fn default() -> Self {
-        NodeVec {
-            nodes: Vec::new(),
-            separators: Vec::new(),
-        }
-    }
-}
-
-impl<'a, T: fmt::Debug> IntoIterator for &'a NodeVec<T> {
-    type Item = &'a T;
-    type IntoIter = std::slice::Iter<'a, T>;
+impl<T: Node> IntoIterator for NodeVec<T> {
+    type Item = NodeOrSep<T>;
+    type IntoIter = std::vec::IntoIter<NodeOrSep<T>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.nodes.iter()
+        self.items.into_iter()
+    }
+}
+
+impl<'a, T: Node> IntoIterator for &'a NodeVec<T> {
+    type Item = &'a NodeOrSep<T>;
+    type IntoIter = std::slice::Iter<'a, NodeOrSep<T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
     }
 }
 
 // Mutable iterator for `DriveMut`.
-impl<'a, T: fmt::Debug> IntoIterator for &'a mut NodeVec<T> {
-    type Item = &'a mut T;
-    type IntoIter = std::slice::IterMut<'a, T>;
+impl<'a, T: Node> IntoIterator for &'a mut NodeVec<T> {
+    type Item = &'a mut NodeOrSep<T>;
+    type IntoIter = std::slice::IterMut<'a, NodeOrSep<T>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.nodes.iter_mut()
+        self.items.iter_mut()
     }
 }
 
-impl<T: fmt::Debug + Emit> Emit for NodeVec<T> {
+impl<T: Node> Emit for NodeVec<T> {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, node) in self.nodes.iter().enumerate() {
-            write!(f, "{}", t.f(node))?;
-            if i < self.separators.len() {
-                let sep = &self.separators[i];
-                if i + 1 < self.nodes.len() {
-                    write!(f, "{}", t.f(sep))?;
-                } else {
-                    // Trailing separator.
-                    match t {
-                        Target::BigQuery => write!(f, "{}", t.f(sep))?,
-                        Target::Snowflake | Target::SQLite3 => {
-                            write!(f, "{}", t.f(&sep.with_erased_token_str()))?
-                        }
-                    }
+        for (i, node_or_sep) in self.items.iter().enumerate() {
+            let is_last = i + 1 == self.items.len();
+            match node_or_sep {
+                NodeOrSep::Node(node) => node.emit(t, f)?,
+                NodeOrSep::Sep(sep) if is_last && t != Target::BigQuery => {
+                    sep.with_erased_token_str().emit(t, f)?
                 }
+                NodeOrSep::Sep(sep) => sep.emit(t, f)?,
             }
         }
         Ok(())
@@ -455,7 +543,7 @@ impl Emit for Identifier {
                 // Snowflake and SQLite3 use double quoted identifiers and
                 // escape quotes by doubling them. Neither allows backslash
                 // escapes here, though Snowflake does in strings.
-                Target::Snowflake | Target::SQLite3 => write!(
+                Target::Snowflake | Target::SQLite3 | Target::Trino => write!(
                     f,
                     "{}{}",
                     SQLite3Ident(&self.text),
@@ -551,6 +639,7 @@ pub enum Statement {
     InsertInto(InsertIntoStatement),
     CreateTable(CreateTableStatement),
     CreateView(CreateViewStatement),
+    DropTable(DropTableStatement),
     DropView(DropViewStatement),
 }
 
@@ -1461,6 +1550,30 @@ impl Emit for DataType {
                     )
                 }
             },
+            Target::Trino => match self {
+                DataType::Bool(token) => token.with_token_str("BOOLEAN").emit(t, f),
+                DataType::Bytes(token) => token.with_token_str("VARBINARY").emit(t, f),
+                DataType::Date(token) => token.emit(t, f),
+                DataType::Datetime(token) => token.with_token_str("TIMESTAMP").emit(t, f),
+                DataType::Float64(token) => token.with_token_str("DOUBLE").emit(t, f),
+                DataType::Geography(token) => token.with_token_str("JSON").emit(t, f),
+                DataType::Int64(token) => token.with_token_str("BIGINT").emit(t, f),
+                // TODO: This cannot be done safely in Trino, because you always
+                // need to specify the precision and where to put the decimal
+                // place.
+                DataType::Numeric(token) => token.with_token_str("DECIMAL(?,?)").emit(t, f),
+                DataType::String(token) => token.with_token_str("VARCHAR").emit(t, f),
+                DataType::Time(token) => token.emit(t, f),
+                DataType::Timestamp(token) => {
+                    token.with_token_str("TIMESTAMP WITH TIME ZONE").emit(t, f)
+                }
+                // TODO: Can we declare the element type?
+                DataType::Array { array_token, .. } => array_token.ensure_ws().emit(t, f),
+                // TODO: I think we can translate the column types?
+                DataType::Struct { struct_token, .. } => {
+                    struct_token.with_token_str("ROW").emit(t, f)
+                }
+            },
             _ => self.emit_default(t, f),
         }
     }
@@ -1730,7 +1843,7 @@ pub struct CreateTableStatement {
 impl Emit for CreateTableStatement {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match t {
-            Target::SQLite3 if self.or_replace.is_some() => {
+            Target::SQLite3 | Target::Trino if self.or_replace.is_some() => {
                 // We need to convert this to a `DROP TABLE IF EXISTS` statement.
                 write!(f, "DROP TABLE IF EXISTS {};", t.f(&self.table_name))?;
             }
@@ -1810,12 +1923,29 @@ pub struct ColumnDefinition {
     pub data_type: DataType,
 }
 
+/// A `DROP TABLE` statement.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault)]
+pub struct DropTableStatement {
+    pub drop_token: Token,
+    pub table_token: Token,
+    pub if_exists: Option<IfExists>,
+    pub table_name: TableName,
+}
+
 /// A `DROP VIEW` statement.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault)]
 pub struct DropViewStatement {
     pub drop_token: Token,
     pub view_token: Token,
+    pub if_exists: Option<IfExists>,
     pub view_name: TableName,
+}
+
+/// An `IF EXISTS` modifier.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault)]
+pub struct IfExists {
+    pub if_token: Token,
+    pub exists_token: Token,
 }
 
 /// Parse BigQuery SQL.
@@ -1890,6 +2020,7 @@ peg::parser! {
             / d:delete_from_statement() { Statement::DeleteFrom(d) }
             / c:create_table_statement() { Statement::CreateTable(c) }
             / c:create_view_statement() { Statement::CreateView(c) }
+            / d:drop_table_statement() { Statement::DropTable(d) }
             / d:drop_view_statement() { Statement::DropView(d) }
 
         rule query_statement() -> QueryStatement
@@ -2369,7 +2500,7 @@ peg::parser! {
                 FunctionCall {
                     name,
                     paren1,
-                    args: args.unwrap_or_default(),
+                    args: args.unwrap_or_else(|| NodeVec::new(",")),
                     paren2,
                     over_clause,
                 }
@@ -2724,14 +2855,33 @@ peg::parser! {
                 }
             }
 
+        rule drop_table_statement() -> DropTableStatement
+            = drop_token:k("DROP") table_token:k("TABLE") if_exists:if_exists()? table_name:table_name() {
+                DropTableStatement {
+                    drop_token,
+                    table_token,
+                    if_exists,
+                    table_name,
+                }
+            }
+
         rule drop_view_statement() -> DropViewStatement
             // Oddly, BigQuery accepts `DELETE VIEW`.
-            = drop_token:(k("DROP") / k("DELETE")) view_token:k("VIEW") view_name:table_name() {
+            = drop_token:(k("DROP") / k("DELETE")) view_token:k("VIEW") if_exists:if_exists()? view_name:table_name() {
                 DropViewStatement {
                     // Fix this at parse time. Nobody wants `DELETE VIEW`.
                     drop_token: drop_token.with_token_str("DROP"),
                     view_token,
+                    if_exists,
                     view_name,
+                }
+            }
+
+        rule if_exists() -> IfExists
+            = if_token:k("IF") exists_token:k("EXISTS") {
+                IfExists {
+                    if_token,
+                    exists_token,
                 }
             }
 
@@ -2739,18 +2889,17 @@ peg::parser! {
         rule table_name() -> TableName
             // We handle this manually because of PEG backtracking limitations.
             = dotted:dotted_name() {?
-                let len = dotted.nodes.len();
-                let mut nodes = dotted.nodes.into_iter();
-                let mut dots = dotted.separators.into_iter();
+                let len = dotted.items.len();
+                let (mut nodes, mut dots) = dotted.into_node_and_sep_iters();
                 if len == 1 {
                     Ok(TableName::Table { table: nodes.next().unwrap() })
-                } else if len == 2 {
+                } else if len == 3 {
                     Ok(TableName::DatasetTable {
                         dataset: nodes.next().unwrap(),
                         dot: dots.next().unwrap(),
                         table: nodes.next().unwrap(),
                     })
-                } else if len == 3 {
+                } else if len == 5 {
                     Ok(TableName::ProjectDatasetTable {
                         project: nodes.next().unwrap(),
                         dot1: dots.next().unwrap(),
@@ -2767,16 +2916,15 @@ peg::parser! {
         rule table_and_column_name() -> TableAndColumnName
             // We handle this manually because of PEG backtracking limitations.
             = dotted:dotted_name() {?
-                let len = dotted.nodes.len();
-                let mut nodes = dotted.nodes.into_iter();
-                let mut dots = dotted.separators.into_iter();
-                if len == 2 {
+                let len = dotted.items.len();
+                let (mut nodes, mut dots) = dotted.into_node_and_sep_iters();
+                if len == 3 {
                     Ok(TableAndColumnName {
                         table_name: TableName::Table { table: nodes.next().unwrap() },
                         dot: dots.next().unwrap(),
                         column_name: nodes.next().unwrap(),
                     })
-                } else if len == 3 {
+                } else if len == 5 {
                     Ok(TableAndColumnName {
                         table_name: TableName::DatasetTable {
                             dataset: nodes.next().unwrap(),
@@ -2786,7 +2934,7 @@ peg::parser! {
                         dot: dots.next().unwrap(),
                         column_name: nodes.next().unwrap(),
                     })
-                } else if len == 4 {
+                } else if len == 7 {
                     Ok(TableAndColumnName {
                         table_name: TableName::ProjectDatasetTable {
                             project: nodes.next().unwrap(),
@@ -2806,20 +2954,19 @@ peg::parser! {
         rule dotted_function_name() -> FunctionName
             // We handle this manually because of PEG backtracking limitations.
             = dotted:dotted_name() {?
-                let len = dotted.nodes.len();
-                let mut nodes = dotted.nodes.into_iter();
-                let mut dots = dotted.separators.into_iter();
+                let len = dotted.items.len();
+                let (mut nodes, mut dots) = dotted.into_node_and_sep_iters();
                 if len == 1 {
                     Ok(FunctionName::Function {
                         function: nodes.next().unwrap()
                     })
-                } else if len == 2 {
+                } else if len == 3 {
                     Ok(FunctionName::DatasetFunction {
                         dataset: nodes.next().unwrap(),
                         dot: dots.next().unwrap(),
                         function: nodes.next().unwrap(),
                     })
-                } else if len == 3 {
+                } else if len == 5 {
                     Ok(FunctionName::ProjectDatasetFunction {
                         project: nodes.next().unwrap(),
                         dot1: dots.next().unwrap(),
@@ -2919,24 +3066,23 @@ peg::parser! {
         rule hex_digit() = ['0'..='9' | 'a'..='f' | 'A'..='F']
 
         /// Punctuation separated list. Does not allow a trailing separator.
-        rule sep<T: fmt::Debug>(item: rule<T>, separator: &'static str) -> NodeVec<T>
-            = first:item() items:(sep:t(separator) item:item() { (sep, item) })* {
-                let mut nodes = Vec::new();
-                let mut separators = Vec::new();
-                nodes.push(first);
-                for (sep, item) in items {
-                    separators.push(sep);
-                    nodes.push(item);
+        rule sep<T: Node>(node: rule<T>, separator: &'static str) -> NodeVec<T>
+            = first:node() rest:(sep:t(separator) node:node() { (sep, node) })* {
+                let mut items = Vec::new();
+                items.push(NodeOrSep::Node(first));
+                for (sep, node) in rest {
+                    items.push(NodeOrSep::Sep(sep));
+                    items.push(NodeOrSep::Node(node));
                 }
-                NodeVec { nodes, separators }
+                NodeVec { separator, items }
             }
 
         /// Punctuation separated list. Allows a trailing separator.
-        rule sep_opt_trailing<T: fmt::Debug>(item: rule<T>, separator: &'static str) -> NodeVec<T>
+        rule sep_opt_trailing<T: Node>(item: rule<T>, separator: &'static str) -> NodeVec<T>
             = list:sep(item, separator) trailing_sep:t(separator)? {
                 let mut list = list;
                 if let Some(trailing_sep) = trailing_sep {
-                    list.separators.push(trailing_sep);
+                    list.items.push(NodeOrSep::Sep(trailing_sep));
                 }
                 list
             }
@@ -3166,7 +3312,7 @@ mod tests {
             (r#"DELETE FROM t AS t2 WHERE a = 0"#, None),
             (r#"CREATE OR REPLACE TABLE t2 (a INT64, b INT64)"#, None),
             (r#"CREATE OR REPLACE TABLE t2 AS (SELECT * FROM t)"#, None),
-            //(r#"DROP TABLE t2"#, None),
+            (r#"DROP TABLE t2"#, None),
             (r#"CREATE OR REPLACE VIEW v AS (SELECT * FROM t)"#, None),
             (r#"DROP VIEW v"#, None),
             (

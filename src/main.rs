@@ -7,6 +7,7 @@ mod ast;
 mod cmd;
 mod drivers;
 mod errors;
+mod transforms;
 mod util;
 
 use cmd::{
