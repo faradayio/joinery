@@ -9,7 +9,7 @@ use crate::ast::{FunctionCall, SpecialDateFunctionCall, SqlProgram};
 
 /// A `phf` set of functions that are known to take any number of arguments.
 static KNOWN_VARARG_FUNCTIONS: phf::Set<&'static str> = phf::phf_set! {
-    "COALESCE", "CONCAT",
+    "COALESCE", "CONCAT", "GREATEST", "LEAST",
 };
 
 /// Count all the function calls in a [`SqlProgram`].
