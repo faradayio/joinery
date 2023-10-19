@@ -1,5 +1,6 @@
 -- pending: snowflake ARRAY(SELECT ...) requires significant transformation
 -- pending: sqlite3 Does not support arrays
+-- pending: trino ARRAY(SELECT ...) requires significant transformation
 --
 -- ARRAY(SELECT ...)
 

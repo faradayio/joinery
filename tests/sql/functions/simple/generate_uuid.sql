@@ -1,4 +1,5 @@
 -- pending: sqlite3 Needs external function.
+-- pending: trino Returns UUID type, not string.
 
 CREATE OR REPLACE TABLE __result1 AS
 SELECT

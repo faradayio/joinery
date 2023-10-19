@@ -1,5 +1,6 @@
 -- pending: snowflake Know how we could transpile, see source.
 -- pending: sqlite3 No array support.
+-- pending: trino Requires some kind of rewrite.
 --
 -- UNNEST
 --

@@ -10,7 +10,10 @@ CREATE OR REPLACE TEMP TABLE column_types (
     null_boolean BOOLEAN,
     null_int64 INT64,
     null_float64 FLOAT64,
-    null_numeric NUMERIC,
+    -- We deal with NUMERIC separately.
+    -- 
+    -- null_numeric NUMERIC,
+    --
     -- The only reason to use this is to never lose data, but there is no
     -- equivalent type in most databases.
     --

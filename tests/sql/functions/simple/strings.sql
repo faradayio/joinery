@@ -1,9 +1,11 @@
+-- pending: trino CONCAT doesn't coerce other types to STRING.
+--
 -- LOWER, UPPER, TRIM, CONCAT
 CREATE OR REPLACE TABLE __result1 AS
 SELECT
     LOWER('FOO') AS lower,
     UPPER('foo') AS upper,
-    TRIM('  foo  ') AS trim,
+    TRIM('  foo  ') AS trimmed,
     CONCAT('foo', 'bar') AS concat,
     CONCAT('x', 1) concat_casted,
     CONCAT('x', NULL) concat_null;
@@ -11,7 +13,7 @@ SELECT
 CREATE OR REPLACE TABLE __expected1 (
     lower STRING,
     upper STRING,
-    trim STRING,
+    trimmed STRING,
     concat STRING,
     concat_casted STRING,
     concat_null STRING,

@@ -24,6 +24,7 @@ pub const TRINO_LOCATOR_PREFIX: &str = "trino:";
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "ARRAY_LENGTH" => "CARDINALITY",
+    "ARRAY_TO_STRING" => "ARRAY_JOIN",
     "GENERATE_UUID" => "UUID",
 };
 
@@ -143,6 +144,7 @@ impl Driver for TrinoDriver {
         self.client
             .execute(sql.to_owned())
             .await
+            .map_err(abbreviate_trino_error)
             .with_context(|| format!("Failed to execute SQL: {}", sql))?;
         Ok(())
     }
@@ -172,6 +174,7 @@ impl Driver for TrinoDriver {
         self.client
             .execute(format!("DROP TABLE IF EXISTS {}", SQLite3Ident(table_name)))
             .await
+            .map_err(abbreviate_trino_error)
             .with_context(|| format!("Failed to drop table: {}", table_name))?;
         Ok(())
     }
@@ -210,6 +213,7 @@ impl DriverImpl for TrinoDriver {
             .client
             .get_all::<Col>(sql)
             .await
+            .map_err(abbreviate_trino_error)
             .with_context(|| format!("Failed to get columns for table: {}", table_name))?
             .into_vec()
             .into_iter()
@@ -241,6 +245,7 @@ impl DriverImpl for TrinoDriver {
             .client
             .get_all::<Row>(sql)
             .await
+            .map_err(abbreviate_trino_error)
             .with_context(|| format!("Failed to query table: {}", table_name))?
             .into_vec()
             .into_iter()
@@ -283,6 +288,17 @@ impl fmt::Display for TrinoString<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         trino_quote_fmt(self.0, f)
     }
+}
+
+/// These errors are pages long.
+fn abbreviate_trino_error(e: prusto::error::Error) -> Error {
+    let msg = e
+        .to_string()
+        .lines()
+        .take(10)
+        .collect::<Vec<_>>()
+        .join("\n");
+    format_err!("Trino error: {}", msg)
 }
 
 #[cfg(test)]

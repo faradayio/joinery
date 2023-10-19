@@ -7,7 +7,7 @@ CREATE TEMP TABLE t2 (a INT64, c STRING);
 INSERT INTO t2 VALUES (1, 'u'), (3, 'v');
 
 CREATE OR REPLACE TABLE __result1 AS
-SELECT t2.a, t1.b, t2.c
+SELECT a, t1.b, t2.c
 FROM t1
 RIGHT JOIN t2 USING (a);
 

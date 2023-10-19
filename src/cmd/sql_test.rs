@@ -6,8 +6,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use anstream::{print, println};
 use clap::Parser;
 use once_cell::sync::Lazy;
+use owo_colors::OwoColorize;
 use regex::Regex;
 use tracing::instrument;
 
@@ -96,7 +98,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     println!();
 
     for (i, (path, e)) in test_failures.iter().enumerate() {
-        println!("\nFAILED {}: {}", i + 1, path.display());
+        println!("\n{} {}: {}", "FAILED".red(), i + 1, path.display());
         e.emit();
     }
 
@@ -108,11 +110,12 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
     }
 
     let result = if test_failures.is_empty() {
-        print!("\nOK: {} tests passed", test_ok_count);
+        print!("\n{} {} tests passed", "OK:".green(), test_ok_count);
         Ok(())
     } else {
         print!(
-            "\nFAIL: {} tests failed, {} passed",
+            "\n{} {} tests failed, {} passed",
+            "FAIL:".red(),
             test_failures.len(),
             test_ok_count,
         );

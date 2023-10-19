@@ -9,7 +9,7 @@ t2 AS (
   SELECT 1 AS a, 'u' AS c UNION ALL
   SELECT 3 AS a, 'v' AS c
 )
-SELECT t1.a, t1.b, t2.c
+SELECT a, t1.b, t2.c
 FROM t1
 INNER JOIN t2 USING (a);
 

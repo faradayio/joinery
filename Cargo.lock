@@ -1191,6 +1191,7 @@ checksum = "af150ab688ff2122fcef229be89cb50dd66af9e01a4ff320cc137eecc9bacc38"
 name = "joinery"
 version = "0.1.0"
 dependencies = [
+ "anstream",
  "arrow",
  "arrow-json",
  "async-rusqlite",
@@ -1203,6 +1204,7 @@ dependencies = [
  "glob",
  "joinery_macros",
  "once_cell",
+ "owo-colors",
  "peg",
  "phf",
  "prusto",
@@ -1582,6 +1584,12 @@ name = "overload"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
+
+[[package]]
+name = "owo-colors"
+version = "4.0.0-rc.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70ee2ea482b8aca28901052bbde50bbe71c74b5ae0260d22a9e2f63cd0521b4a"
 
 [[package]]
 name = "parking_lot"

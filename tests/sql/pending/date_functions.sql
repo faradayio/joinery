@@ -1,3 +1,3 @@
 -- pending: snowflake Lots of work but low risk.
 -- pending: sqlite3 Lots of work but low risk.
--- pending: sqlite3 Lots of work but probably low risk.
+-- pending: trino Lots of work but probably low risk.

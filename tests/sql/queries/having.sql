@@ -1,3 +1,5 @@
+-- pending: trino Does not allow column aliases in HAVING (fixable)
+--
 -- HAVING
 
 CREATE TEMP TABLE having_data (grp STRING, val INT64);

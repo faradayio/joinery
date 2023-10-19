@@ -1,4 +1,5 @@
 -- pending: sqlite3 EXCEPT requires a type system
+-- pending: trino EXCEPT requires a type system
 --
 -- EXCEPT
 

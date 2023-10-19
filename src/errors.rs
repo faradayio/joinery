@@ -5,6 +5,7 @@ use std::{
     fmt, result,
 };
 
+use anstream::eprintln;
 use async_rusqlite::AlreadyClosed;
 use codespan_reporting::{
     diagnostic::Diagnostic,
@@ -14,6 +15,7 @@ use codespan_reporting::{
         termcolor::{ColorChoice, StandardStream},
     },
 };
+use owo_colors::OwoColorize;
 
 /// Our standard result type.
 pub type Result<T, E = Error> = result::Result<T, E>;
@@ -66,11 +68,16 @@ impl Error {
                 } else {
                     self
                 };
-                eprintln!("ERROR: {}", first);
+                eprintln!("{} {}", "ERROR:".red(), first);
                 let mut current = first;
                 while let Some(next) = current.source() {
                     current = next;
-                    eprintln!("  caused by: {}", current);
+                    if let Some(source) = current.downcast_ref::<Error>() {
+                        if source.is_transparent() {
+                            continue;
+                        }
+                    }
+                    eprintln!("  {} {}", "caused by:".red(), current);
                 }
             }
         }

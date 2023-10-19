@@ -1,3 +1,3 @@
 -- pending: snowflake Need to emulate using OBJECT. May be challenging.
--- pending: sqlite3 Need to build structs from scratch.
--- pending: trino Can probably use ROW
+-- pending: sqlite3 Need to build structs from scratch
+-- pending: trino ROW may be almost a drop-in replacement

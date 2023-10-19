@@ -1,4 +1,5 @@
 -- pending: sqlite3 QUALIFY needs to be rewritten as subquery.
+-- pending: trino QUALIFY needs to be rewritten as subquery.
 --
 -- QUALIFY
 

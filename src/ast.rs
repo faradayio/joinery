@@ -1608,8 +1608,16 @@ impl Emit for DataType {
                     gt.with_token_str(")").emit(t, f)
                 }
                 // TODO: I think we can translate the column types?
-                DataType::Struct { struct_token, .. } => {
-                    struct_token.with_token_str("ROW").emit(t, f)
+                DataType::Struct {
+                    struct_token,
+                    lt,
+                    fields,
+                    gt,
+                } => {
+                    struct_token.with_token_str("ROW").emit(t, f)?;
+                    lt.with_token_str("(").emit(t, f)?;
+                    fields.emit(t, f)?;
+                    gt.with_token_str(")").emit(t, f)
                 }
             },
             _ => self.emit_default(t, f),
@@ -1669,12 +1677,29 @@ pub enum IndexOffset {
 
 impl Emit for IndexOffset {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Convert everything to `Simple` for SQLite3.
+        // Many databases use 0-based indexing, but Trireme uses 1-based
+        // indexing. BigQuery supports both, so translate as needed.
         match self {
+            IndexOffset::Simple(expression) if t == Target::Trino => {
+                write!(f, "(")?;
+                expression.emit(t, f)?;
+                write!(f, ") + 1")
+            }
             IndexOffset::Offset { expression, .. }
                 if t == Target::Snowflake || t == Target::SQLite3 =>
             {
                 expression.emit(t, f)
+            }
+            IndexOffset::Offset {
+                paren1,
+                expression,
+                paren2,
+                ..
+            } if t == Target::Trino => {
+                paren1.emit(t, f)?;
+                expression.emit(t, f)?;
+                paren2.emit(t, f)?;
+                write!(f, " + 1")
             }
             IndexOffset::Ordinal {
                 paren1,
@@ -1687,6 +1712,7 @@ impl Emit for IndexOffset {
                 paren2.emit(t, f)?;
                 write!(f, " - 1")
             }
+            IndexOffset::Ordinal { expression, .. } if t == Target::Trino => expression.emit(t, f),
             _ => self.emit_default(t, f),
         }
     }
@@ -1708,7 +1734,7 @@ pub struct FromClause {
 }
 
 /// Items which may appear in a `FROM` clause.
-#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault)]
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault)]
 pub enum FromItem {
     /// A table name, optionally with an alias.
     TableName {
@@ -1731,6 +1757,34 @@ pub enum FromItem {
         paren2: Token,
         alias: Option<Alias>,
     },
+}
+
+impl Emit for FromItem {
+    fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FromItem::Unnest {
+                unnest_token,
+                paren1,
+                expression,
+                paren2,
+                alias: Some(Alias { as_token, ident }),
+            } if t == Target::Trino => {
+                unnest_token.emit(t, f)?;
+                paren1.emit(t, f)?;
+                expression.emit(t, f)?;
+                paren2.emit(t, f)?;
+                if let Some(as_token) = as_token {
+                    as_token.ensure_ws().emit(t, f)?;
+                }
+                // UNNEST aliases aren't like other aliases, and Trino treats
+                // them specially.
+                write!(f, "U(")?;
+                ident.emit(t, f)?;
+                write!(f, ")")
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// A join operation.

@@ -5,7 +5,10 @@ SELECT
     CAST(NULL AS BOOLEAN) AS null_boolean,
     CAST(NULL AS INT64) AS null_int64,
     CAST(NULL AS FLOAT64) AS null_float64,
-    CAST(NULL AS NUMERIC) AS null_numeric,
+    -- We deal with NUMERIC separately.
+    -- 
+    -- CAST(NULL AS NUMERIC) AS null_numeric,
+    --
     -- The only reason to use this is to never lose data, but there is no
     -- equivalent type in most databases.
     --
@@ -32,7 +35,7 @@ CREATE OR REPLACE TABLE __expected1 (
     null_boolean BOOLEAN,
     null_int64 INT64,
     null_float64 FLOAT64,
-    null_numeric NUMERIC,
+    -- null_numeric NUMERIC,
     -- null_bignumeric BIGNUMERIC,
     null_string STRING,
     -- null_bytes BYTES,
@@ -51,7 +54,7 @@ INSERT INTO __expected1 VALUES (
     NULL, -- null_boolean
     NULL, -- null_int64
     NULL, -- null_float64
-    NULL, -- null_numeric
+    -- NULL, -- null_numeric
     -- NULL, -- null_bignumeric
     NULL, -- null_string
     -- NULL, -- null_bytes

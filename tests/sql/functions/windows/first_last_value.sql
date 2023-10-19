@@ -1,4 +1,5 @@
 -- pending: sqlite3 FIRST_VALUE, LAST_VALUE seem to require frames to work?
+-- pending: trino FIRST_VALUE, LAST_VALUE seem to require frames to work?
 
 -- FIRST_VALUE, LAST_VALUE
 
