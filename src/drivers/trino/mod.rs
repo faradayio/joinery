@@ -9,7 +9,7 @@ use regex::Regex;
 use tracing::debug;
 
 use crate::{
-    ast::{self, Emit, Target},
+    ast::Target,
     drivers::sqlite3::SQLite3String,
     errors::{format_err, Context, Error, Result},
     transforms::{self, Transform, Udf},
@@ -24,6 +24,7 @@ pub const TRINO_LOCATOR_PREFIX: &str = "trino:";
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "ARRAY_LENGTH" => "CARDINALITY",
+    "GENERATE_UUID" => "UUID",
 };
 
 /// A `phf_map!` of BigQuery function names to UDFs.
@@ -146,19 +147,8 @@ impl Driver for TrinoDriver {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
-    async fn execute_ast(&mut self, ast: &ast::SqlProgram) -> Result<()> {
-        let rewritten = self.rewrite_ast(ast)?;
-        for sql in rewritten.extra_native_sql {
-            self.execute_native_sql_statement(&sql).await?;
-        }
-
-        // We can only execute one statement at a time.
-        for statement in rewritten.ast.statements.node_iter() {
-            let sql = statement.emit_to_string(self.target());
-            self.execute_native_sql_statement(&sql).await?;
-        }
-        Ok(())
+    fn supports_multiple_statements(&self) -> bool {
+        false
     }
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
@@ -169,6 +159,11 @@ impl Driver for TrinoDriver {
                 &UDFS,
                 &format_udf,
             )),
+            Box::new(transforms::CleanUpTempManually {
+                format_name: &|table_name| {
+                    SQLite3Ident(&table_name.unescaped_bigquery()).to_string()
+                },
+            }),
         ]
     }
 
@@ -251,6 +246,42 @@ impl DriverImpl for TrinoDriver {
             .into_iter()
             .map(|r| Ok(r.into_json()));
         Ok(Box::new(rows))
+    }
+}
+
+/// Quote `s` for Trino, surrounding it with `'` and escaping special
+/// characters as needed.
+fn trino_quote_fmt(s: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        write!(f, "'")?;
+        for c in s.chars() {
+            match c {
+                '\'' => write!(f, "''")?,
+                _ => write!(f, "{}", c)?,
+            }
+        }
+        write!(f, "'")
+    } else {
+        write!(f, "U&'")?;
+        for c in s.chars() {
+            match c {
+                '\'' => write!(f, "''")?,
+                '\\' => write!(f, "\\\\")?,
+                _ if c.is_ascii_graphic() || c == ' ' => write!(f, "{}", c)?,
+                _ if c as u32 <= 0xFFFF => write!(f, "\\{:04x}", c as u32)?,
+                _ => write!(f, "\\+{:06x}", c as u32)?,
+            }
+        }
+        write!(f, "'")
+    }
+}
+
+/// Formatting wrapper for strings quoted with single quotes.
+pub struct TrinoString<'a>(pub &'a str);
+
+impl fmt::Display for TrinoString<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        trino_quote_fmt(self.0, f)
     }
 }
 

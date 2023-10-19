@@ -3,11 +3,12 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, str::FromStr};
 
 use async_trait::async_trait;
+use tracing::debug;
 
 use crate::{
     ast::{self, Emit, Target},
     errors::{format_err, Error, Result},
-    transforms::Transform,
+    transforms::{Transform, TransformExtra},
 };
 
 use self::{
@@ -66,20 +67,72 @@ pub trait Driver: Send + Sync + 'static {
     fn target(&self) -> Target;
 
     /// Execute a single SQL statement, using native SQL for this database. This
-    /// is only guaranteed to work if passed a single statement, although some
-    /// drivers may support multiple statements. Resources created using `CREATE
-    /// TEMP TABLE`, etc., may not persist across calls.
+    /// is only guaranteed to work if passed a single statement, unless
+    /// [`Driver::supports_multiple_statements`] returns `true`. Resources
+    /// created using `CREATE TEMP TABLE`, etc., may not persist across calls.
     async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()>;
+
+    /// Does this driver support multiple statements in a single call to
+    /// [`execute_native_sql_statement`]?
+    fn supports_multiple_statements(&self) -> bool {
+        false
+    }
 
     /// Execute a query represented as an AST. This can execute multiple
     /// statements.
     async fn execute_ast(&mut self, ast: &ast::SqlProgram) -> Result<()> {
         let rewritten = self.rewrite_ast(ast)?;
-        for sql in rewritten.extra_native_sql {
+        self.execute_setup_sql(&rewritten).await?;
+        let result = if self.supports_multiple_statements() {
+            self.execute_ast_together(&rewritten).await
+        } else {
+            self.execute_ast_separately(&rewritten).await
+        };
+        self.execute_teardown_sql(&rewritten, result.is_ok())
+            .await?;
+        result
+    }
+
+    /// Execute the setup SQL for this AST.
+    async fn execute_setup_sql(&mut self, rewritten: &RewrittenAst) -> Result<()> {
+        for sql in &rewritten.extra.native_setup_sql {
+            self.execute_native_sql_statement(sql).await?;
+        }
+        Ok(())
+    }
+
+    /// Execute the AST as a single SQL string.
+    async fn execute_ast_together(&mut self, rewritten: &RewrittenAst) -> Result<()> {
+        let sql = rewritten.ast.emit_to_string(self.target());
+        self.execute_native_sql_statement(&sql).await?;
+        Ok(())
+    }
+
+    /// Execute the AST as individual SQL statements.
+    async fn execute_ast_separately(&mut self, rewritten: &RewrittenAst) -> Result<()> {
+        for statement in rewritten.ast.statements.node_iter() {
+            let sql = statement.emit_to_string(self.target());
             self.execute_native_sql_statement(&sql).await?;
         }
-        let sql = rewritten.ast.emit_to_string(self.target());
-        self.execute_native_sql_statement(&sql).await
+        Ok(())
+    }
+
+    /// Execute the teardown SQL for this AST.
+    async fn execute_teardown_sql(
+        &mut self,
+        rewritten: &RewrittenAst,
+        fail_on_err: bool,
+    ) -> Result<()> {
+        for sql in &rewritten.extra.native_teardown_sql {
+            if let Err(err) = self.execute_native_sql_statement(sql).await {
+                if fail_on_err {
+                    return Err(err);
+                } else {
+                    debug!(%sql, %err, "Ignoring error from teardown SQL");
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Get a list of transformations that should be applied to the AST before
@@ -97,17 +150,17 @@ pub trait Driver: Send + Sync + 'static {
         let transforms = self.transforms();
         if transforms.is_empty() {
             return Ok(RewrittenAst {
-                extra_native_sql: vec![],
+                extra: TransformExtra::default(),
                 ast: Cow::Borrowed(ast),
             });
         } else {
             let mut rewritten = ast.clone();
-            let mut extra_native_sql = vec![];
+            let mut extra = TransformExtra::default();
             for transform in transforms {
-                extra_native_sql.extend(transform.transform(&mut rewritten)?);
+                extra.extend(transform.transform(&mut rewritten)?);
             }
             Ok(RewrittenAst {
-                extra_native_sql,
+                extra,
                 ast: Cow::Owned(rewritten),
             })
         }
@@ -127,7 +180,7 @@ pub trait Driver: Send + Sync + 'static {
 pub struct RewrittenAst<'a> {
     /// Extra native SQL statements to execute before the AST. Probably
     /// temporary UDFs and things like that.
-    pub extra_native_sql: Vec<String>,
+    pub extra: TransformExtra,
 
     /// The new AST.
     pub ast: Cow<'a, ast::SqlProgram>,

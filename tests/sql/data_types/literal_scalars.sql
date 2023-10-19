@@ -1,10 +1,13 @@
--- pending: snowflake Test harness Arrow library reads 1.5 as 15
 
 CREATE OR REPLACE TABLE __result1 AS
 SELECT
-    NULL AS n,
+    -- Trino doesn't like untyped NULLs.
+    CAST(NULL AS INT64) AS n,
     1 AS i,
-    1.5 AS f,
+    -- TODO: Both our Trino and our Snowflake drivers are unable to correctly
+    -- read columns with types inferred from float literals. We may want to add
+    -- a transformation that automatically casts float literals to FLOAT64.
+    CAST(1.5 AS FLOAT64) AS f,
     'Hello, world!' AS s,
     '\a\b\f\n\r\t\v\\\?\'\"\`\101\x41\X41\u0041\U00000041' AS escapes, 
     r'\a' AS raw1,

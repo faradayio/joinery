@@ -5,13 +5,13 @@ use crate::{
     errors::Result,
 };
 
-use super::Transform;
+use super::{Transform, TransformExtra};
 
 /// Transform `OR REPLACE` to the equivalent `DROP IF EXISTS`.
 pub struct OrReplaceToDropIfExists;
 
 impl Transform for OrReplaceToDropIfExists {
-    fn transform(self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<Vec<String>> {
+    fn transform(self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         let old_statements = sql_program.statements.take();
         for mut node_or_sep in old_statements {
             match &mut node_or_sep {
@@ -63,7 +63,7 @@ impl Transform for OrReplaceToDropIfExists {
             }
             sql_program.statements.push_node_or_sep(node_or_sep);
         }
-        Ok(vec![])
+        Ok(TransformExtra::default())
     }
 }
 

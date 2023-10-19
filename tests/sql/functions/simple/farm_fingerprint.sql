@@ -1,5 +1,6 @@
 -- pending: snowflake FARM_FINGERPRINT only exists on BigQuery
 -- pending: sqlite3 FARM_FINGERPRINT only exists on BigQuery
+-- pending: trino FARM_FINGERPRINT only exists on BigQuery
 CREATE OR REPLACE TABLE __result1 AS
 SELECT
     FARM_FINGERPRINT('foo') AS str_farm,

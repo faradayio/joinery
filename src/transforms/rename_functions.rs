@@ -9,7 +9,7 @@ use crate::{
     errors::Result,
 };
 
-use super::Transform;
+use super::{Transform, TransformExtra};
 
 /// A Snowflake UDF (user-defined function).
 pub struct Udf {
@@ -70,7 +70,7 @@ impl RenameFunctions {
 }
 
 impl Transform for RenameFunctions {
-    fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<Vec<String>> {
+    fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         // Walk the AST, renaming functions and collecting UDFs.
         sql_program.drive_mut(self.as_mut());
 
@@ -79,6 +79,9 @@ impl Transform for RenameFunctions {
         for udf in self.udfs.values() {
             extra_sql.push((self.format_udf)(udf));
         }
-        Ok(extra_sql)
+        Ok(TransformExtra {
+            native_setup_sql: extra_sql,
+            native_teardown_sql: vec![],
+        })
     }
 }

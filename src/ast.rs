@@ -36,6 +36,7 @@ use crate::{
         bigquery::BigQueryName,
         snowflake::SnowflakeString,
         sqlite3::{SQLite3Ident, SQLite3String},
+        trino::TrinoString,
     },
     errors::{Result, SourceError},
     util::is_c_ident,
@@ -417,6 +418,14 @@ impl<T: Node> NodeVec<T> {
     /// Iterate over just the nodes in this [`NodeVec`].
     pub fn node_iter(&self) -> impl Iterator<Item = &T> {
         self.items.iter().filter_map(|item| match item {
+            NodeOrSep::Node(node) => Some(node),
+            NodeOrSep::Sep(_) => None,
+        })
+    }
+
+    /// Iterate over just the nodes in this [`NodeVec`], mutably.
+    pub fn node_iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.items.iter_mut().filter_map(|item| match item {
             NodeOrSep::Node(node) => Some(node),
             NodeOrSep::Sep(_) => None,
         })
@@ -986,6 +995,14 @@ impl Emit for Expression {
                 SQLite3String(s).fmt(f)?;
                 token.ws_only().emit(t, f)
             }
+            // SQLite3 quotes strings differently.
+            Expression::Literal {
+                token,
+                value: LiteralValue::String(s),
+            } if t == Target::Trino => {
+                TrinoString(s).fmt(f)?;
+                token.ws_only().emit(t, f)
+            }
             Expression::If {
                 if_token,
                 condition,
@@ -1097,7 +1114,9 @@ pub enum CastType {
 impl Emit for CastType {
     fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CastType::SafeCast { safe_cast_token } if t == Target::Snowflake => {
+            CastType::SafeCast { safe_cast_token }
+                if t == Target::Snowflake || t == Target::Trino =>
+            {
                 safe_cast_token.with_token_str("TRY_CAST").emit(t, f)
             }
             // TODO: This isn't strictly right, but it's as close as I know how to

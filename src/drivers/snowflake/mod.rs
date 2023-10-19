@@ -11,7 +11,7 @@ use snowflake_api::{QueryResult, SnowflakeApi};
 use tracing::{debug, instrument};
 
 use crate::{
-    ast::{self, Emit, Target},
+    ast::Target,
     errors::{format_err, Context, Error, Result},
     transforms::{self, Transform, Udf},
 };
@@ -223,23 +223,8 @@ impl Driver for SnowflakeDriver {
         Ok(())
     }
 
-    async fn execute_ast(&mut self, ast: &ast::SqlProgram) -> Result<()> {
-        let rewritten = self.rewrite_ast(ast)?;
-        for sql in rewritten.extra_native_sql {
-            self.execute_native_sql_statement(&sql).await?;
-        }
-
-        // We can only execute one statement at a time.
-        for statement in rewritten.ast.statements.node_iter() {
-            let sql = statement.emit_to_string(self.target());
-            self.execute_native_sql_statement(&sql).await?;
-        }
-
-        // Reset session to drop `TEMP` tables and UDFs.
-        self.connection
-            .close_session()
-            .await
-            .context("could not end Snowflake session")
+    fn supports_multiple_statements(&self) -> bool {
+        false
     }
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
