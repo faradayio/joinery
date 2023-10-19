@@ -14,9 +14,10 @@ use crate::{
     ast::Target,
     errors::{format_err, Context, Error, Result},
     transforms::{self, Transform, Udf},
+    util::AnsiIdent,
 };
 
-use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator};
+use super::{Column, Driver, DriverImpl, Locator};
 
 /// Locator prefix for Snowflake.
 pub const SNOWFLAKE_LOCATOR_PREFIX: &str = "snowflake:";
@@ -239,7 +240,7 @@ impl Driver for SnowflakeDriver {
     async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {
         self.execute_native_sql_statement(&format!(
             "DROP TABLE IF EXISTS {}",
-            SQLite3Ident(table_name)
+            AnsiIdent(table_name)
         ))
         .await
     }
@@ -291,7 +292,7 @@ impl DriverImpl for SnowflakeDriver {
     ) -> Result<Self::Rows> {
         let column_list = columns
             .iter()
-            .map(|c| SQLite3Ident(&c.name).to_string())
+            .map(|c| AnsiIdent(&c.name).to_string())
             .collect::<Vec<_>>()
             .join(", ");
         // TODO: Again, quoting the table name fails.

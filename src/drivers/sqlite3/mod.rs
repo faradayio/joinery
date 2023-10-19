@@ -12,6 +12,7 @@ use rusqlite::{
 use crate::{
     ast::Target,
     errors::{format_err, Context, Error, Result},
+    util::{AnsiIdent, AnsiString},
 };
 
 use self::unnest::register_unnest;
@@ -157,7 +158,7 @@ impl Driver for SQLite3Driver {
     }
 
     async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {
-        let sql = format!("DROP TABLE IF EXISTS {}", SQLite3Ident(table_name));
+        let sql = format!("DROP TABLE IF EXISTS {}", AnsiIdent(table_name));
         self.execute_native_sql_statement(&sql).await
     }
 
@@ -204,7 +205,7 @@ impl DriverImpl for SQLite3Driver {
     type Rows = Box<dyn Iterator<Item = Result<Vec<Self::Value>>> + Send + Sync>;
 
     async fn table_columns(&mut self, table_name: &str) -> Result<Vec<Column<Self::Type>>> {
-        let sql = format!("PRAGMA table_info({})", SQLite3Ident(table_name));
+        let sql = format!("PRAGMA table_info({})", AnsiIdent(table_name));
         self.conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql).context("failed to prepare SQL")?;
@@ -229,13 +230,13 @@ impl DriverImpl for SQLite3Driver {
     ) -> Result<Self::Rows> {
         let column_list = columns
             .iter()
-            .map(|c| sqlite3_quote_ident(&c.name))
+            .map(|c| AnsiIdent(&c.name).to_string())
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {}",
             column_list,
-            SQLite3Ident(table_name),
+            AnsiIdent(table_name),
             column_list
         );
         let columns = columns.to_vec();
@@ -275,44 +276,8 @@ impl std::fmt::Display for Value {
             rusqlite::types::Value::Null => write!(f, "NULL"),
             rusqlite::types::Value::Integer(i) => write!(f, "{}", i),
             rusqlite::types::Value::Real(r) => write!(f, "{}", r),
-            rusqlite::types::Value::Text(s) => write!(f, "{}", SQLite3String(s)),
+            rusqlite::types::Value::Text(s) => write!(f, "{}", AnsiString(s)),
             rusqlite::types::Value::Blob(b) => write!(f, "{:?}", b),
         }
-    }
-}
-
-/// Escape an identifier for use in a SQLite3 query.
-fn sqlite3_quote_ident(s: &str) -> String {
-    format!("{}", SQLite3Ident(s))
-}
-
-/// Format a single- or double-quoted string for use in a SQLite3 query. SQLite3
-/// does not support backslash escapes.
-fn sqlite3_quote_fmt(s: &str, quote_char: char, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{}", quote_char)?;
-    for c in s.chars() {
-        if c == quote_char {
-            write!(f, "{}", quote_char)?;
-        }
-        write!(f, "{}", c)?;
-    }
-    write!(f, "{}", quote_char)
-}
-
-/// Formatting wrapper for single-quoted strings.
-pub struct SQLite3String<'a>(pub &'a str);
-
-impl fmt::Display for SQLite3String<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        sqlite3_quote_fmt(self.0, '\'', f)
-    }
-}
-
-/// Formatting wrapper for double-quoted identifiers.
-pub struct SQLite3Ident<'a>(pub &'a str);
-
-impl fmt::Display for SQLite3Ident<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        sqlite3_quote_fmt(self.0, '"', f)
     }
 }

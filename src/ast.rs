@@ -32,14 +32,9 @@ use derive_visitor::{Drive, DriveMut};
 use joinery_macros::{Emit, EmitDefault};
 
 use crate::{
-    drivers::{
-        bigquery::BigQueryName,
-        snowflake::SnowflakeString,
-        sqlite3::{SQLite3Ident, SQLite3String},
-        trino::TrinoString,
-    },
+    drivers::{bigquery::BigQueryName, snowflake::SnowflakeString, trino::TrinoString},
     errors::{Result, SourceError},
-    util::is_c_ident,
+    util::{is_c_ident, AnsiIdent, AnsiString},
 };
 
 /// None of these keywords should ever be matched as a bare identifier. We use
@@ -552,12 +547,9 @@ impl Emit for Identifier {
                 // Snowflake and SQLite3 use double quoted identifiers and
                 // escape quotes by doubling them. Neither allows backslash
                 // escapes here, though Snowflake does in strings.
-                Target::Snowflake | Target::SQLite3 | Target::Trino => write!(
-                    f,
-                    "{}{}",
-                    SQLite3Ident(&self.text),
-                    t.f(&self.token.ws_only())
-                ),
+                Target::Snowflake | Target::SQLite3 | Target::Trino => {
+                    write!(f, "{}{}", AnsiIdent(&self.text), t.f(&self.token.ws_only()))
+                }
             }
         } else {
             write!(f, "{}{}", self.text, t.f(&self.token.ws_only()))
@@ -613,7 +605,7 @@ impl Emit for TableName {
                     | TableName::DatasetTable { table, .. }
                     | TableName::Table { table } => table.token.ws_only(),
                 };
-                write!(f, "{}{}", SQLite3Ident(&name), t.f(&ws))
+                write!(f, "{}{}", AnsiIdent(&name), t.f(&ws))
             }
             _ => self.emit_default(t, f),
         }
@@ -992,7 +984,7 @@ impl Emit for Expression {
                 token,
                 value: LiteralValue::String(s),
             } if t == Target::SQLite3 => {
-                SQLite3String(s).fmt(f)?;
+                AnsiString(s).fmt(f)?;
                 token.ws_only().emit(t, f)
             }
             // SQLite3 quotes strings differently.
@@ -1396,7 +1388,7 @@ impl Emit for FunctionName {
             Target::SQLite3 => {
                 let name = self.unescaped_bigquery();
                 let ws = self.function_identifier().token.ws_only();
-                write!(f, "{}{}", SQLite3Ident(&name), t.f(&ws))
+                write!(f, "{}{}", AnsiIdent(&name), t.f(&ws))
             }
             _ => self.emit_default(t, f),
         }

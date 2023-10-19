@@ -10,12 +10,12 @@ use tracing::debug;
 
 use crate::{
     ast::Target,
-    drivers::sqlite3::SQLite3String,
     errors::{format_err, Context, Error, Result},
     transforms::{self, Transform, Udf},
+    util::AnsiIdent,
 };
 
-use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator};
+use super::{Column, Driver, DriverImpl, Locator};
 
 /// Our locator prefix.
 pub const TRINO_LOCATOR_PREFIX: &str = "trino:";
@@ -162,9 +162,7 @@ impl Driver for TrinoDriver {
                 &format_udf,
             )),
             Box::new(transforms::CleanUpTempManually {
-                format_name: &|table_name| {
-                    SQLite3Ident(&table_name.unescaped_bigquery()).to_string()
-                },
+                format_name: &|table_name| AnsiIdent(&table_name.unescaped_bigquery()).to_string(),
             }),
         ]
     }
@@ -172,7 +170,7 @@ impl Driver for TrinoDriver {
     #[tracing::instrument(skip(self))]
     async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {
         self.client
-            .execute(format!("DROP TABLE IF EXISTS {}", SQLite3Ident(table_name)))
+            .execute(format!("DROP TABLE IF EXISTS {}", AnsiIdent(table_name)))
             .await
             .map_err(abbreviate_trino_error)
             .with_context(|| format!("Failed to drop table: {}", table_name))?;
@@ -205,9 +203,9 @@ impl DriverImpl for TrinoDriver {
             FROM information_schema.columns
             WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
             // TODO: Replace with real string escapes.
-            SQLite3String(&self.catalog),
-            SQLite3String(&self.schema),
-            SQLite3String(table_name)
+            TrinoString(&self.catalog),
+            TrinoString(&self.schema),
+            TrinoString(table_name)
         );
         Ok(self
             .client
@@ -232,13 +230,13 @@ impl DriverImpl for TrinoDriver {
     ) -> Result<Self::Rows> {
         let cols_sql = columns
             .iter()
-            .map(|c| SQLite3Ident(&c.name).to_string())
+            .map(|c| AnsiIdent(&c.name).to_string())
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
             "SELECT {} FROM {} ORDER BY {}",
             cols_sql,
-            SQLite3Ident(table_name),
+            AnsiIdent(table_name),
             cols_sql
         );
         let rows = self
