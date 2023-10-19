@@ -12,7 +12,7 @@ use crate::{
     ast::{self, Emit, Target},
     drivers::sqlite3::SQLite3String,
     errors::{format_err, Context, Error, Result},
-    transforms::{self, Transform},
+    transforms::{self, Transform, Udf},
 };
 
 use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator};
@@ -20,6 +20,26 @@ use super::{sqlite3::SQLite3Ident, Column, Driver, DriverImpl, Locator};
 /// Our locator prefix.
 pub const TRINO_LOCATOR_PREFIX: &str = "trino:";
 
+// A `phf_map!` of BigQuery function names to native function names. Use
+// this for simple renaming.
+static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "ARRAY_LENGTH" => "CARDINALITY",
+};
+
+/// A `phf_map!` of BigQuery function names to UDFs.
+///
+/// TODO: I'm not even sure there's a way to define SQL UDFs in Trino.
+static UDFS: phf::Map<&'static str, &'static Udf> = phf::phf_map! {};
+
+/// Format a UDF.
+///
+/// TODO: I'm not even sure there's a way to define SQL UDFs in Trino.
+fn format_udf(udf: &Udf) -> String {
+    format!(
+        "CREATE OR REPLACE TEMP FUNCTION {} AS $$\n{}\n$$\n",
+        udf.decl, udf.sql
+    )
+}
 /// A locator for a Trino database. May or may not also work for Presto.
 #[derive(Debug)]
 pub struct TrinoLocator {
@@ -142,7 +162,14 @@ impl Driver for TrinoDriver {
     }
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
-        vec![Box::new(transforms::OrReplaceToDropIfExists)]
+        vec![
+            Box::new(transforms::OrReplaceToDropIfExists),
+            Box::new(transforms::RenameFunctions::new(
+                &FUNCTION_NAMES,
+                &UDFS,
+                &format_udf,
+            )),
+        ]
     }
 
     #[tracing::instrument(skip(self))]

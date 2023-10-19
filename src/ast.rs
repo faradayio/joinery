@@ -1166,6 +1166,16 @@ impl Emit for ArrayExpression {
                 self.definition.emit(t, f)?;
                 self.delim2.with_token_str(")").emit(t, f)?;
             }
+            Target::Trino => {
+                if let Some(array_token) = &self.array_token {
+                    array_token.emit(t, f)?;
+                } else {
+                    write!(f, "ARRAY")?;
+                }
+                self.delim1.with_token_str("[").emit(t, f)?;
+                self.definition.emit(t, f)?;
+                self.delim2.with_token_str("]").emit(t, f)?;
+            }
             _ => self.emit_default(t, f)?,
         }
         Ok(())
@@ -1567,8 +1577,17 @@ impl Emit for DataType {
                 DataType::Timestamp(token) => {
                     token.with_token_str("TIMESTAMP WITH TIME ZONE").emit(t, f)
                 }
-                // TODO: Can we declare the element type?
-                DataType::Array { array_token, .. } => array_token.ensure_ws().emit(t, f),
+                DataType::Array {
+                    array_token,
+                    lt,
+                    data_type,
+                    gt,
+                } => {
+                    array_token.emit(t, f)?;
+                    lt.with_token_str("(").emit(t, f)?;
+                    data_type.emit(t, f)?;
+                    gt.with_token_str(")").emit(t, f)
+                }
                 // TODO: I think we can translate the column types?
                 DataType::Struct { struct_token, .. } => {
                     struct_token.with_token_str("ROW").emit(t, f)
