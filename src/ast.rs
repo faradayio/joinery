@@ -26,7 +26,7 @@ use std::{
 
 use codespan_reporting::{
     diagnostic::{Diagnostic, Label},
-    files::SimpleFile,
+    files::SimpleFiles,
 };
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::{Emit, EmitDefault};
@@ -2046,11 +2046,12 @@ pub fn parse_sql(filename: &str, sql: &str) -> Result<SqlProgram> {
         Ok(sql_program) => Ok(sql_program),
         // Prepare a user-friendly error message.
         Err(e) => {
-            let files = SimpleFile::new(filename.to_owned(), sql.to_string());
+            let mut files = SimpleFiles::new();
+            let file_id = files.add(filename.to_owned(), sql.to_string());
             let diagnostic = Diagnostic::error()
                 .with_message("Failed to parse query")
                 .with_labels(vec![Label::primary(
-                    (),
+                    file_id,
                     e.location.offset..e.location.offset + 1,
                 )
                 .with_message(format!("expected {}", e.expected))]);

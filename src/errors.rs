@@ -9,7 +9,7 @@ use anstream::eprintln;
 use async_rusqlite::AlreadyClosed;
 use codespan_reporting::{
     diagnostic::Diagnostic,
-    files::SimpleFile,
+    files::SimpleFiles,
     term::{
         self,
         termcolor::{ColorChoice, StandardStream},
@@ -172,8 +172,8 @@ where
 #[derive(Debug)]
 pub struct SourceError {
     pub source: peg::error::ParseError<peg::str::LineCol>,
-    pub files: SimpleFile<String, String>,
-    pub diagnostic: Diagnostic<()>,
+    pub files: SimpleFiles<String, String>,
+    pub diagnostic: Diagnostic<usize>,
 }
 
 impl SourceError {

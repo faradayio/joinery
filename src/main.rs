@@ -7,6 +7,7 @@ mod ast;
 mod cmd;
 mod drivers;
 mod errors;
+mod tokenizer;
 mod transforms;
 mod util;
 
