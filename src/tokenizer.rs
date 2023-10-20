@@ -283,6 +283,31 @@ impl PartialEq for Keyword {
     }
 }
 
+/// A case-insensitive identifier. This is pretty much identical to a keyword,
+/// but it appears in different places in the grammar. These words are only
+/// reserved in specific contexts and they don't normally need to be quoted
+/// when used as column names, etc.
+#[derive(Debug, Clone, Eq)]
+pub struct CaseInsensitiveIdent {
+    /// Our identifier.
+    pub ident: Ident,
+}
+
+impl CaseInsensitiveIdent {
+    /// Create a new `CaseInsensitiveIdent` with no source location.
+    pub fn new(name: &str) -> Self {
+        Self {
+            ident: Ident::new(name),
+        }
+    }
+}
+
+impl PartialEq for CaseInsensitiveIdent {
+    fn eq(&self, other: &Self) -> bool {
+        self.ident.name.eq_ignore_ascii_case(&other.ident.name)
+    }
+}
+
 /// A literal token.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Literal {
@@ -343,7 +368,10 @@ pub struct TokenStream {
 }
 
 impl TokenStream {
-    /// Parse an identifier.
+    /// Parse an identifier. This preserves case, because BigQuery has
+    /// [complicated rules][case] about which identifiers are case-sensitive.
+    ///
+    /// [case]: https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#case_sensitivity
     pub fn ident(&self, pos: usize) -> RuleResult<Ident> {
         match self.tokens.get(pos) {
             Some(Token::Ident(ident)) => RuleResult::Matched(pos + 1, ident.clone()),
@@ -366,11 +394,18 @@ impl TokenStream {
     /// docs][case].
     ///
     /// [case]: https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#case_sensitivity
-    pub fn ident_eq_ignore_ascii_case(&self, pos: usize, s: &'static str) -> RuleResult<Ident> {
+    pub fn ident_eq_ignore_ascii_case(
+        &self,
+        pos: usize,
+        s: &'static str,
+    ) -> RuleResult<CaseInsensitiveIdent> {
         match self.tokens.get(pos) {
-            Some(Token::Ident(ident)) if ident.name.eq_ignore_ascii_case(s) => {
-                RuleResult::Matched(pos + 1, ident.clone())
-            }
+            Some(Token::Ident(ident)) if ident.name.eq_ignore_ascii_case(s) => RuleResult::Matched(
+                pos + 1,
+                CaseInsensitiveIdent {
+                    ident: ident.clone(),
+                },
+            ),
             _ => RuleResult::Failed,
         }
     }
@@ -443,37 +478,30 @@ impl<'input> ParseElem<'input> for TokenStream {
 /// A smart `Token` writer that knows when to insert whitespace to prevent
 /// two adjact tokens from being combined into a single token. This can also
 /// be used to write raw strings, which we do when emitting non-BigQuery SQL.
-pub struct TokenWriter<W: io::Write> {
-    wtr: W,
+pub struct TokenWriter<'wtr> {
+    wtr: &'wtr mut dyn io::Write,
     last_char: Option<char>,
 }
 
-impl TokenWriter<Vec<u8>> {
-    /// Create a new `TokenWriter` that writes to a string.
-    pub fn with_string_output() -> Self {
-        Self::from_wtr(Vec::new())
-    }
-
-    /// Get the string that we've written.
-    pub fn into_string(self) -> String {
-        // We should not allow writing invalid UTF-8, because we check for
-        // that in [`TokenWriter::write`].
-        String::from_utf8(self.wtr).expect("TokenWriter wrote invalid UTF-8")
-    }
+impl<'wtr> TokenWriter<'wtr> {
+    // /// Get the string that we've written, assuming we were created using
+    // /// [`TokenWriter::with_string_output`]. Otherwise return `None`.
+    // pub fn into_string(self) -> Option<String> {
+    //     let typed_box = self.wtr.downcast::<Vec<u8>>().ok()?;
+    //     let wtr =
+    //     // We should not allow writing invalid UTF-8, because we check for
+    //     // that in [`TokenWriter::write`].
+    //     String::from_utf8(self.wtr).expect("TokenWriter wrote invalid UTF-8")
+    // }
 }
 
-impl<W: io::Write> TokenWriter<W> {
+impl<'wtr> TokenWriter<'wtr> {
     /// Create a new `TokenWriter`.
-    pub fn from_wtr(wtr: W) -> Self {
+    pub fn from_wtr(wtr: &'wtr mut dyn io::Write) -> Self {
         Self {
             wtr,
             last_char: None,
         }
-    }
-
-    /// Return our inner writer.
-    pub fn into_inner(self) -> W {
-        self.wtr
     }
 
     /// Write a token, being careful not to let it merge with the previous
@@ -530,7 +558,7 @@ impl<W: io::Write> TokenWriter<W> {
     }
 }
 
-impl<W: io::Write> io::Write for TokenWriter<W> {
+impl<'wtr> io::Write for TokenWriter<'wtr> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let bytes_written = self.wtr.write(buf)?;
         let str_written =
@@ -807,14 +835,15 @@ mod test {
             // Now test TokenWriter by stripping all the whitespace from each
             // token, outputting them, tokenizing them again, and comparing the
             // result to the original tokens.
-            let mut wtr = TokenWriter::with_string_output();
+            let mut buf = vec![];
+            let mut wtr = TokenWriter::from_wtr(&mut buf);
             for token in &tokens.tokens {
                 let stripped = token.raw().without_ws();
                 wtr.write_raw_token(&stripped)
                     .expect("failed to write token");
             }
-            let stripped_sql = wtr.into_string();
-            let stripped_tokens = match tokenize_sql(&path, &stripped_sql) {
+            let stripped_sql = from_utf8(&buf).unwrap();
+            let stripped_tokens = match tokenize_sql(&path, stripped_sql) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     err.emit();
