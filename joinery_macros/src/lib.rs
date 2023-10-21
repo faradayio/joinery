@@ -227,75 +227,87 @@ pub fn sql_quote(input: TokenStream) -> TokenStream {
     let input = TokenStream2::from(input);
 
     let mut sql_token_exprs = vec![];
-    for token in input {
-        emit_sql_token_exprs(&mut sql_token_exprs, token);
-    }
+    emit_sql_token_exprs(&mut sql_token_exprs, input.into_iter());
+    let capacity = sql_token_exprs.len();
     let output = quote! {
-        crate::tokenizer::TokenStream::from_tokens(&[#(#sql_token_exprs),*][..])
+        {
+            use crate::tokenizer::{Literal, Token, TokenStream};
+            let mut __tokens = Vec::with_capacity(#capacity);
+            #( #sql_token_exprs; )*
+            TokenStream { tokens: __tokens }
+        }
     };
     output.into()
 }
 
-fn emit_sql_token_exprs(sql_token_exprs: &mut Vec<TokenStream2>, token: TokenTree) {
-    match token {
-        TokenTree::Group(group) => {
-            // We flatten this and use `Punct::new`.
-            let (open, close) = delimiter_pair(group.delimiter());
-            if let Some(open) = open {
-                sql_token_exprs.push(quote! {
-                    crate::tokenizer::Token::Punct(crate::tokenizer::Punct::new(#open))
-                });
-            }
-            for token in group.stream() {
-                emit_sql_token_exprs(sql_token_exprs, token);
-            }
-            if let Some(close) = close {
-                sql_token_exprs.push(quote! {
-                    crate::tokenizer::Token::Punct(crate::tokenizer::Punct::new(#close))
-                });
-            }
-        }
-        TokenTree::Ident(ident) => {
-            let ident_str = ident.to_string();
-            sql_token_exprs.push(quote! {
-                crate::tokenizer::Token::Ident(crate::tokenizer::Ident::new(#ident_str))
-            });
-        }
-        TokenTree::Punct(punct) => {
-            let punct_str = punct.to_string();
-            sql_token_exprs.push(quote! {
-                crate::tokenizer::Token::Punct(crate::tokenizer::Punct::new(#punct_str))
-            });
-        }
-        TokenTree::Literal(lit) => {
-            // There's probably a better way to do this.
-            let lit: syn::Lit = syn::parse_quote!(#lit);
-            match lit {
-                syn::Lit::Int(i) => {
+fn emit_sql_token_exprs(
+    sql_token_exprs: &mut Vec<TokenStream2>,
+    mut tokens: impl Iterator<Item = TokenTree>,
+) {
+    while let Some(token) = tokens.next() {
+        match token {
+            // Treat `#` as interpolation.
+            TokenTree::Punct(p) if p.to_string() == "#" => {
+                if let Some(expr) = tokens.next() {
                     sql_token_exprs.push(quote! {
-                        crate::tokenizer::Token::Literal(crate::tokenizer::Literal::int(#i))
+                        (#expr).to_tokens(&mut __tokens)
                     });
-                }
-                syn::Lit::Str(s) => {
-                    sql_token_exprs.push(quote! {
-                        crate::tokenizer::Token::Literal(crate::tokenizer::Literal::string(#s))
-                    });
-                }
-                syn::Lit::Float(f) => {
-                    sql_token_exprs.push(quote! {
-                        crate::tokenizer::Token::Literal(crate::tokenizer::Literal::float(#f))
-                    });
-                }
-                // syn::Lit::ByteStr(_) => todo!(),
-                // syn::Lit::Byte(_) => todo!(),
-                // syn::Lit::Char(_) => todo!(),
-                // syn::Lit::Bool(_) => todo!(),
-                // syn::Lit::Verbatim(_) => todo!(),
-                _ => {
+                } else {
                     sql_token_exprs.push(quote_spanned! {
-                        lit.span() =>
-                        compile_error!("unsupported literal type")
+                        p.span() =>
+                        compile_error!("expected expression after `#`")
                     });
+                }
+            }
+            TokenTree::Group(group) => {
+                // We flatten this and use `Punct::new`.
+                let (open, close) = delimiter_pair(group.delimiter());
+                if let Some(open) = open {
+                    sql_token_exprs.push(quote! { __tokens.push(Token::punct(#open)) });
+                }
+                emit_sql_token_exprs(sql_token_exprs, group.stream().into_iter());
+                if let Some(close) = close {
+                    sql_token_exprs.push(quote! { __tokens.push(Token::punct(#close)) });
+                }
+            }
+            TokenTree::Ident(ident) => {
+                let ident_str = ident.to_string();
+                sql_token_exprs.push(quote! { __tokens.push(Token::ident(#ident_str)) });
+            }
+            TokenTree::Punct(punct) => {
+                let punct_str = punct.to_string();
+                sql_token_exprs.push(quote! { __tokens.push(Token::punct(#punct_str)) });
+            }
+            TokenTree::Literal(lit) => {
+                // There's probably a better way to do this.
+                let lit: syn::Lit = syn::parse_quote!(#lit);
+                match lit {
+                    syn::Lit::Int(i) => {
+                        sql_token_exprs.push(quote! {
+                            __tokens.push(Token::Literal(Literal::int(#i)))
+                        });
+                    }
+                    syn::Lit::Str(s) => {
+                        sql_token_exprs.push(quote! {
+                            __tokens.push(Token::Literal(Literal::string(#s)))
+                        });
+                    }
+                    syn::Lit::Float(f) => {
+                        sql_token_exprs.push(quote! {
+                            __tokens.push(Token::Literal(Literal::float(#f)))
+                        });
+                    }
+                    // syn::Lit::ByteStr(_) => todo!(),
+                    // syn::Lit::Byte(_) => todo!(),
+                    // syn::Lit::Char(_) => todo!(),
+                    // syn::Lit::Bool(_) => todo!(),
+                    // syn::Lit::Verbatim(_) => todo!(),
+                    _ => {
+                        sql_token_exprs.push(quote_spanned! {
+                            lit.span() =>
+                            compile_error!("unsupported literal type")
+                        });
+                    }
                 }
             }
         }

@@ -95,6 +95,16 @@ pub enum Token {
 }
 
 impl Token {
+    /// Construct a new identifier token.
+    pub fn ident(ident: &str) -> Self {
+        Self::Ident(Ident::new(ident))
+    }
+
+    /// Construct a new punctuation token.
+    pub fn punct(punct: &str) -> Self {
+        Self::Punct(Punct::new(punct))
+    }
+
     /// Get the raw token for this token.
     pub fn raw(&self) -> &RawToken {
         match self {
@@ -540,6 +550,61 @@ impl<'input> ParseElem<'input> for TokenStream {
 // We don't implement `ParseLiteral` for `TokenStream` because all our
 // literal-matching rules need to return a token, and `ParseLiteral` returns
 // `()`.
+
+/// Convert a value into tokens, and append them to a [`Vec`].
+///
+/// This is used as part of the implementation of [`sql_quote!`].
+pub trait ToTokens {
+    /// Convert `self` into tokens, and append them to `tokens`.
+    fn to_tokens(&self, tokens: &mut Vec<Token>);
+}
+
+impl ToTokens for Token {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.push(self.clone());
+    }
+}
+
+impl ToTokens for Ident {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.push(Token::Ident(self.clone()));
+    }
+}
+
+impl ToTokens for Literal {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.push(Token::Literal(self.clone()));
+    }
+}
+
+impl ToTokens for Punct {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.push(Token::Punct(self.clone()));
+    }
+}
+
+impl<T: ToTokens> ToTokens for Option<T> {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        if let Some(t) = self {
+            t.to_tokens(tokens);
+        }
+    }
+}
+
+impl<T: ToTokens> ToTokens for Vec<T> {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        for t in self {
+            t.to_tokens(tokens);
+        }
+    }
+}
+
+impl ToTokens for TokenStream {
+    /// This allows composing `TokenStream`s before re-parsing them.
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.extend(self.tokens.clone());
+    }
+}
 
 /// A smart `Token` writer that knows when to insert whitespace to prevent
 /// two adjact tokens from being combined into a single token. This can also
@@ -1015,8 +1080,9 @@ mod test {
 
     #[test]
     fn sql_quote_builds_a_token_stream() {
+        let optional_distinct = Some(sql_quote! { DISTINCT });
         sql_quote! {
-            SELECT
+            SELECT #optional_distinct
                 generate_uuid() AS id,
                 "hello" AS message,
                 1 AS n,
