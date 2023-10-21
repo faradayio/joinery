@@ -20,6 +20,23 @@ use super::{Column, Driver, DriverImpl, Locator};
 /// Our locator prefix.
 pub const TRINO_LOCATOR_PREFIX: &str = "trino:";
 
+/// SQLite3 reserved keywords that should be quoted in specific circumstances.
+pub static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
+    "ALTER", "AND", "AS", "BETWEEN", "BY", "CASE", "CAST", "CONSTRAINT",
+    "CREATE", "CROSS", "CUBE", "CURRENT_CATALOG", "CURRENT_DATE",
+    "CURRENT_PATH", "CURRENT_ROLE", "CURRENT_SCHEMA", "CURRENT_TIME",
+    "CURRENT_TIMESTAMP", "CURRENT_USER", "DEALLOCATE", "DELETE", "DESCRIBE",
+    "DISTINCT", "DROP", "ELSE", "END", "ESCAPE", "EXCEPT", "EXECUTE", "EXISTS",
+    "EXTRACT", "FALSE", "FOR", "FROM", "FULL", "GROUP", "GROUPING", "HAVING",
+    "IN", "INNER", "INSERT", "INTERSECT", "INTO", "IS", "JOIN", "JSON_ARRAY",
+    "JSON_EXISTS", "JSON_OBJECT", "JSON_QUERY", "JSON_TABLE", "JSON_VALUE",
+    "LEFT", "LIKE", "LISTAGG", "LOCALTIME", "LOCALTIMESTAMP", "NATURAL",
+    "NORMALIZE", "NOT", "NULL", "ON", "OR", "ORDER", "OUTER", "PREPARE",
+    "RECURSIVE", "RIGHT", "ROLLUP", "SELECT", "SKIP", "TABLE", "THEN", "TRIM",
+    "TRUE", "UESCAPE", "UNION", "UNNEST", "USING", "VALUES", "WHEN", "WHERE",
+    "WITH",
+};
+
 // A `phf_map!` of BigQuery function names to native function names. Use
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {

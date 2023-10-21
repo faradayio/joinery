@@ -8,10 +8,12 @@ use rusqlite::{
     functions::{self, FunctionFlags},
     types,
 };
+use tracing::{debug, trace};
 
 use crate::{
     ast::Target,
     errors::{format_err, Context, Error, Result},
+    transforms::{OrReplaceToDropIfExists, Transform},
     util::{AnsiIdent, AnsiString},
 };
 
@@ -23,6 +25,30 @@ mod unnest;
 
 /// Our locator prefix.
 pub const SQLITE3_LOCATOR_PREFIX: &str = "sqlite3:";
+
+/// SQLite3 reserved keywords that should be quoted in specific circumstances.
+pub static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
+    "ABORT", "ACTION", "ADD", "AFTER", "ALL", "ALTER", "ALWAYS", "ANALYZE",
+    "AND", "AS", "ASC", "ATTACH", "AUTOINCREMENT", "BEFORE", "BEGIN", "BETWEEN",
+    "BY", "CASCADE", "CASE", "CAST", "CHECK", "COLLATE", "COLUMN", "COMMIT",
+    "CONFLICT", "CONSTRAINT", "CREATE", "CROSS", "CURRENT", "CURRENT_DATE",
+    "CURRENT_TIME", "CURRENT_TIMESTAMP", "DATABASE", "DEFAULT", "DEFERRABLE",
+    "DEFERRED", "DELETE", "DESC", "DETACH", "DISTINCT", "DO", "DROP", "EACH",
+    "ELSE", "END", "ESCAPE", "EXCEPT", "EXCLUDE", "EXCLUSIVE", "EXISTS",
+    "EXPLAIN", "FAIL", "FILTER", "FIRST", "FOLLOWING", "FOR", "FOREIGN", "FROM",
+    "FULL", "GENERATED", "GLOB", "GROUP", "GROUPS", "HAVING", "IF", "IGNORE",
+    "IMMEDIATE", "IN", "INDEX", "INDEXED", "INITIALLY", "INNER", "INSERT",
+    "INSTEAD", "INTERSECT", "INTO", "IS", "ISNULL", "JOIN", "KEY", "LAST",
+    "LEFT", "LIKE", "LIMIT", "MATCH", "MATERIALIZED", "NATURAL", "NO", "NOT",
+    "NOTHING", "NOTNULL", "NULL", "NULLS", "OF", "OFFSET", "ON", "OR", "ORDER",
+    "OTHERS", "OUTER", "OVER", "PARTITION", "PLAN", "PRAGMA", "PRECEDING",
+    "PRIMARY", "QUERY", "RAISE", "RANGE", "RECURSIVE", "REFERENCES", "REGEXP",
+    "REINDEX", "RELEASE", "RENAME", "REPLACE", "RESTRICT", "RETURNING", "RIGHT",
+    "ROLLBACK", "ROW", "ROWS", "SAVEPOINT", "SELECT", "SET", "TABLE", "TEMP",
+    "TEMPORARY", "THEN", "TIES", "TO", "TRANSACTION", "TRIGGER", "UNBOUNDED",
+    "UNION", "UNIQUE", "UPDATE", "USING", "VACUUM", "VALUES", "VIEW", "VIRTUAL",
+    "WHEN", "WHERE", "WINDOW", "WITH", "WITHOUT",
+};
 
 /// A locator for an SQLite3 database.
 #[derive(Debug)]
@@ -151,10 +177,17 @@ impl Driver for SQLite3Driver {
     }
 
     async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()> {
+        debug!(%sql, "Executing SQLite3 statement");
         let sql = sql.to_owned();
         self.conn
             .call(move |conn| conn.execute_batch(&sql).context("failed to execute SQL"))
             .await
+    }
+
+    /// Get a list of transformations that should be applied to the AST before
+    /// executing it.
+    fn transforms(&self) -> Vec<Box<dyn Transform>> {
+        vec![Box::new(OrReplaceToDropIfExists)]
     }
 
     async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {
@@ -228,6 +261,7 @@ impl DriverImpl for SQLite3Driver {
         table_name: &str,
         columns: &[Column<Self::Type>],
     ) -> Result<Self::Rows> {
+        trace!(%table_name, "Querying table");
         let column_list = columns
             .iter()
             .map(|c| AnsiIdent(&c.name).to_string())
@@ -249,6 +283,7 @@ impl DriverImpl for SQLite3Driver {
                         let mut values = vec![];
                         for i in 0..columns.len() {
                             let value = row.get(i)?;
+                            trace!(row = ?value, "Row");
                             values.push(Value(value));
                         }
                         Ok(values)

@@ -11,7 +11,7 @@ use clap::Parser;
 use once_cell::sync::Lazy;
 use owo_colors::OwoColorize;
 use regex::Regex;
-use tracing::instrument;
+use tracing::{instrument, trace};
 
 use crate::{
     ast::{self, parse_sql, CreateTableStatement, CreateViewStatement, Target},
@@ -141,7 +141,7 @@ async fn run_test(
     path: &Path,
     sql: &str,
 ) -> std::result::Result<(), Error> {
-    let ast = parse_sql(&path.display().to_string(), sql)?;
+    let ast = parse_sql(path, sql)?;
     //eprintln!("SQLite3: {}", ast.emit_to_string(Target::SQLite3));
     let output_tables = find_output_tables(&ast)?;
 
@@ -222,6 +222,7 @@ fn find_output_tables(ast: &ast::SqlProgram) -> Result<Vec<OutputTablePair>> {
             _ => continue,
         };
         let unescaped = name.unescaped_bigquery();
+        trace!(table = %unescaped, "found output table");
 
         // Parse output table names. None of these `unwrap()`s should fail.
         static OUTPUT_TABLE_RE: Lazy<Regex> =

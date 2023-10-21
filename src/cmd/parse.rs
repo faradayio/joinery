@@ -64,8 +64,7 @@ pub fn cmd_parse(opt: &ParseOpt) -> Result<()> {
         }
 
         // Parse query.
-        let filename = format!("{}/{}", opt.csv_path.display(), row.id);
-        match ast::parse_sql(&filename, &row.query) {
+        match ast::parse_sql(&opt.csv_path, &row.query) {
             Ok(sql_program) => {
                 ok_count += 1;
                 ok_line_count += row.query.lines().count();

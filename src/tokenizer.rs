@@ -25,9 +25,6 @@
 //! [quasiquoting]: https://docs.racket-lang.org/reference/quasiquote.html
 //! [quote]: https://docs.rs/quote/latest/quote/
 
-// This is work in progress.
-#![allow(dead_code)]
-
 use std::{
     fmt::{self},
     io::{self, Write as _},
@@ -40,6 +37,7 @@ use codespan_reporting::{
     diagnostic::{Diagnostic, Label},
     files::SimpleFiles,
 };
+use derive_visitor::{Drive, DriveMut};
 use peg::{Parse, ParseElem, RuleResult};
 
 use crate::{
@@ -71,11 +69,17 @@ impl PartialOrd for Loc {
     }
 }
 
+impl fmt::Display for Loc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "file_id={} offset={}", self.file_id, self.offset)
+    }
+}
+
 /// A span of source code.
 pub type Span = Range<Loc>;
 
 /// A token.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Drive, DriveMut, PartialEq)]
 pub enum Token {
     /// Whitespace in an empty file.
     EmptyFile(EmptyFile),
@@ -123,26 +127,29 @@ impl fmt::Debug for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::EmptyFile(_) => write!(f, "$EMPTY_FILE"),
-            Token::Ident(ident) => write!(f, "{}", ident.name),
-            Token::Literal(literal) => write!(f, "{}", literal.value),
-            Token::Punct(punct) => write!(f, "{}", punct.token.as_str()),
+            Token::Ident(ident) => write!(f, "I:{}", ident.name),
+            Token::Literal(literal) => write!(f, "L:{}", literal.value),
+            Token::Punct(punct) => write!(f, "P:{}", punct.token.as_str()),
         }
     }
 }
 
 /// A raw token. This contains both the text of the token itself, and possibly some
 /// surrounding whitespace.
-#[derive(Debug, Eq, Clone)]
+#[derive(Debug, Drive, DriveMut, Eq, Clone)]
 pub struct RawToken {
     /// The raw text of the token, including any surrounding whitespace.
+    #[drive(skip)]
     raw: String,
 
     /// Indices into `raw` pointing to the real text.
+    #[drive(skip)]
     token_range: Range<usize>,
 
     /// The span from which we parsed this token. May not exist if we generated
     /// this token internally. The span refers to the original location, because
     /// the token may have been modified.
+    #[drive(skip)]
     source_span: Option<Span>,
 }
 
@@ -227,19 +234,20 @@ impl PartialEq for RawToken {
 }
 
 /// The start of a file.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Drive, DriveMut, Debug, PartialEq)]
 pub struct EmptyFile {
     /// Our token, which should contain nothing but (maybe) whitespace.
     pub token: RawToken,
 }
 
 /// An identifier token
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug, Drive, DriveMut, Eq)]
 pub struct Ident {
     /// Our token.
     pub token: RawToken,
 
     /// The actual identifier, normalized to uppercase if it wasn't quoted.
+    #[drive(skip)]
     pub name: String,
 }
 
@@ -262,7 +270,7 @@ impl PartialEq for Ident {
 
 /// A keyword. This is just a thin wrapper over an `Ident` to change the
 /// equality semantics.
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Drive, DriveMut, Clone, Eq)]
 pub struct Keyword {
     /// Our keyword.
     pub ident: Ident,
@@ -287,7 +295,7 @@ impl PartialEq for Keyword {
 /// but it appears in different places in the grammar. These words are only
 /// reserved in specific contexts and they don't normally need to be quoted
 /// when used as column names, etc.
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Drive, DriveMut, Clone, Eq)]
 pub struct CaseInsensitiveIdent {
     /// Our identifier.
     pub ident: Ident,
@@ -309,12 +317,13 @@ impl PartialEq for CaseInsensitiveIdent {
 }
 
 /// A literal token.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Drive, DriveMut, Clone, PartialEq)]
 pub struct Literal {
     /// Our token.
     pub token: RawToken,
 
     /// The actual literal value.
+    #[drive(skip)]
     pub value: LiteralValue,
 }
 
@@ -345,7 +354,7 @@ impl fmt::Display for LiteralValue {
 }
 
 /// A punctuation token.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Drive, DriveMut, Clone, PartialEq)]
 pub struct Punct {
     /// Our token.
     pub token: RawToken,
@@ -364,10 +373,18 @@ impl Punct {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenStream {
     /// The tokens.
-    pub tokens: Vec<Token>,
+    tokens: Vec<Token>,
 }
 
 impl TokenStream {
+    /// Parse a literal.
+    pub fn literal(&self, pos: usize) -> RuleResult<Literal> {
+        match self.tokens.get(pos) {
+            Some(Token::Literal(literal)) => RuleResult::Matched(pos + 1, literal.clone()),
+            _ => RuleResult::Failed,
+        }
+    }
+
     /// Parse an identifier. This preserves case, because BigQuery has
     /// [complicated rules][case] about which identifiers are case-sensitive.
     ///
@@ -435,7 +452,7 @@ impl TokenStream {
 }
 
 impl Parse for TokenStream {
-    type PositionRepr = usize;
+    type PositionRepr = Loc;
 
     fn start(&self) -> usize {
         0
@@ -446,10 +463,32 @@ impl Parse for TokenStream {
     }
 
     fn position_repr(&self, pos: usize) -> Self::PositionRepr {
-        // TODO: This works but I may be doing something horribly wrong here?
-        //
-        //self.tokens[pos].raw().token_range.start
-        pos
+        if pos < self.tokens.len() {
+            self.tokens[pos]
+                .raw()
+                .source_span
+                .as_ref()
+                .expect("tokens from tokenizer should always have a source location")
+                .start
+        } else if pos > 0 {
+            self.tokens[pos - 1]
+                .raw()
+                .source_span
+                .as_ref()
+                .expect("tokens from tokenizer should always have a source location")
+                .end
+        } else {
+            // We have absolutely no tokens, and we're being asked for the
+            // position of the first token. So make something up and hope it
+            // doesn't break `codespan_reporting`.
+            //
+            // This shouldn't happen, anyway, because we should always return
+            // a single `EmptyFile` token for an empty file.
+            Loc {
+                file_id: 0,
+                offset: 0,
+            }
+        }
     }
 }
 
@@ -464,16 +503,9 @@ impl<'input> ParseElem<'input> for TokenStream {
     }
 }
 
-// impl ParseLiteral for TokenStream {
-//     fn parse_string_literal(&self, pos: usize, literal: &str) -> RuleResult<()> {
-//         match self.tokens.get(pos) {
-//             Some(Token::Ident(l)) if l.name.eq_ignore_ascii_case(literal) => {
-//                 RuleResult::Matched(pos + 1, ())
-//             }
-//             _ => RuleResult::Failed,
-//         }
-//     }
-// }
+// We don't implement `ParseLiteral` for `TokenStream` because all our
+// literal-matching rules need to return a token, and `ParseLiteral` returns
+// `()`.
 
 /// A smart `Token` writer that knows when to insert whitespace to prevent
 /// two adjact tokens from being combined into a single token. This can also
@@ -481,18 +513,7 @@ impl<'input> ParseElem<'input> for TokenStream {
 pub struct TokenWriter<'wtr> {
     wtr: &'wtr mut dyn io::Write,
     last_char: Option<char>,
-}
-
-impl<'wtr> TokenWriter<'wtr> {
-    // /// Get the string that we've written, assuming we were created using
-    // /// [`TokenWriter::with_string_output`]. Otherwise return `None`.
-    // pub fn into_string(self) -> Option<String> {
-    //     let typed_box = self.wtr.downcast::<Vec<u8>>().ok()?;
-    //     let wtr =
-    //     // We should not allow writing invalid UTF-8, because we check for
-    //     // that in [`TokenWriter::write`].
-    //     String::from_utf8(self.wtr).expect("TokenWriter wrote invalid UTF-8")
-    // }
+    treat_next_write_as_safe: bool,
 }
 
 impl<'wtr> TokenWriter<'wtr> {
@@ -501,36 +522,46 @@ impl<'wtr> TokenWriter<'wtr> {
         Self {
             wtr,
             last_char: None,
+            treat_next_write_as_safe: false,
         }
+    }
+
+    /// Mark the start of a tokens.
+    pub fn mark_token_start(&mut self) {
+        self.treat_next_write_as_safe = true;
     }
 
     /// Write a token, being careful not to let it merge with the previous
     /// token.
-    pub fn write_token(&mut self, t: &Token) -> fmt::Result {
+    pub fn write_token(&mut self, t: &Token) -> io::Result<()> {
         self.write_raw_token(t.raw())
     }
 
     /// Write a raw token, being careful not to let it merge with the previous
     /// token.
-    fn write_raw_token(&mut self, t: &RawToken) -> fmt::Result {
+    fn write_raw_token(&mut self, t: &RawToken) -> io::Result<()> {
         // Write leading whitespace. Any whitespace automatically clears
         // `last_char`.
         let leading_whitespace = t.leading_whitespace();
-        if !leading_whitespace.is_empty() {
-            self.raw_write_str(leading_whitespace)?;
-            self.last_char = None
+        if leading_whitespace.is_empty() {
+            self.treat_next_write_as_safe = true;
+        } else {
+            self.write_raw_str(leading_whitespace)?;
+            self.last_char = None;
+            self.treat_next_write_as_safe = false;
         }
 
         // Write a string, being careful not to let any tokens it contains
         // merge with any previous token.
-        self.safe_write_str(t.as_str())?;
+        self.write_raw_str(t.as_str())?;
 
         // Write trailing whitespace. Any whitespace automatically clears
         // `last_char`.
         let trailing_whitespace = t.trailing_whitespace();
         if !trailing_whitespace.is_empty() {
-            self.raw_write_str(trailing_whitespace)?;
-            self.last_char = None
+            self.write_raw_str(trailing_whitespace)?;
+            self.last_char = None;
+            self.treat_next_write_as_safe = false;
         }
 
         Ok(())
@@ -541,32 +572,51 @@ impl<'wtr> TokenWriter<'wtr> {
     /// support any dialect of SQL that we known how to emit, not just BigQuery.
     /// So we're conservative, and we insert whitespace unless we're pretty
     /// sure it's not needed.
-    pub fn safe_write_str(&mut self, s: &str) -> fmt::Result {
-        if let Some(last_char) = self.last_char {
-            if let Some(first_char) = s.chars().next() {
-                if tokens_might_merge(last_char, first_char) {
-                    self.raw_write_str(" ")?;
-                }
-            }
-        }
-        self.raw_write_str(s)
+    pub fn write_token_start(&mut self, s: &str) -> io::Result<()> {
+        self.treat_next_write_as_safe = true;
+        self.write_raw_str(s)
     }
 
     /// Write a string without checking for token merging.
-    fn raw_write_str(&mut self, s: &str) -> fmt::Result {
-        self.write_all(s.as_bytes()).map_err(|_| fmt::Error)
+    fn write_raw_str(&mut self, s: &str) -> io::Result<()> {
+        self.write_all(s.as_bytes())
     }
 }
 
 impl<'wtr> io::Write for TokenWriter<'wtr> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let bytes_written = self.wtr.write(buf)?;
-        let str_written =
-            from_utf8(&buf[..bytes_written]).map_err(|_| io::ErrorKind::InvalidData)?;
-        if let Some(last_char) = str_written.chars().last() {
+    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+        // We're abusing the `Write` trait here, because we're imposing extra
+        // restrictions on the `write` method.
+        //
+        // This is because we don't want to try to keep track of `last_char` in
+        // the presence of partially-written UTF-8 characters.
+        panic!("all writes must go through `write_all` for now");
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        // Get the string we're trying to write.
+        let str_to_write = from_utf8(buf)
+            .map_err(|_| io::ErrorKind::InvalidData)?
+            .to_string();
+
+        // Insert a space to separate tokens if needed.
+        if self.treat_next_write_as_safe {
+            if let Some(last_char) = self.last_char {
+                if let Some(first_char) = str_to_write.chars().next() {
+                    self.treat_next_write_as_safe = false;
+                    if tokens_might_merge(last_char, first_char) {
+                        self.wtr.write_all(b" ")?;
+                    }
+                }
+            }
+        }
+
+        // Do the actual write.
+        self.wtr.write_all(buf)?;
+        if let Some(last_char) = str_to_write.chars().last() {
             self.last_char = Some(last_char);
         }
-        Ok(bytes_written)
+        Ok(())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -582,10 +632,23 @@ fn tokens_might_merge(c1: char, c2: char) -> bool {
     let c1_is_ident = c1.is_ascii_alphanumeric() || c1 == '_';
     let c2_is_ident = c2.is_ascii_alphanumeric() || c2 == '_';
     match (c1_is_ident, c2_is_ident) {
-        (true, true) => true,
-        (true, false) => false,
-        (false, true) => false,
-        (false, false) => true,
+        (true, true) => return true,
+        (true, false) => return false,
+        (false, true) => return false,
+        (false, false) => {}
+    }
+
+    // Special cases.
+    #[allow(clippy::match_like_matches_macro)]
+    match (c1, c2) {
+        // There's an unfortunate lexing ambiguity between `['>', '>']` and
+        // `['>>']`. The latter is the bitwize right shift operator, while the
+        // former appears in types like `ARRAY<STRUCT<...>>`. We want to
+        // represent this as two tokens, and then allow the parser to
+        // reconstruct `'>>'`. But we need to be careful not to add whitespace
+        // here, and not just for aesthetic reasons.
+        ('>', '>') => false,
+        _ => true,
     }
 }
 
@@ -610,7 +673,7 @@ pub fn tokenize_sql(filename: &Path, sql: &str) -> Result<TokenStream> {
                 )
                 .with_message(format!("expected {}", err.expected))]);
             Err(SourceError {
-                source: err,
+                expected: err.to_string(),
                 files,
                 diagnostic,
             }
@@ -650,7 +713,7 @@ peg::parser! {
         rule ident() -> Ident
             = name_and_token:t(<c_ident()>) {
                 let (name, token) = name_and_token;
-                Ident { token, name: name.to_ascii_uppercase() }
+                Ident { token, name }
             }
             / name_and_token:t(<"`" name:(([^ '\\' | '`'] / escape())*) "`" { name }>) {
                 let (name, token) = name_and_token;
@@ -706,8 +769,6 @@ peg::parser! {
             // Other punctuation tokens. When multiple tokens start with the
             // same first character(s), we need to list them in order of longest
             // to shortest.
-            / p:t(<"<">) { Punct { token: p.1 } }
-            / p:t(<">">) { Punct { token: p.1 } }
             / p:t(<"=">) { Punct { token: p.1 } }
             / p:t(<"!=">) { Punct { token: p.1 } }
             / p:t(<"<=">) { Punct { token: p.1 } }
@@ -911,7 +972,7 @@ mod test {
             select_token: Keyword::new("SELECT"),
             item: SelectItem::All(Punct::new("*")),
             from_token: Keyword::new("FROM"),
-            table: Ident::new("T"),
+            table: Ident::new("t"),
         };
         assert_eq!(parsed, expected);
     }

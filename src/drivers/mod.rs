@@ -216,6 +216,8 @@ pub trait DriverImpl {
         result_table: &str,
         expected_table: &str,
     ) -> Result<()> {
+        debug!(%result_table, %expected_table, "comparing tables");
+
         // Get our columns.
         let result_columns = self.table_columns(result_table).await?;
         let expected_columns = self.table_columns(expected_table).await?;

@@ -171,7 +171,7 @@ where
 
 #[derive(Debug)]
 pub struct SourceError {
-    pub source: peg::error::ParseError<peg::str::LineCol>,
+    pub expected: String,
     pub files: SimpleFiles<String, String>,
     pub diagnostic: Diagnostic<usize>,
 }
@@ -187,12 +187,12 @@ impl SourceError {
 
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "parser error: expected {}", self.source)
+        write!(f, "parser error: expected {}", self.expected)
     }
 }
 
 impl error::Error for SourceError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        Some(&self.source)
+        None
     }
 }

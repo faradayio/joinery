@@ -17,7 +17,7 @@ fn impl_emit_macro(ast: &syn::DeriveInput) -> TokenStream2 {
     let (impl_generics, ty_generics, where_clause) = &ast.generics.split_for_impl();
     quote! {
         impl #impl_generics Emit for #name #ty_generics #where_clause {
-            fn emit(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
                 <#name #ty_generics as EmitDefault>::emit_default(self, t, f)
             }
         }
@@ -40,7 +40,7 @@ fn impl_emit_default_macro(ast: &syn::DeriveInput) -> TokenStream2 {
     let implementation = emit_default_body(name, &ast.data);
     quote! {
         impl #impl_generics EmitDefault for #name #ty_generics #where_clause {
-            fn emit_default(&self, t: Target, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            fn emit_default(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
                 #implementation
             }
         }

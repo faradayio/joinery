@@ -22,6 +22,23 @@ use super::{Column, Driver, DriverImpl, Locator};
 /// Locator prefix for Snowflake.
 pub const SNOWFLAKE_LOCATOR_PREFIX: &str = "snowflake:";
 
+/// Snowflake reserved keywords that should be quoted in specific circumstances.
+pub static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
+    "ACCOUNT", "ALL", "ALTER", "AND", "ANY", "AS", "BETWEEN", "BY", "CASE",
+    "CAST", "CHECK", "COLUMN", "CONNECT", "CONNECTION", "CONSTRAINT", "CREATE",
+    "CROSS", "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+    "CURRENT_USER", "DATABASE", "DELETE", "DISTINCT", "DROP", "ELSE", "EXISTS",
+    "FALSE", "FOLLOWING", "FOR", "FROM", "FULL", "GRANT", "GROUP", "GSCLUSTER",
+    "HAVING", "ILIKE", "IN", "INCREMENT", "INNER", "INSERT", "INTERSECT",
+    "INTO", "IS", "ISSUE", "JOIN", "LATERAL", "LEFT", "LIKE", "LOCALTIME",
+    "LOCALTIMESTAMP", "MINUS", "NATURAL", "NOT", "NULL", "OF", "ON", "OR",
+    "ORDER", "ORGANIZATION", "QUALIFY", "REGEXP", "REVOKE", "RIGHT", "RLIKE",
+    "ROW", "ROWS", "SAMPLE", "SCHEMA", "SELECT", "SET", "SOME", "START",
+    "TABLE", "TABLESAMPLE", "THEN", "TO", "TRIGGER", "TRUE", "TRY_CAST",
+    "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "VIEW", "WHEN", "WHENEVER",
+    "WHERE", "WITH",
+};
+
 // A `phf_map!` of BigQuery function names to Snowflake function names. Use
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {

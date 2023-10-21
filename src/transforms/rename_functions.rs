@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use derive_visitor::{DriveMut, VisitorMut};
 
 use crate::{
-    ast::{self, FunctionName, Identifier},
+    ast::{self, FunctionName},
     errors::Result,
+    tokenizer::Ident,
 };
 
 use super::{Transform, TransformExtra};
@@ -50,15 +51,13 @@ impl RenameFunctions {
 
     fn enter_function_name(&mut self, function_name: &mut FunctionName) {
         if let FunctionName::Function { function } = function_name {
-            let name = function.unescaped_bigquery().to_ascii_uppercase();
+            let name = function.name.to_ascii_uppercase();
             if let Some(snowflake_name) = self.function_table.get(&name) {
                 // Rename the function.
-                let orig_ident = function_name.function_identifier();
+                //
+                // TODO: Preserve whitespace and source location.
                 *function_name = FunctionName::Function {
-                    function: Identifier {
-                        token: orig_ident.token.with_token_str(snowflake_name),
-                        text: snowflake_name.to_string(),
-                    },
+                    function: Ident::new(snowflake_name),
                 };
             } else if let Some(udf) = self.udf_table.get(&name) {
                 // We'll need a UDF, so add it to our list it if isn't already

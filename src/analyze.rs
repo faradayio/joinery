@@ -59,7 +59,8 @@ impl FunctionCallCounts {
             "{}(",
             special_date_function_call
                 .function_name
-                .unescaped_bigquery()
+                .ident
+                .name
                 .to_ascii_uppercase(),
         );
         for (i, _) in special_date_function_call.args.node_iter().enumerate() {
