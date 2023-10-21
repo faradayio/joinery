@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use darling::{util::Flag, FromField};
 use proc_macro::TokenStream;
-use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::quote;
+use proc_macro2::{Delimiter, Span, TokenStream as TokenStream2, TokenTree};
+use quote::{quote, quote_spanned};
 use syn::{spanned::Spanned, Field, Ident};
 
 #[proc_macro_derive(Emit)]
@@ -220,4 +220,93 @@ impl<'a> FieldInfo<'a> {
 struct EmitAttr {
     /// Should we omit this field from our output?
     skip: Flag,
+}
+
+#[proc_macro]
+pub fn sql_quote(input: TokenStream) -> TokenStream {
+    let input = TokenStream2::from(input);
+
+    let mut sql_token_exprs = vec![];
+    for token in input {
+        emit_sql_token_exprs(&mut sql_token_exprs, token);
+    }
+    let output = quote! {
+        crate::tokenizer::TokenStream::from_tokens(&[#(#sql_token_exprs),*][..])
+    };
+    output.into()
+}
+
+fn emit_sql_token_exprs(sql_token_exprs: &mut Vec<TokenStream2>, token: TokenTree) {
+    match token {
+        TokenTree::Group(group) => {
+            // We flatten this and use `Punct::new`.
+            let (open, close) = delimiter_pair(group.delimiter());
+            if let Some(open) = open {
+                sql_token_exprs.push(quote! {
+                    crate::tokenizer::Token::Punct(crate::tokenizer::Punct::new(#open))
+                });
+            }
+            for token in group.stream() {
+                emit_sql_token_exprs(sql_token_exprs, token);
+            }
+            if let Some(close) = close {
+                sql_token_exprs.push(quote! {
+                    crate::tokenizer::Token::Punct(crate::tokenizer::Punct::new(#close))
+                });
+            }
+        }
+        TokenTree::Ident(ident) => {
+            let ident_str = ident.to_string();
+            sql_token_exprs.push(quote! {
+                crate::tokenizer::Token::Ident(crate::tokenizer::Ident::new(#ident_str))
+            });
+        }
+        TokenTree::Punct(punct) => {
+            let punct_str = punct.to_string();
+            sql_token_exprs.push(quote! {
+                crate::tokenizer::Token::Punct(crate::tokenizer::Punct::new(#punct_str))
+            });
+        }
+        TokenTree::Literal(lit) => {
+            // There's probably a better way to do this.
+            let lit: syn::Lit = syn::parse_quote!(#lit);
+            match lit {
+                syn::Lit::Int(i) => {
+                    sql_token_exprs.push(quote! {
+                        crate::tokenizer::Token::Literal(crate::tokenizer::Literal::int(#i))
+                    });
+                }
+                syn::Lit::Str(s) => {
+                    sql_token_exprs.push(quote! {
+                        crate::tokenizer::Token::Literal(crate::tokenizer::Literal::string(#s))
+                    });
+                }
+                syn::Lit::Float(f) => {
+                    sql_token_exprs.push(quote! {
+                        crate::tokenizer::Token::Literal(crate::tokenizer::Literal::float(#f))
+                    });
+                }
+                // syn::Lit::ByteStr(_) => todo!(),
+                // syn::Lit::Byte(_) => todo!(),
+                // syn::Lit::Char(_) => todo!(),
+                // syn::Lit::Bool(_) => todo!(),
+                // syn::Lit::Verbatim(_) => todo!(),
+                _ => {
+                    sql_token_exprs.push(quote_spanned! {
+                        lit.span() =>
+                        compile_error!("unsupported literal type")
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn delimiter_pair(d: Delimiter) -> (Option<&'static str>, Option<&'static str>) {
+    match d {
+        Delimiter::Parenthesis => (Some("("), Some(")")),
+        Delimiter::Brace => (Some("{"), Some("}")),
+        Delimiter::Bracket => (Some("["), Some("]")),
+        Delimiter::None => (None, None),
+    }
 }

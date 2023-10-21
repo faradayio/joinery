@@ -327,6 +327,32 @@ pub struct Literal {
     pub value: LiteralValue,
 }
 
+impl Literal {
+    /// Construct a literal containing an integer.
+    pub fn int(i: i64) -> Self {
+        Self {
+            token: RawToken::new(&i.to_string()),
+            value: LiteralValue::Int64(i),
+        }
+    }
+
+    /// Construct a literal containing a floating-point number.
+    pub fn float(d: f64) -> Self {
+        Self {
+            token: RawToken::new(&d.to_string()),
+            value: LiteralValue::Float64(d),
+        }
+    }
+
+    /// Construct a literal containing a string.
+    pub fn string(s: &str) -> Self {
+        Self {
+            token: RawToken::new(&BigQueryString(s).to_string()),
+            value: LiteralValue::String(s.to_owned()),
+        }
+    }
+}
+
 /// A literal value.
 ///
 /// Does not include literals like `TRUE`, `FALSE` or `NULL`, which are parsed
@@ -377,6 +403,14 @@ pub struct TokenStream {
 }
 
 impl TokenStream {
+    /// Create from tokens.
+    #[allow(dead_code)]
+    pub fn from_tokens<Tokens: Into<Vec<Token>>>(tokens: Tokens) -> Self {
+        Self {
+            tokens: tokens.into(),
+        }
+    }
+
     /// Parse a literal.
     pub fn literal(&self, pos: usize) -> RuleResult<Literal> {
         match self.tokens.get(pos) {
@@ -853,6 +887,8 @@ peg::parser! {
 
 #[cfg(test)]
 mod test {
+    use joinery_macros::sql_quote;
+
     use super::*;
 
     #[test]
@@ -975,5 +1011,18 @@ mod test {
             table: Ident::new("t"),
         };
         assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn sql_quote_builds_a_token_stream() {
+        sql_quote! {
+            SELECT
+                generate_uuid() AS id,
+                "hello" AS message,
+                1 AS n,
+                1.0 AS x,
+                true AS t,
+                false AS f,
+        };
     }
 }
