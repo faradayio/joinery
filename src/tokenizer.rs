@@ -416,7 +416,6 @@ pub struct TokenStream {
 
 impl TokenStream {
     /// Create from tokens.
-    #[allow(dead_code)]
     pub fn from_tokens<Tokens: Into<Vec<Token>>>(tokens: Tokens) -> Self {
         Self {
             tokens: tokens.into(),
@@ -425,7 +424,6 @@ impl TokenStream {
 
     /// Try to parse this stream using a grammar rule. This is generally called
     /// to re-parse the token stream created by [`sql_quote!`].
-    #[allow(dead_code)]
     fn try_into_parsed<T, R>(self, grammar_rule: R) -> Result<T>
     where
         R: FnOnce(&TokenStream) -> Result<T, ParseError<Loc>>,
@@ -445,13 +443,16 @@ impl TokenStream {
     }
 
     /// Try to parse this stream as a [`ast::Statement`].
-    #[allow(dead_code)]
     pub fn try_into_statement(self) -> Result<ast::Statement> {
         self.try_into_parsed(ast::sql_program::statement)
     }
 
+    /// Try to parse this stream as a [`ast::QueryExpression`].
+    pub fn try_into_query_expression(self) -> Result<ast::QueryExpression> {
+        self.try_into_parsed(ast::sql_program::query_expression)
+    }
+
     /// Try to parse this stream as a [`ast::Expression`].
-    #[allow(dead_code)]
     pub fn try_into_expression(self) -> Result<ast::Expression> {
         self.try_into_parsed(ast::sql_program::expression)
     }
@@ -592,6 +593,12 @@ impl<'input> ParseElem<'input> for TokenStream {
 pub trait ToTokens {
     /// Convert `self` into tokens, and append them to `tokens`.
     fn to_tokens(&self, tokens: &mut Vec<Token>);
+}
+
+impl ToTokens for i64 {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.push(Token::Literal(Literal::int(*self)));
+    }
 }
 
 impl ToTokens for Token {

@@ -16,10 +16,10 @@ pub(crate) fn impl_sql_quote(input: TokenStream2) -> TokenStream2 {
     let capacity = sql_token_exprs.len();
     quote! {
         {
-            use crate::tokenizer::{Literal, Token, TokenStream};
+            use crate::tokenizer::{Literal, Token, TokenStream, ToTokens as _};
             let mut __tokens = Vec::with_capacity(#capacity);
             #( #sql_token_exprs; )*
-            TokenStream { tokens: __tokens }
+            TokenStream::from_tokens(__tokens)
         }
     }
 }

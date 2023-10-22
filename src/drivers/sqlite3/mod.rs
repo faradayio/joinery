@@ -13,7 +13,7 @@ use tracing::{debug, trace};
 use crate::{
     ast::Target,
     errors::{format_err, Context, Error, Result},
-    transforms::{OrReplaceToDropIfExists, Transform},
+    transforms::{self, Transform},
     util::{AnsiIdent, AnsiString},
 };
 
@@ -187,7 +187,12 @@ impl Driver for SQLite3Driver {
     /// Get a list of transformations that should be applied to the AST before
     /// executing it.
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
-        vec![Box::new(OrReplaceToDropIfExists)]
+        vec![
+            Box::new(transforms::BoolToInt),
+            Box::new(transforms::IfToCase),
+            Box::new(transforms::OrReplaceToDropIfExists),
+            Box::new(transforms::WrapNestedQueries),
+        ]
     }
 
     async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {

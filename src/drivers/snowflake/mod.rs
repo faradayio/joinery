@@ -246,11 +246,14 @@ impl Driver for SnowflakeDriver {
     }
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
-        vec![Box::new(transforms::RenameFunctions::new(
-            &FUNCTION_NAMES,
-            &UDFS,
-            &format_udf,
-        ))]
+        vec![
+            Box::new(transforms::IfToCase),
+            Box::new(transforms::RenameFunctions::new(
+                &FUNCTION_NAMES,
+                &UDFS,
+                &format_udf,
+            )),
+        ]
     }
 
     #[instrument(skip(self))]

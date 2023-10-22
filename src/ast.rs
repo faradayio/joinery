@@ -543,7 +543,7 @@ pub struct QueryStatement {
 ///
 /// [official grammar]:
 ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#sql_syntax.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub enum QueryExpression {
     SelectExpression(SelectExpression),
     Nested {
@@ -561,26 +561,6 @@ pub enum QueryExpression {
         set_operator: SetOperator,
         right: Box<QueryExpression>,
     },
-}
-
-impl Emit for QueryExpression {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match self {
-            // Nested needs special handling on SQLite3.
-            QueryExpression::Nested {
-                paren1,
-                query,
-                paren2,
-            } if t == Target::SQLite3 => {
-                // Add a leading space in case the previous token is an
-                // Ident.
-                paren1.token.with_str("SELECT * FROM (").emit(t, f)?;
-                query.emit(t, f)?;
-                paren2.emit(t, f)
-            }
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// Common table expressions (CTEs).
@@ -739,7 +719,7 @@ impl Emit for Except {
 }
 
 /// An SQL expression.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub enum Expression {
     Literal(Literal),
     BoolValue(Keyword),
@@ -826,37 +806,6 @@ impl Expression {
             left: Box::new(left),
             op_token,
             right: Box::new(right),
-        }
-    }
-}
-
-impl Emit for Expression {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match self {
-            // SQLite3 does not support `TRUE` or `FALSE`.
-            Expression::BoolValue(keyword) if t == Target::SQLite3 => {
-                let token = &keyword.ident.token;
-                let value = token.as_str().eq_ignore_ascii_case("TRUE");
-                token.with_str(if value { "1" } else { "0" }).emit(t, f)
-            }
-            Expression::If {
-                if_token,
-                condition,
-                then_expression,
-                else_expression,
-                paren2,
-                ..
-            } if t == Target::Snowflake || t == Target::SQLite3 => {
-                if_token.ident.token.with_str("CASE").emit(t, f)?;
-                f.write_token_start("WHEN")?;
-                condition.emit(t, f)?;
-                f.write_token_start("THEN")?;
-                then_expression.emit(t, f)?;
-                f.write_token_start("ELSE")?;
-                else_expression.emit(t, f)?;
-                paren2.token.with_str("END").emit(t, f)
-            }
-            _ => self.emit_default(t, f),
         }
     }
 }
@@ -1859,7 +1808,7 @@ peg::parser! {
                 }
             }
 
-        rule query_expression() -> QueryExpression = precedence! {
+        pub rule query_expression() -> QueryExpression = precedence! {
             left:(@) set_operator:set_operator() right:@ {
                 QueryExpression::SetOperation {
                     left: Box::new(left), set_operator, right: Box::new(right)
