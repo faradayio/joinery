@@ -173,6 +173,7 @@ impl Driver for TrinoDriver {
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
         vec![
             Box::new(transforms::CountifToCase),
+            Box::new(transforms::InUnnestToInSelect),
             Box::new(transforms::OrReplaceToDropIfExists),
             Box::new(transforms::RenameFunctions::new(
                 &FUNCTION_NAMES,

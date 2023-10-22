@@ -12,6 +12,7 @@ pub use self::{
     clean_up_temp_manually::CleanUpTempManually,
     countif_to_case::CountifToCase,
     if_to_case::IfToCase,
+    in_unnest_to_in_select::InUnnestToInSelect,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     rename_functions::{RenameFunctions, Udf},
     wrap_nested_queries::WrapNestedQueries,
@@ -21,6 +22,7 @@ mod bool_to_int;
 mod clean_up_temp_manually;
 mod countif_to_case;
 mod if_to_case;
+mod in_unnest_to_in_select;
 mod or_replace_to_drop_if_exists;
 mod rename_functions;
 mod wrap_nested_queries;
