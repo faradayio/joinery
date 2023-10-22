@@ -38,9 +38,11 @@ use codespan_reporting::{
     files::SimpleFiles,
 };
 use derive_visitor::{Drive, DriveMut};
-use peg::{Parse, ParseElem, RuleResult};
+use joinery_macros::ToTokens;
+use peg::{error::ParseError, Parse, ParseElem, RuleResult};
 
 use crate::{
+    ast,
     drivers::bigquery::BigQueryString,
     errors::{Result, SourceError},
 };
@@ -280,7 +282,7 @@ impl PartialEq for Ident {
 
 /// A keyword. This is just a thin wrapper over an `Ident` to change the
 /// equality semantics.
-#[derive(Debug, Drive, DriveMut, Clone, Eq)]
+#[derive(Debug, Drive, DriveMut, Clone, Eq, ToTokens)]
 pub struct Keyword {
     /// Our keyword.
     pub ident: Ident,
@@ -305,7 +307,7 @@ impl PartialEq for Keyword {
 /// but it appears in different places in the grammar. These words are only
 /// reserved in specific contexts and they don't normally need to be quoted
 /// when used as column names, etc.
-#[derive(Debug, Drive, DriveMut, Clone, Eq)]
+#[derive(Debug, Drive, DriveMut, Clone, Eq, ToTokens)]
 pub struct CaseInsensitiveIdent {
     /// Our identifier.
     pub ident: Ident,
@@ -419,6 +421,39 @@ impl TokenStream {
         Self {
             tokens: tokens.into(),
         }
+    }
+
+    /// Try to parse this stream using a grammar rule. This is generally called
+    /// to re-parse the token stream created by [`sql_quote!`].
+    #[allow(dead_code)]
+    fn try_into_parsed<T, R>(self, grammar_rule: R) -> Result<T>
+    where
+        R: FnOnce(&TokenStream) -> Result<T, ParseError<Loc>>,
+    {
+        match grammar_rule(&self) {
+            Ok(t) => Ok(t),
+            Err(err) => {
+                let diagnostic = Diagnostic::error().with_message("Failed to parse token stream");
+                Err(SourceError {
+                    expected: err.to_string(),
+                    files: SimpleFiles::new(),
+                    diagnostic,
+                }
+                .into())
+            }
+        }
+    }
+
+    /// Try to parse this stream as a [`ast::Statement`].
+    #[allow(dead_code)]
+    pub fn try_into_statement(self) -> Result<ast::Statement> {
+        self.try_into_parsed(ast::sql_program::statement)
+    }
+
+    /// Try to parse this stream as a [`ast::Expression`].
+    #[allow(dead_code)]
+    pub fn try_into_expression(self) -> Result<ast::Expression> {
+        self.try_into_parsed(ast::sql_program::expression)
     }
 
     /// Parse a literal.
@@ -596,6 +631,18 @@ impl<T: ToTokens> ToTokens for Vec<T> {
         for t in self {
             t.to_tokens(tokens);
         }
+    }
+}
+
+impl<T: ToTokens> ToTokens for &T {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        (*self).to_tokens(tokens);
+    }
+}
+
+impl<T: ToTokens> ToTokens for Box<T> {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        (**self).to_tokens(tokens);
     }
 }
 
@@ -1079,9 +1126,9 @@ mod test {
     }
 
     #[test]
-    fn sql_quote_builds_a_token_stream() {
+    fn sql_quote_and_try_into_statement() {
         let optional_distinct = Some(sql_quote! { DISTINCT });
-        sql_quote! {
+        let statement = sql_quote! {
             SELECT #optional_distinct
                 generate_uuid() AS id,
                 "hello" AS message,
@@ -1089,6 +1136,31 @@ mod test {
                 1.0 AS x,
                 true AS t,
                 false AS f,
-        };
+        }
+        .try_into_statement()
+        .unwrap();
+        assert!(matches!(statement, ast::Statement::Query(_)));
+    }
+
+    #[test]
+    fn expression_rewriting() {
+        let if_expr = sql_quote! { IF(TRUE, 2.0, 1.0) }
+            .try_into_expression()
+            .unwrap();
+        if let ast::Expression::If {
+            condition,
+            then_expression,
+            else_expression,
+            ..
+        } = &if_expr
+        {
+            let case_expr =
+                sql_quote! { CASE WHEN #condition THEN #then_expression ELSE #else_expression END }
+                    .try_into_expression()
+                    .unwrap();
+            assert!(matches!(case_expr, ast::Expression::Case { .. }));
+        } else {
+            panic!("expected IF expression");
+        }
     }
 }
