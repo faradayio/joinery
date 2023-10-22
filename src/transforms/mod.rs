@@ -10,6 +10,7 @@ use crate::{ast, errors::Result};
 pub use self::{
     bool_to_int::BoolToInt,
     clean_up_temp_manually::CleanUpTempManually,
+    countif_to_case::CountifToCase,
     if_to_case::IfToCase,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     rename_functions::{RenameFunctions, Udf},
@@ -18,6 +19,7 @@ pub use self::{
 
 mod bool_to_int;
 mod clean_up_temp_manually;
+mod countif_to_case;
 mod if_to_case;
 mod or_replace_to_drop_if_exists;
 mod rename_functions;

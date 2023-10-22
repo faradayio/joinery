@@ -189,6 +189,7 @@ impl Driver for SQLite3Driver {
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
         vec![
             Box::new(transforms::BoolToInt),
+            Box::new(transforms::CountifToCase),
             Box::new(transforms::IfToCase),
             Box::new(transforms::OrReplaceToDropIfExists),
             Box::new(transforms::WrapNestedQueries),

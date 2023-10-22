@@ -40,6 +40,7 @@ use codespan_reporting::{
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::ToTokens;
 use peg::{error::ParseError, Parse, ParseElem, RuleResult};
+use tracing::{error, trace};
 
 use crate::{
     ast,
@@ -428,9 +429,11 @@ impl TokenStream {
     where
         R: FnOnce(&TokenStream) -> Result<T, ParseError<Loc>>,
     {
+        trace!(token_stream = ?self.tokens, "re-parsing token stream from `sql_quote!`");
         match grammar_rule(&self) {
             Ok(t) => Ok(t),
             Err(err) => {
+                error!(error = ?err, token_stream = ?self.tokens, "failed to re-parse token stream from `sql_quote!`");
                 let diagnostic = Diagnostic::error().with_message("Failed to parse token stream");
                 Err(SourceError {
                     expected: err.to_string(),
@@ -455,6 +458,12 @@ impl TokenStream {
     /// Try to parse this stream as a [`ast::Expression`].
     pub fn try_into_expression(self) -> Result<ast::Expression> {
         self.try_into_parsed(ast::sql_program::expression)
+    }
+
+    /// Try to parse this stream as a [`ast::FunctionCall`].
+    #[allow(dead_code)]
+    pub fn try_into_function_call(self) -> Result<ast::FunctionCall> {
+        self.try_into_parsed(ast::sql_program::function_call)
     }
 
     /// Parse a literal.

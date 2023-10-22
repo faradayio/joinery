@@ -2192,7 +2192,7 @@ peg::parser! {
             = date_part:date_part() { ExpressionOrDatePart::DatePart(date_part) }
             / expression:expression() { ExpressionOrDatePart::Expression(expression) }
 
-        rule function_call() -> FunctionCall
+        pub rule function_call() -> FunctionCall
             = name:function_name() paren1:p("(")
               args:sep_opt_trailing(<expression()>, ",")? paren2:p(")")
               over_clause:over_clause()?
@@ -2824,6 +2824,7 @@ mod tests {
             (r"SELECT * FROM t WHERE a IN UNNEST([1])", None),
             (r"SELECT IF(a = 0, 1, 2) c FROM t", None),
             (r"SELECT CASE WHEN a = 0 THEN 1 ELSE 2 END c FROM t", None),
+            (r"SELECT CASE WHEN a = 0 THEN 1 END c FROM t", None),
             (r"SELECT TRUE AND FALSE", None),
             (r"SELECT TRUE OR FALSE", None),
             (r"SELECT NOT TRUE", None),
