@@ -13,8 +13,11 @@ pub use self::{
     countif_to_case::CountifToCase,
     if_to_case::IfToCase,
     in_unnest_to_in_select::InUnnestToInSelect,
+    index_from_one::IndexFromOne,
+    index_from_zero::IndexFromZero,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     rename_functions::{RenameFunctions, Udf},
+    standardize_current_date::StandardizeCurrentDate,
     wrap_nested_queries::WrapNestedQueries,
 };
 
@@ -23,8 +26,11 @@ mod clean_up_temp_manually;
 mod countif_to_case;
 mod if_to_case;
 mod in_unnest_to_in_select;
+mod index_from_one;
+mod index_from_zero;
 mod or_replace_to_drop_if_exists;
 mod rename_functions;
+mod standardize_current_date;
 mod wrap_nested_queries;
 
 /// A transform that modifies an [`SqlProgram`].

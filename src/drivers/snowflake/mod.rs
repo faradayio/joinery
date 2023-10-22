@@ -249,6 +249,7 @@ impl Driver for SnowflakeDriver {
         vec![
             Box::new(transforms::CountifToCase),
             Box::new(transforms::IfToCase),
+            Box::new(transforms::IndexFromZero),
             Box::new(transforms::RenameFunctions::new(
                 &FUNCTION_NAMES,
                 &UDFS,

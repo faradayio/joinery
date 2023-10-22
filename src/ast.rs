@@ -997,20 +997,10 @@ pub struct CaseElseClause {
 
 /// `CURRENT_DATE` may appear as either `CURRENT_DATE` or `CURRENT_DATE()`.
 /// And different databases seem to support one or the other or both.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct CurrentDate {
     pub current_date_token: CaseInsensitiveIdent,
     pub empty_parens: Option<EmptyParens>,
-}
-
-impl Emit for CurrentDate {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match t {
-            // SQLite3 only supports the keyword form.
-            Target::SQLite3 => self.current_date_token.emit(t, f),
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// An empty `()` expression.
@@ -1349,7 +1339,7 @@ pub struct IndexExpression {
 }
 
 /// Different ways to index arrays.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub enum IndexOffset {
     Simple(Box<Expression>),
     Offset {
@@ -1364,49 +1354,6 @@ pub enum IndexOffset {
         expression: Box<Expression>,
         paren2: Punct,
     },
-}
-
-impl Emit for IndexOffset {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        // Many databases use 0-based indexing, but Trino uses 1-based indexing.
-        // BigQuery supports both, so translate as needed.
-        match self {
-            IndexOffset::Simple(expression) if t == Target::Trino => {
-                f.write_token_start("(")?;
-                expression.emit(t, f)?;
-                f.write_token_start(") + 1")
-            }
-            IndexOffset::Offset { expression, .. }
-                if t == Target::Snowflake || t == Target::SQLite3 =>
-            {
-                expression.emit(t, f)
-            }
-            IndexOffset::Offset {
-                paren1,
-                expression,
-                paren2,
-                ..
-            } if t == Target::Trino => {
-                paren1.emit(t, f)?;
-                expression.emit(t, f)?;
-                paren2.emit(t, f)?;
-                f.write_token_start(" + 1")
-            }
-            IndexOffset::Ordinal {
-                paren1,
-                expression,
-                paren2,
-                ..
-            } if t == Target::Snowflake || t == Target::SQLite3 => {
-                paren1.emit(t, f)?;
-                expression.emit(t, f)?;
-                paren2.emit(t, f)?;
-                f.write_token_start(" - 1")
-            }
-            IndexOffset::Ordinal { expression, .. } if t == Target::Trino => expression.emit(t, f),
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// An `AS` alias.

@@ -191,7 +191,9 @@ impl Driver for SQLite3Driver {
             Box::new(transforms::BoolToInt),
             Box::new(transforms::CountifToCase),
             Box::new(transforms::IfToCase),
+            Box::new(transforms::IndexFromZero),
             Box::new(transforms::OrReplaceToDropIfExists),
+            Box::new(transforms::StandardizeCurrentDate::no_parens()),
             Box::new(transforms::WrapNestedQueries),
         ]
     }
