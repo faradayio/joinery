@@ -794,6 +794,7 @@ pub enum Expression {
     Struct(StructExpression),
     Count(CountExpression),
     CurrentDate(CurrentDate),
+    ArrayAgg(ArrayAggExpression),
     SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
     Index(IndexExpression),
@@ -1026,6 +1027,44 @@ pub struct SpecialDateFunctionCall {
 pub enum ExpressionOrDatePart {
     Expression(Expression),
     DatePart(DatePart),
+}
+
+/// An `ARRAY_AGG` expression.
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
+pub struct ArrayAggExpression {
+    pub array_agg_token: CaseInsensitiveIdent,
+    pub paren1: Punct,
+    pub distinct: Option<Distinct>,
+    pub expression: Box<Expression>,
+    pub order_by: Option<OrderBy>,
+    pub paren2: Punct,
+}
+
+impl Emit for ArrayAggExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
+        match self {
+            // Snowflake formats ORDER BY as `ARRAY_AGG(expression) WITHIN GROUP
+            // (ORDER BY ...)`.
+            ArrayAggExpression {
+                array_agg_token,
+                paren1,
+                distinct,
+                expression,
+                order_by: Some(order_by),
+                paren2,
+            } if t == Target::Snowflake => {
+                array_agg_token.emit(t, f)?;
+                paren1.emit(t, f)?;
+                distinct.emit(t, f)?;
+                expression.emit(t, f)?;
+                paren2.emit(t, f)?;
+                f.write_token_start("WITHIN GROUP(")?;
+                order_by.emit(t, f)?;
+                f.write_token_start(")")
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// A function call.
@@ -1954,6 +1993,7 @@ peg::parser! {
             null_token:k("NULL") { Expression::Null { null_token } }
             interval_expression:interval_expression() { Expression::Interval(interval_expression) }
             cast:cast() { Expression::Cast(cast) }
+            array_agg:array_agg() { Expression::ArrayAgg(array_agg) }
             special_date_function_call:special_date_function_call() { Expression::SpecialDateFunctionCall(special_date_function_call) }
             // Things from here down might start with arbitrary identifiers, so
             // we need to be careful about the order.
@@ -2119,6 +2159,22 @@ peg::parser! {
         rule empty_parens() -> EmptyParens
             = paren1:p("(") paren2:p(")") {
                 EmptyParens { paren1, paren2 }
+            }
+
+        rule array_agg() -> ArrayAggExpression
+            = array_agg_token:ti("ARRAY_AGG") paren1:p("(") distinct:distinct()?
+              expression:expression()
+              order_by:order_by()?
+              paren2:p(")")
+            {
+                ArrayAggExpression {
+                    array_agg_token,
+                    paren1,
+                    distinct,
+                    expression: Box::new(expression),
+                    order_by,
+                    paren2,
+                }
             }
 
         rule special_date_function_call() -> SpecialDateFunctionCall
