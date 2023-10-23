@@ -304,17 +304,16 @@ impl PartialEq for Keyword {
     }
 }
 
-/// A case-insensitive identifier. This is pretty much identical to a keyword,
-/// but it appears in different places in the grammar. These words are only
-/// reserved in specific contexts and they don't normally need to be quoted
-/// when used as column names, etc.
+/// A `PseudoKeyword` is treated specially by the parser (at least in some
+/// contexts), but it is still allowed to be used as an unquoted identifier. Like
+/// a `Keyword`, we treat it as case-insensitive.
 #[derive(Debug, Drive, DriveMut, Clone, Eq, ToTokens)]
-pub struct CaseInsensitiveIdent {
+pub struct PseudoKeyword {
     /// Our identifier.
     pub ident: Ident,
 }
 
-impl CaseInsensitiveIdent {
+impl PseudoKeyword {
     /// Create a new `CaseInsensitiveIdent` with no source location.
     pub fn new(name: &str) -> Self {
         Self {
@@ -323,7 +322,7 @@ impl CaseInsensitiveIdent {
     }
 }
 
-impl PartialEq for CaseInsensitiveIdent {
+impl PartialEq for PseudoKeyword {
     fn eq(&self, other: &Self) -> bool {
         self.ident.name.eq_ignore_ascii_case(&other.ident.name)
     }
@@ -485,30 +484,27 @@ impl TokenStream {
         }
     }
 
-    /// Parse an identifier matching a specific string, ignoring case. This is a
-    /// bit of an edge case, because we parse most identifiers using either
-    /// [`TokenStream::ident`] above (which preserves case) or as
+    /// Parse a [`PseudoKeyword`] matching a specific string, ignoring case.
+    /// This is a bit of an edge case, because we parse most identifiers using
+    /// either [`TokenStream::ident`] above (which preserves case) or as
     /// [`TokenStream::keyword`] (which preserves case but ignores it when
     /// comparing).
     ///
-    /// But there are some tokens which aren't keywords, but which need to be
-    /// case-insensitive. For example, many of the date functions take arguments
-    /// like `DAY`, but they aren't actually keywords. Column type declarations
-    /// are similar.
+    /// But there are some tokens which aren't keywords, but which still appear
+    /// in the grammar as case-insensitive identifier tokens. For example, many
+    /// of the date functions take arguments like `DAY`, but they aren't
+    /// actually keywords. Type names are similar.
     ///
     /// For a list of current case-sensitivity rules, see [the BigQuery
     /// docs][case].
     ///
-    /// [case]: https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#case_sensitivity
-    pub fn ident_eq_ignore_ascii_case(
-        &self,
-        pos: usize,
-        s: &'static str,
-    ) -> RuleResult<CaseInsensitiveIdent> {
+    /// [case]:
+    ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#case_sensitivity
+    pub fn pseudo_keyword(&self, pos: usize, s: &'static str) -> RuleResult<PseudoKeyword> {
         match self.tokens.get(pos) {
             Some(Token::Ident(ident)) if ident.name.eq_ignore_ascii_case(s) => RuleResult::Matched(
                 pos + 1,
-                CaseInsensitiveIdent {
+                PseudoKeyword {
                     ident: ident.clone(),
                 },
             ),

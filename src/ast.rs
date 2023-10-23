@@ -40,8 +40,8 @@ use crate::{
     },
     errors::{Result, SourceError},
     tokenizer::{
-        tokenize_sql, CaseInsensitiveIdent, EmptyFile, Ident, Keyword, Literal, LiteralValue,
-        Punct, RawToken, ToTokens, Token, TokenStream, TokenWriter,
+        tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
+        RawToken, ToTokens, Token, TokenStream, TokenWriter,
     },
     util::{is_c_ident, AnsiIdent, AnsiString},
 };
@@ -208,7 +208,7 @@ impl Emit for Ident {
     }
 }
 
-impl Emit for CaseInsensitiveIdent {
+impl Emit for PseudoKeyword {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         // TODO: Treat these as pseudo-keywords for now. We need to think about
         // how this works across databases.
@@ -822,7 +822,7 @@ pub struct IntervalExpression {
 /// A date part in an `INTERVAL` expression, or in the special date functions.S
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct DatePart {
-    pub date_part_token: CaseInsensitiveIdent,
+    pub date_part_token: PseudoKeyword,
 }
 
 /// A cast expression.
@@ -839,12 +839,8 @@ pub struct Cast {
 /// What type of cast do we want to perform?
 #[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
 pub enum CastType {
-    Cast {
-        cast_token: Keyword,
-    },
-    SafeCast {
-        safe_cast_token: CaseInsensitiveIdent,
-    },
+    Cast { cast_token: Keyword },
+    SafeCast { safe_cast_token: PseudoKeyword },
 }
 
 impl Emit for CastType {
@@ -966,13 +962,13 @@ pub struct ArrayElementType {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub enum CountExpression {
     CountStar {
-        count_token: CaseInsensitiveIdent,
+        count_token: PseudoKeyword,
         paren1: Punct,
         star: Punct,
         paren2: Punct,
     },
     CountExpression {
-        count_token: CaseInsensitiveIdent,
+        count_token: PseudoKeyword,
         paren1: Punct,
         distinct: Option<Distinct>,
         expression: Box<Expression>,
@@ -1000,7 +996,7 @@ pub struct CaseElseClause {
 /// And different databases seem to support one or the other or both.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct CurrentDate {
-    pub current_date_token: CaseInsensitiveIdent,
+    pub current_date_token: PseudoKeyword,
     pub empty_parens: Option<EmptyParens>,
 }
 
@@ -1016,7 +1012,7 @@ pub struct EmptyParens {
 /// not ordinary function calls.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct SpecialDateFunctionCall {
-    pub function_name: CaseInsensitiveIdent,
+    pub function_name: PseudoKeyword,
     pub paren1: Punct,
     pub args: NodeVec<ExpressionOrDatePart>,
     pub paren2: Punct,
@@ -1032,7 +1028,7 @@ pub enum ExpressionOrDatePart {
 /// An `ARRAY_AGG` expression.
 #[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
 pub struct ArrayAggExpression {
-    pub array_agg_token: CaseInsensitiveIdent,
+    pub array_agg_token: PseudoKeyword,
     pub paren1: Punct,
     pub distinct: Option<Distinct>,
     pub expression: Box<Expression>,
@@ -1189,7 +1185,7 @@ pub struct AscDesc {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct NullsClause {
     nulls_token: Keyword,
-    first_last_token: CaseInsensitiveIdent,
+    first_last_token: PseudoKeyword,
 }
 
 /// A `LIMIT` clause.
@@ -1236,24 +1232,24 @@ pub enum WindowFrameStart {
 pub enum WindowFrameEnd {
     CurrentRow {
         current_token: Keyword,
-        row_token: CaseInsensitiveIdent,
+        row_token: PseudoKeyword,
     },
 }
 
 /// Data types.
 #[derive(Clone, Debug, Drive, DriveMut, EmitDefault, ToTokens)]
 pub enum DataType {
-    Bool(CaseInsensitiveIdent),
-    Bytes(CaseInsensitiveIdent),
-    Date(CaseInsensitiveIdent),
-    Datetime(CaseInsensitiveIdent),
-    Float64(CaseInsensitiveIdent),
-    Geography(CaseInsensitiveIdent), // WGS84
-    Int64(CaseInsensitiveIdent),
-    Numeric(CaseInsensitiveIdent),
-    String(CaseInsensitiveIdent),
-    Time(CaseInsensitiveIdent),
-    Timestamp(CaseInsensitiveIdent),
+    Bool(PseudoKeyword),
+    Bytes(PseudoKeyword),
+    Date(PseudoKeyword),
+    Datetime(PseudoKeyword),
+    Float64(PseudoKeyword),
+    Geography(PseudoKeyword), // WGS84
+    Int64(PseudoKeyword),
+    Numeric(PseudoKeyword),
+    String(PseudoKeyword),
+    Time(PseudoKeyword),
+    Timestamp(PseudoKeyword),
     Array {
         array_token: Keyword,
         lt: Punct,
@@ -1382,13 +1378,13 @@ pub struct IndexExpression {
 pub enum IndexOffset {
     Simple(Box<Expression>),
     Offset {
-        offset_token: CaseInsensitiveIdent,
+        offset_token: PseudoKeyword,
         paren1: Punct,
         expression: Box<Expression>,
         paren2: Punct,
     },
     Ordinal {
-        ordinal_token: CaseInsensitiveIdent,
+        ordinal_token: PseudoKeyword,
         paren1: Punct,
         expression: Box<Expression>,
         paren2: Punct,
@@ -1552,7 +1548,7 @@ pub struct Qualify {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct DeleteFromStatement {
     // DDL "keywords" are not actually treated as such by BigQuery.
-    pub delete_token: CaseInsensitiveIdent,
+    pub delete_token: PseudoKeyword,
     pub from_token: Keyword,
     pub table_name: TableName,
     pub alias: Option<Alias>,
@@ -1562,7 +1558,7 @@ pub struct DeleteFromStatement {
 /// A `INSERT INTO` statement. We only support the `SELECT` version.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct InsertIntoStatement {
-    pub insert_token: CaseInsensitiveIdent,
+    pub insert_token: PseudoKeyword,
     pub into_token: Keyword,
     pub table_name: TableName,
     pub inserted_data: InsertedData,
@@ -1575,7 +1571,7 @@ pub enum InsertedData {
     Select { query: QueryExpression },
     /// A `VALUES` clause.
     Values {
-        values_token: CaseInsensitiveIdent,
+        values_token: PseudoKeyword,
         rows: NodeVec<Row>,
     },
 }
@@ -1594,7 +1590,7 @@ pub struct CreateTableStatement {
     pub create_token: Keyword,
     pub or_replace: Option<OrReplace>,
     pub temporary: Option<Temporary>,
-    pub table_token: CaseInsensitiveIdent,
+    pub table_token: PseudoKeyword,
     pub table_name: TableName,
     pub definition: CreateTableDefinition,
 }
@@ -1604,7 +1600,7 @@ pub struct CreateTableStatement {
 pub struct CreateViewStatement {
     pub create_token: Keyword,
     pub or_replace: Option<OrReplace>,
-    pub view_token: CaseInsensitiveIdent,
+    pub view_token: PseudoKeyword,
     pub view_name: TableName,
     pub as_token: Keyword,
     pub query: QueryStatement,
@@ -1614,13 +1610,13 @@ pub struct CreateViewStatement {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct OrReplace {
     pub or_token: Keyword,
-    pub replace_token: CaseInsensitiveIdent,
+    pub replace_token: PseudoKeyword,
 }
 
 /// The `TEMPORARY` modifier.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct Temporary {
-    pub temporary_token: CaseInsensitiveIdent,
+    pub temporary_token: PseudoKeyword,
 }
 
 /// The part of a `CREATE TABLE` statement that defines the columns.
@@ -1649,8 +1645,8 @@ pub struct ColumnDefinition {
 /// A `DROP TABLE` statement.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct DropTableStatement {
-    pub drop_token: CaseInsensitiveIdent,
-    pub table_token: CaseInsensitiveIdent,
+    pub drop_token: PseudoKeyword,
+    pub table_token: PseudoKeyword,
     pub if_exists: Option<IfExists>,
     pub table_name: TableName,
 }
@@ -1658,8 +1654,8 @@ pub struct DropTableStatement {
 /// A `DROP VIEW` statement.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
 pub struct DropViewStatement {
-    pub drop_token: CaseInsensitiveIdent,
-    pub view_token: CaseInsensitiveIdent,
+    pub drop_token: PseudoKeyword,
+    pub view_token: PseudoKeyword,
     pub if_exists: Option<IfExists>,
     pub view_name: TableName,
 }
@@ -1756,7 +1752,7 @@ peg::parser! {
             = query_expression:query_expression() { QueryStatement { query_expression } }
 
         rule insert_into_statement() -> InsertIntoStatement
-            = insert_token:ti("INSERT") into_token:k("INTO") table_name:table_name() inserted_data:inserted_data() {
+            = insert_token:pk("INSERT") into_token:k("INTO") table_name:table_name() inserted_data:inserted_data() {
                 InsertIntoStatement {
                     insert_token,
                     into_token,
@@ -1767,7 +1763,7 @@ peg::parser! {
 
         rule inserted_data() -> InsertedData
             = query:query_expression() { InsertedData::Select { query } }
-            / values_token:ti("VALUES") rows:sep_opt_trailing(<row()>, ",") {
+            / values_token:pk("VALUES") rows:sep_opt_trailing(<row()>, ",") {
                 InsertedData::Values {
                     values_token,
                     rows,
@@ -1784,7 +1780,7 @@ peg::parser! {
             }
 
         rule delete_from_statement() -> DeleteFromStatement
-            = delete_token:ti("DELETE") from_token:k("FROM") table_name:table_name() alias:alias()? where_clause:where_clause()? {
+            = delete_token:pk("DELETE") from_token:k("FROM") table_name:table_name() alias:alias()? where_clause:where_clause()? {
                 DeleteFromStatement {
                     delete_token,
                     from_token,
@@ -2014,7 +2010,7 @@ peg::parser! {
             }
 
         rule date_part() -> DatePart
-            = date_part_token:(ti("YEAR") / ti("QUARTER") / ti("MONTH") / ti("WEEK") / ti("DAY") / ti("HOUR") / ti("MINUTE") / ti("SECOND")) {
+            = date_part_token:(pk("YEAR") / pk("QUARTER") / pk("MONTH") / pk("WEEK") / pk("DAY") / pk("HOUR") / pk("MINUTE") / pk("SECOND")) {
                 DatePart { date_part_token }
             }
 
@@ -2061,7 +2057,7 @@ peg::parser! {
             }
 
         rule index_offset() -> IndexOffset
-            = offset_token:ti("OFFSET") paren1:p("(") expression:expression() paren2:p(")") {
+            = offset_token:pk("OFFSET") paren1:p("(") expression:expression() paren2:p(")") {
                 IndexOffset::Offset {
                     offset_token,
                     paren1,
@@ -2069,7 +2065,7 @@ peg::parser! {
                     paren2,
                 }
             }
-            / ordinal_token:ti("ORDINAL") paren1:p("(") expression:expression() paren2:p(")") {
+            / ordinal_token:pk("ORDINAL") paren1:p("(") expression:expression() paren2:p(")") {
                 IndexOffset::Ordinal {
                     ordinal_token,
                     paren1,
@@ -2130,7 +2126,7 @@ peg::parser! {
             }
 
         rule count_expression() -> CountExpression
-            = count_token:ti("COUNT") paren1:p("(") star:p("*") paren2:p(")") {
+            = count_token:pk("COUNT") paren1:p("(") star:p("*") paren2:p(")") {
                 CountExpression::CountStar {
                     count_token,
                     paren1,
@@ -2138,7 +2134,7 @@ peg::parser! {
                     paren2,
                 }
             }
-            / count_token:ti("COUNT") paren1:p("(") distinct:distinct()? expression:expression() paren2:p(")") {
+            / count_token:pk("COUNT") paren1:p("(") distinct:distinct()? expression:expression() paren2:p(")") {
                 CountExpression::CountExpression {
                     count_token,
                     paren1,
@@ -2149,7 +2145,7 @@ peg::parser! {
             }
 
         rule current_date() -> CurrentDate
-            = current_date_token:ti("CURRENT_DATE") empty_parens:empty_parens()? {
+            = current_date_token:pk("CURRENT_DATE") empty_parens:empty_parens()? {
                 CurrentDate {
                     current_date_token,
                     empty_parens,
@@ -2162,7 +2158,7 @@ peg::parser! {
             }
 
         rule array_agg() -> ArrayAggExpression
-            = array_agg_token:ti("ARRAY_AGG") paren1:p("(") distinct:distinct()?
+            = array_agg_token:pk("ARRAY_AGG") paren1:p("(") distinct:distinct()?
               expression:expression()
               order_by:order_by()?
               paren2:p(")")
@@ -2188,8 +2184,8 @@ peg::parser! {
                 }
             }
 
-        rule special_date_function_name() -> CaseInsensitiveIdent
-            = ti("DATE_DIFF") / ti("DATE_TRUNC") / ti("DATETIME_DIFF") / ti("DATETIME_TRUNC")
+        rule special_date_function_name() -> PseudoKeyword
+            = pk("DATE_DIFF") / pk("DATE_TRUNC") / pk("DATETIME_DIFF") / pk("DATETIME_TRUNC")
 
         rule expression_or_date_part() -> ExpressionOrDatePart
             = date_part:date_part() { ExpressionOrDatePart::DatePart(date_part) }
@@ -2261,7 +2257,7 @@ peg::parser! {
             }
 
         rule nulls_clause() -> NullsClause
-            = nulls_token:k("NULLS") first_last_token:(ti("FIRST") / ti("LAST")) {
+            = nulls_token:k("NULLS") first_last_token:(pk("FIRST") / pk("LAST")) {
                 NullsClause { nulls_token, first_last_token }
             }
 
@@ -2303,7 +2299,7 @@ peg::parser! {
             }
 
         rule window_frame_end() -> WindowFrameEnd
-            = current_token:k("CURRENT") row_token:ti("ROW") {
+            = current_token:k("CURRENT") row_token:pk("ROW") {
                 WindowFrameEnd::CurrentRow {
                     current_token,
                     row_token,
@@ -2323,21 +2319,21 @@ peg::parser! {
             }
 
         rule cast_type() -> CastType
-            = safe_cast_token:ti("SAFE_CAST") { CastType::SafeCast { safe_cast_token } }
+            = safe_cast_token:pk("SAFE_CAST") { CastType::SafeCast { safe_cast_token } }
             / cast_token:k("CAST") { CastType::Cast { cast_token } }
 
         rule data_type() -> DataType
-            = token:(ti("BOOLEAN") / ti("BOOL")) { DataType::Bool(token) }
-            / token:ti("BYTES") { DataType::Bytes(token) }
-            / token:ti("DATETIME") { DataType::Datetime(token) }
-            / token:ti("DATE") { DataType::Date(token) }
-            / token:ti("FLOAT64") { DataType::Float64(token) }
-            / token:ti("GEOGRAPHY") { DataType::Geography(token) }
-            / token:ti("INT64") { DataType::Int64(token) }
-            / token:ti("NUMERIC") { DataType::Numeric(token) }
-            / token:ti("STRING") { DataType::String(token) }
-            / token:ti("TIMESTAMP") { DataType::Timestamp(token) }
-            / token:ti("TIME") { DataType::Time(token) }
+            = token:(pk("BOOLEAN") / pk("BOOL")) { DataType::Bool(token) }
+            / token:pk("BYTES") { DataType::Bytes(token) }
+            / token:pk("DATETIME") { DataType::Datetime(token) }
+            / token:pk("DATE") { DataType::Date(token) }
+            / token:pk("FLOAT64") { DataType::Float64(token) }
+            / token:pk("GEOGRAPHY") { DataType::Geography(token) }
+            / token:pk("INT64") { DataType::Int64(token) }
+            / token:pk("NUMERIC") { DataType::Numeric(token) }
+            / token:pk("STRING") { DataType::String(token) }
+            / token:pk("TIMESTAMP") { DataType::Timestamp(token) }
+            / token:pk("TIME") { DataType::Time(token) }
             / array_token:k("ARRAY") lt:p("<") data_type:data_type() gt:p(">") {
                 DataType::Array {
                     array_token,
@@ -2496,7 +2492,7 @@ peg::parser! {
             = create_token:k("CREATE")
               or_replace:or_replace()?
               temporary:temporary()?
-              table_token:ti("TABLE") table_name:table_name()
+              table_token:pk("TABLE") table_name:table_name()
               definition:create_table_definition()
               e:position!()
             {
@@ -2512,7 +2508,7 @@ peg::parser! {
 
         rule create_view_statement() -> CreateViewStatement
             = create_token:k("CREATE") or_replace:or_replace()?
-              view_token:ti("VIEW") view_name:table_name()
+              view_token:pk("VIEW") view_name:table_name()
               as_token:k("AS") query:query_statement()
             {
                 CreateViewStatement {
@@ -2526,12 +2522,12 @@ peg::parser! {
             }
 
         rule or_replace() -> OrReplace
-            = or_token:k("OR") replace_token:ti("REPLACE") {
+            = or_token:k("OR") replace_token:pk("REPLACE") {
                 OrReplace { or_token, replace_token }
             }
 
         rule temporary() -> Temporary
-            = temporary_token:(ti("TEMPORARY") / ti("TEMP")) {
+            = temporary_token:(pk("TEMPORARY") / pk("TEMP")) {
                 Temporary { temporary_token }
             }
 
@@ -2559,7 +2555,7 @@ peg::parser! {
             }
 
         rule drop_table_statement() -> DropTableStatement
-            = drop_token:ti("DROP") table_token:ti("TABLE") if_exists:if_exists()? table_name:table_name() {
+            = drop_token:pk("DROP") table_token:pk("TABLE") if_exists:if_exists()? table_name:table_name() {
                 DropTableStatement {
                     drop_token,
                     table_token,
@@ -2569,7 +2565,7 @@ peg::parser! {
             }
 
         rule drop_view_statement() -> DropViewStatement
-            = drop_token:ti("DROP") view_token:ti("VIEW") if_exists:if_exists()? view_name:table_name() {
+            = drop_token:pk("DROP") view_token:pk("VIEW") if_exists:if_exists()? view_name:table_name() {
                 DropViewStatement {
                     drop_token,
                     view_token,
@@ -2744,9 +2740,9 @@ peg::parser! {
                 }
             }
 
-        // Match an identifier.
-        rule ti(s: &'static str) -> CaseInsensitiveIdent
-            = ident:##ident_eq_ignore_ascii_case(s) {?
+        // Match a pseudo-.
+        rule pk(s: &'static str) -> PseudoKeyword
+            = ident:##pseudo_keyword(s) {?
                 let upper = ident.ident.token.as_str().to_ascii_uppercase();
                 if KEYWORDS.contains(&upper) {
                     Err("identifier")
