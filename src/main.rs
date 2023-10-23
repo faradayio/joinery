@@ -14,6 +14,7 @@ mod util;
 use cmd::{
     parse::{cmd_parse, ParseOpt},
     sql_test::{cmd_sql_test, SqlTestOpt},
+    transpile::{cmd_transpile, TranspileOpt},
 };
 use tracing::info_span;
 
@@ -23,6 +24,8 @@ enum Opt {
     Parse(ParseOpt),
     /// Run SQL tests from a directory.
     SqlTest(SqlTestOpt),
+    /// Transpile BigQuery SQL to another dialect.
+    Transpile(TranspileOpt),
 }
 
 #[tokio::main]
@@ -35,6 +38,7 @@ async fn main() {
     let result = match opt {
         Opt::Parse(parse_opt) => cmd_parse(&parse_opt),
         Opt::SqlTest(sql_test_opt) => cmd_sql_test(&sql_test_opt).await,
+        Opt::Transpile(transpile_opt) => cmd_transpile(&transpile_opt).await,
     };
     if let Err(e) = result {
         e.emit();
