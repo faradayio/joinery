@@ -1,6 +1,7 @@
 /target
 /environment_variables/
-/example_queries.csv
+/*.csv
+/*.sql
 /trace.html
 *.p8
 *.pub
