@@ -7,7 +7,7 @@ use derive_visitor::{DriveMut, VisitorMut};
 use crate::{
     ast::{self, FunctionName},
     errors::Result,
-    tokenizer::Ident,
+    tokenizer::{Ident, Spanned},
 };
 
 use super::{Transform, TransformExtra};
@@ -57,7 +57,7 @@ impl RenameFunctions {
                 //
                 // TODO: Preserve whitespace and source location.
                 *function_name = FunctionName::Function {
-                    function: Ident::new(snowflake_name),
+                    function: Ident::new(snowflake_name, function.span()),
                 };
             } else if let Some(udf) = self.udf_table.get(&name) {
                 // We'll need a UDF, so add it to our list it if isn't already

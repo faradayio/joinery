@@ -6,12 +6,14 @@ use proc_macro2::TokenStream as TokenStream2;
 
 use crate::{
     emit::{impl_emit_default_macro, impl_emit_macro},
+    spanned::impl_spanned_macro,
     sql_quote::impl_sql_quote,
     to_tokens::impl_to_tokens_macro,
 };
 
 mod emit;
 mod field_info;
+mod spanned;
 mod sql_quote;
 mod to_tokens;
 
@@ -38,6 +40,13 @@ pub fn emit_macro_derive(input: TokenStream) -> TokenStream {
 pub fn emit_default_macro_derive(input: TokenStream) -> TokenStream {
     let ast = syn::parse(input).unwrap();
     impl_emit_default_macro(&ast).into()
+}
+
+/// Implement `Spanned` for a struct or enum.
+#[proc_macro_derive(Spanned)]
+pub fn spanned_macro_derive(input: TokenStream) -> TokenStream {
+    let ast = syn::parse(input).unwrap();
+    impl_spanned_macro(&ast).into()
 }
 
 /// Use `#[sql_quote]` to write SQL queries inline in Rust code, with Rust

@@ -41,6 +41,7 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 cli_test_dir = "0.1.5"
+pretty_assertions = "1.4.0"
 
 [workspace]
 members = ["joinery_macros"]

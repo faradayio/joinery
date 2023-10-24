@@ -29,7 +29,6 @@ use std::{
     fmt::{self},
     io::{self, Write as _},
     ops::Range,
-    path::Path,
     str::from_utf8,
 };
 
@@ -45,41 +44,128 @@ use tracing::{error, trace};
 use crate::{
     ast,
     drivers::bigquery::BigQueryString,
-    errors::{Result, SourceError},
+    errors::{Context, Result, SourceError},
 };
 
-/// A source location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Loc {
-    /// The file ID used to identify this file. The actual source lives in
-    /// a `codespan_reporting` data structure.
-    pub file_id: usize,
+/// A source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Span {
+    /// A location in a file.
+    File {
+        /// The file ID used to identify this file. The actual source lives in
+        /// a `codespan_reporting` data structure.
+        file_id: usize,
 
-    /// The byte offset of this location.
-    pub offset: usize,
+        /// The byte range for this span.
+        span: Range<usize>,
+    },
+
+    /// A mysterious location, not in a parsed file. Might be the result of
+    /// generating AST nodes from Rust code, though in that case it's still
+    /// better to generate a `Span::File` if possible.
+    Unknown,
 }
 
-// We implement `PartialOrd`, because positions in the same file are comparable.
-// But we don't implement `Ord`, because positions in different files are not
-// comparable.
-impl PartialOrd for Loc {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        if self.file_id == other.file_id {
-            Some(self.offset.cmp(&other.offset))
-        } else {
-            None
+impl Span {
+    /// Get information about this span for use in a
+    /// [`codespan_reporting::diagnostic::Diagnostic`].
+    pub fn for_diagnostic(&self) -> Option<(usize, Range<usize>)> {
+        match self {
+            // I think we want to return a non-empty range for a `Diagnostic`?
+            Span::File { file_id, span } if span.start == span.end => {
+                Some((*file_id, span.start..span.start + 1))
+            }
+            Span::File { file_id, span } => Some((*file_id, span.clone())),
+            Span::Unknown => None,
+        }
+    }
+
+    /// Combine two spans.
+    pub fn combined_with(&self, other: &Self) -> Self {
+        match (self, other) {
+            // Two spans from the same file, so just build a range which
+            // includes both.
+            (
+                Span::File { file_id, span },
+                Span::File {
+                    file_id: other_file_id,
+                    span: other_span,
+                },
+            ) if file_id == other_file_id => Span::File {
+                file_id: *file_id,
+                // We don't know the original order of the spans, or whether they
+                // overlap, because a lot of AST rewriting may have occurred. So
+                // we just take the min and max.
+                span: span.start.min(other_span.start)..span.end.max(other_span.end),
+            },
+            // Two spans from different files, so just return the first one.
+            (preferred @ Span::File { .. }, Span::File { .. }) => preferred.clone(),
+            // Otherwise, return the first non-`Unknown` span.
+            (preferred @ Span::File { .. }, Span::Unknown)
+            | (Span::Unknown, preferred @ Span::File { .. }) => preferred.clone(),
+            // Or if all else fails, return `Unknown`.
+            (Span::Unknown, Span::Unknown) => Span::Unknown,
         }
     }
 }
 
-impl fmt::Display for Loc {
+impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "file_id={} offset={}", self.file_id, self.offset)
+        match self {
+            Span::File { file_id, span } => {
+                write!(f, "file_id={}, span={}..{}", file_id, span.start, span.end)
+            }
+            Span::Unknown => write!(f, "<unknown>"),
+        }
     }
 }
 
-/// A span of source code.
-pub type Span = Range<Loc>;
+/// An AST node with a source location.
+pub trait Spanned: ToTokens {
+    /// Get the source location for this node.
+    fn span(&self) -> Span {
+        // Fallback implementation for `Spanned` for any type which implements
+        // `ToTokens`. This isn't super efficient, because it extracts all the
+        // tokens, but it's fully general. We could do slightly better by
+        // providing `#[derive(Spanned)]`, but that would need to handle
+        // `Option` and `Vec` carefully, and it would still wind up traversing
+        // major parts of the AST.
+        let mut tokens = vec![];
+        self.to_tokens(&mut tokens);
+        tokens
+            .iter()
+            .map(|t| t.span())
+            .fold(Span::Unknown, |a, b| a.combined_with(&b))
+    }
+}
+
+impl<T: Spanned> Spanned for Option<T> {
+    fn span(&self) -> Span {
+        match self {
+            Some(t) => t.span(),
+            None => Span::Unknown,
+        }
+    }
+}
+
+impl<T: Spanned> Spanned for Vec<T> {
+    fn span(&self) -> Span {
+        self.iter()
+            .fold(Span::Unknown, |a, b| a.combined_with(&b.span()))
+    }
+}
+
+impl<T: Spanned> Spanned for &T {
+    fn span(&self) -> Span {
+        (*self).span()
+    }
+}
+
+impl<T: Spanned> Spanned for Box<T> {
+    fn span(&self) -> Span {
+        self.as_ref().span()
+    }
+}
 
 /// A token.
 #[derive(Clone, Drive, DriveMut, PartialEq)]
@@ -99,13 +185,13 @@ pub enum Token {
 
 impl Token {
     /// Construct a new identifier token.
-    pub fn ident(ident: &str) -> Self {
-        Self::Ident(Ident::new(ident))
+    pub fn ident(ident: &str, span: Span) -> Self {
+        Self::Ident(Ident::new(ident, span))
     }
 
     /// Construct a new punctuation token.
-    pub fn punct(punct: &str) -> Self {
-        Self::Punct(Punct::new(punct))
+    pub fn punct(punct: &str, span: Span) -> Self {
+        Self::Punct(Punct::new(punct, span))
     }
 
     /// Get the raw token for this token.
@@ -125,6 +211,17 @@ impl Token {
             Token::Ident(ident) => &mut ident.token,
             Token::Literal(literal) => &mut literal.token,
             Token::Punct(punct) => &mut punct.token,
+        }
+    }
+}
+
+impl Spanned for Token {
+    fn span(&self) -> Span {
+        match self {
+            Token::EmptyFile(empty_file) => empty_file.span(),
+            Token::Ident(ident) => ident.span(),
+            Token::Literal(literal) => literal.span(),
+            Token::Punct(punct) => punct.span(),
         }
     }
 }
@@ -159,20 +256,20 @@ pub struct RawToken {
     #[drive(skip)]
     token_range: Range<usize>,
 
-    /// The span from which we parsed this token. May not exist if we generated
-    /// this token internally. The span refers to the original location, because
-    /// the token may have been modified.
+    /// The span from which we parsed this token. The span refers to the
+    /// original source location, because the token may have been modified after
+    /// parsing.
     #[drive(skip)]
-    source_span: Option<Span>,
+    source_span: Span,
 }
 
 impl RawToken {
     /// Create a new token.
-    pub fn new(s: &str) -> Self {
+    pub fn new(s: &str, span: Span) -> Self {
         Self {
             raw: s.to_string(),
             token_range: 0..s.len(),
-            source_span: None,
+            source_span: span,
         }
     }
 
@@ -253,6 +350,18 @@ pub struct EmptyFile {
     pub token: RawToken,
 }
 
+impl ToTokens for EmptyFile {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        tokens.push(Token::EmptyFile(self.clone()));
+    }
+}
+
+impl Spanned for EmptyFile {
+    fn span(&self) -> Span {
+        self.token.source_span.clone()
+    }
+}
+
 /// An identifier token
 #[derive(Clone, Debug, Drive, DriveMut, Eq)]
 pub struct Ident {
@@ -266,11 +375,17 @@ pub struct Ident {
 
 impl Ident {
     /// Create a new `Ident` with no source location.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, span: Span) -> Self {
         Self {
-            token: RawToken::new(name),
+            token: RawToken::new(name, span),
             name: name.to_owned(),
         }
+    }
+}
+
+impl Spanned for Ident {
+    fn span(&self) -> Span {
+        self.token.source_span.clone()
     }
 }
 
@@ -291,10 +406,16 @@ pub struct Keyword {
 
 impl Keyword {
     /// Create a new `Keyword` with no source location.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, span: Span) -> Self {
         Self {
-            ident: Ident::new(name),
+            ident: Ident::new(name, span),
         }
+    }
+}
+
+impl Spanned for Keyword {
+    fn span(&self) -> Span {
+        self.ident.span()
     }
 }
 
@@ -315,10 +436,16 @@ pub struct PseudoKeyword {
 
 impl PseudoKeyword {
     /// Create a new `CaseInsensitiveIdent` with no source location.
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, span: Span) -> Self {
         Self {
-            ident: Ident::new(name),
+            ident: Ident::new(name, span),
         }
+    }
+}
+
+impl Spanned for PseudoKeyword {
+    fn span(&self) -> Span {
+        self.ident.span()
     }
 }
 
@@ -341,27 +468,33 @@ pub struct Literal {
 
 impl Literal {
     /// Construct a literal containing an integer.
-    pub fn int(i: i64) -> Self {
+    pub fn int(i: i64, span: Span) -> Self {
         Self {
-            token: RawToken::new(&i.to_string()),
+            token: RawToken::new(&i.to_string(), span),
             value: LiteralValue::Int64(i),
         }
     }
 
     /// Construct a literal containing a floating-point number.
-    pub fn float(d: f64) -> Self {
+    pub fn float(d: f64, span: Span) -> Self {
         Self {
-            token: RawToken::new(&d.to_string()),
+            token: RawToken::new(&d.to_string(), span),
             value: LiteralValue::Float64(d),
         }
     }
 
     /// Construct a literal containing a string.
-    pub fn string(s: &str) -> Self {
+    pub fn string(s: &str, span: Span) -> Self {
         Self {
-            token: RawToken::new(&BigQueryString(s).to_string()),
+            token: RawToken::new(&BigQueryString(s).to_string(), span),
             value: LiteralValue::String(s.to_owned()),
         }
+    }
+}
+
+impl Spanned for Literal {
+    fn span(&self) -> Span {
+        self.token.source_span.clone()
     }
 }
 
@@ -400,24 +533,34 @@ pub struct Punct {
 
 impl Punct {
     /// Create a new `Punct` with no source location.
-    pub fn new(s: &str) -> Self {
+    pub fn new(s: &str, span: Span) -> Self {
         Self {
-            token: RawToken::new(s),
+            token: RawToken::new(s, span),
         }
     }
 }
 
+impl Spanned for Punct {
+    fn span(&self) -> Span {
+        self.token.source_span.clone()
+    }
+}
+
 /// A token stream.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct TokenStream {
+    /// A span including the entire token stream.
+    span: Span,
+
     /// The tokens.
     tokens: Vec<Token>,
 }
 
 impl TokenStream {
     /// Create from tokens.
-    pub fn from_tokens<Tokens: Into<Vec<Token>>>(tokens: Tokens) -> Self {
+    pub fn from_tokens<Tokens: Into<Vec<Token>>>(tokens: Tokens, span: Span) -> Self {
         Self {
+            span,
             tokens: tokens.into(),
         }
     }
@@ -426,7 +569,7 @@ impl TokenStream {
     /// to re-parse the token stream created by [`sql_quote!`].
     fn try_into_parsed<T, R>(self, grammar_rule: R) -> Result<T>
     where
-        R: FnOnce(&TokenStream) -> Result<T, ParseError<Loc>>,
+        R: FnOnce(&TokenStream) -> Result<T, ParseError<Span>>,
     {
         trace!(token_stream = ?self.tokens, "re-parsing token stream from `sql_quote!`");
         match grammar_rule(&self) {
@@ -536,8 +679,14 @@ impl TokenStream {
     }
 }
 
+impl PartialEq for TokenStream {
+    fn eq(&self, other: &Self) -> bool {
+        self.tokens == other.tokens
+    }
+}
+
 impl Parse for TokenStream {
-    type PositionRepr = Loc;
+    type PositionRepr = Span;
 
     fn start(&self) -> usize {
         0
@@ -549,30 +698,25 @@ impl Parse for TokenStream {
 
     fn position_repr(&self, pos: usize) -> Self::PositionRepr {
         if pos < self.tokens.len() {
-            self.tokens[pos]
-                .raw()
-                .source_span
-                .as_ref()
-                .expect("tokens from tokenizer should always have a source location")
-                .start
+            // We have a token at this position, so use its source location.
+            self.tokens[pos].raw().source_span.clone()
         } else if pos > 0 {
-            self.tokens[pos - 1]
-                .raw()
-                .source_span
-                .as_ref()
-                .expect("tokens from tokenizer should always have a source location")
-                .end
+            // We're one past the end of the token stream, so use the end of the
+            // last token.
+            let last = self.tokens[pos - 1].raw().source_span.clone();
+            match last {
+                Span::File { file_id, span } => Span::File {
+                    file_id,
+                    span: span.end..span.end,
+                },
+                Span::Unknown => Span::Unknown,
+            }
         } else {
             // We have absolutely no tokens, and we're being asked for the
-            // position of the first token. So make something up and hope it
-            // doesn't break `codespan_reporting`.
-            //
-            // This shouldn't happen, anyway, because we should always return
-            // a single `EmptyFile` token for an empty file.
-            Loc {
-                file_id: 0,
-                offset: 0,
-            }
+            // position of the first token. So use the span of the entire
+            // stream. This might be caused by an `sql_quote!` invocation with
+            // no tokens.
+            self.span.clone()
         }
     }
 }
@@ -598,12 +742,6 @@ impl<'input> ParseElem<'input> for TokenStream {
 pub trait ToTokens {
     /// Convert `self` into tokens, and append them to `tokens`.
     fn to_tokens(&self, tokens: &mut Vec<Token>);
-}
-
-impl ToTokens for i64 {
-    fn to_tokens(&self, tokens: &mut Vec<Token>) {
-        tokens.push(Token::Literal(Literal::int(*self)));
-    }
 }
 
 impl ToTokens for Token {
@@ -817,11 +955,21 @@ fn never_merges(c: char) -> bool {
 }
 
 /// Convert `sql` into a series of tokens.
-pub fn tokenize_sql(filename: &Path, sql: &str) -> Result<TokenStream> {
-    let mut files = SimpleFiles::new();
-    let file_id = files.add(filename.to_string_lossy().into_owned(), sql.to_string());
+pub fn tokenize_sql(files: &SimpleFiles<String, String>, file_id: usize) -> Result<TokenStream> {
+    let sql = files
+        .get(file_id)
+        .with_context(|| "cannot find file by ID")?
+        .source()
+        .as_str();
+    let stream_span = Span::File {
+        file_id,
+        span: 0..sql.len(),
+    };
     match lexer::tokens(sql, file_id) {
-        Ok(tokens) => Ok(TokenStream { tokens }),
+        Ok(tokens) => Ok(TokenStream {
+            span: stream_span,
+            tokens,
+        }),
         Err(err) => {
             let diagnostic = Diagnostic::error()
                 .with_message("Failed to tokenize query")
@@ -832,7 +980,7 @@ pub fn tokenize_sql(filename: &Path, sql: &str) -> Result<TokenStream> {
                 .with_message(format!("expected {}", err.expected))]);
             Err(SourceError {
                 expected: err.to_string(),
-                files,
+                files: files.to_owned(),
                 diagnostic,
             }
             .into())
@@ -864,7 +1012,7 @@ peg::parser! {
                 RawToken {
                     raw: ws.to_string(),
                     token_range: 0..0,
-                    source_span: Some(Loc { file_id, offset: s }..Loc { file_id, offset: e }),
+                    source_span: Span::File { file_id, span: s..e },
                 }
             }
 
@@ -982,7 +1130,7 @@ peg::parser! {
                 (parsed, RawToken {
                     raw: format!("{}{}", slice, ws),
                     token_range: 0..slice.len(),
-                    source_span: Some(Loc { file_id, offset: s }..Loc { file_id, offset: e }),
+                    source_span: Span::File { file_id, span: s..e },
                 })
             }
 
@@ -1012,6 +1160,7 @@ peg::parser! {
 #[cfg(test)]
 mod test {
     use joinery_macros::sql_quote;
+    use pretty_assertions::assert_eq;
 
     use super::*;
 
@@ -1036,7 +1185,9 @@ mod test {
             let sql = std::fs::read_to_string(&path).expect("failed to read SQL test file");
 
             // Tokenize it.
-            let tokens = match tokenize_sql(&path, &sql) {
+            let mut files = SimpleFiles::new();
+            let file_id = files.add(path.to_string_lossy().into_owned(), sql.clone());
+            let tokens = match tokenize_sql(&files, file_id) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     err.emit();
@@ -1064,7 +1215,9 @@ mod test {
                     .expect("failed to write token");
             }
             let stripped_sql = from_utf8(&buf).unwrap();
-            let stripped_tokens = match tokenize_sql(&path, stripped_sql) {
+            let stripped_file_id =
+                files.add(path.to_string_lossy().into_owned(), stripped_sql.to_owned());
+            let stripped_tokens = match tokenize_sql(&files, stripped_file_id) {
                 Ok(tokens) => tokens,
                 Err(err) => {
                     err.emit();
@@ -1125,14 +1278,16 @@ mod test {
     #[test]
     fn toy_parser_operates_on_token_stream() {
         let sql = "select * from t";
-        let tokens = tokenize_sql(Path::new("test.sql"), sql).unwrap();
+        let mut files = SimpleFiles::new();
+        let file_id = files.add("test.sql".to_owned(), sql.to_owned());
+        let tokens = tokenize_sql(&files, file_id).unwrap();
         println!("==== PARSING ====\n{:?}\n====", tokens);
         let parsed = test_parser::query(&tokens).unwrap();
         let expected = Query {
-            select_token: Keyword::new("SELECT"),
-            item: SelectItem::All(Punct::new("*")),
-            from_token: Keyword::new("FROM"),
-            table: Ident::new("t"),
+            select_token: Keyword::new("SELECT", Span::Unknown),
+            item: SelectItem::All(Punct::new("*", Span::Unknown)),
+            from_token: Keyword::new("FROM", Span::Unknown),
+            table: Ident::new("t", Span::Unknown),
         };
         assert_eq!(parsed, expected);
     }

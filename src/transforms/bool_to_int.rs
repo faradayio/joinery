@@ -1,9 +1,9 @@
 use derive_visitor::{DriveMut, VisitorMut};
-use joinery_macros::sql_quote;
 
 use crate::{
     ast::{self, Expression},
     errors::Result,
+    tokenizer::{Literal, Spanned},
 };
 
 use super::{Transform, TransformExtra};
@@ -23,9 +23,7 @@ impl BoolToInt {
                 "FALSE" => 0,
                 _ => unreachable!("the parser only allows TRUE or FALSE"),
             };
-            *expr = sql_quote! { #int_val }
-                .try_into_expression()
-                .expect("generated SQL should always parse");
+            *expr = Expression::Literal(Literal::int(int_val, keyword.span()))
         }
     }
 }

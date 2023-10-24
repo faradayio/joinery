@@ -10,16 +10,21 @@ use proc_macro2::{Delimiter, TokenStream as TokenStream2, TokenTree};
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 
+// TODO: Make `sql_quote` take a leading span argument, like `quote_spanned`:
+//
+// ```
+// sql_quote!(table.span() => SELECT * FROM #table WHERE id = #id);
+// ```
 pub(crate) fn impl_sql_quote(input: TokenStream2) -> TokenStream2 {
     let mut sql_token_exprs = vec![];
     emit_sql_token_exprs(&mut sql_token_exprs, input.into_iter());
     let capacity = sql_token_exprs.len();
     quote! {
         {
-            use crate::tokenizer::{Literal, Token, TokenStream, ToTokens as _};
+            use crate::tokenizer::{Literal, Span, Token, TokenStream, ToTokens as _};
             let mut __tokens = Vec::with_capacity(#capacity);
             #( #sql_token_exprs; )*
-            TokenStream::from_tokens(__tokens)
+            TokenStream::from_tokens(__tokens, Span::Unknown)
         }
     }
 }
@@ -47,26 +52,26 @@ fn emit_sql_token_exprs(
                 let (open, close) = delimiter_pair(group.delimiter());
                 if let Some(open) = open {
                     sql_token_exprs.push(quote_spanned! { open.span() =>
-                        __tokens.push(Token::punct(#open))
+                        __tokens.push(Token::punct(#open, Span::Unknown))
                     });
                 }
                 emit_sql_token_exprs(sql_token_exprs, group.stream().into_iter());
                 if let Some(close) = close {
                     sql_token_exprs.push(quote_spanned! { close.span() =>
-                        __tokens.push(Token::punct(#close))
+                        __tokens.push(Token::punct(#close, Span::Unknown))
                     });
                 }
             }
             TokenTree::Ident(ident) => {
                 let ident_str = ident.to_string();
                 sql_token_exprs.push(quote_spanned! { ident_str.span() =>
-                    __tokens.push(Token::ident(#ident_str))
+                    __tokens.push(Token::ident(#ident_str, Span::Unknown))
                 });
             }
             TokenTree::Punct(punct) => {
                 let punct_str = punct.to_string();
                 sql_token_exprs.push(quote_spanned! { punct_str.span() =>
-                __tokens.push(Token::punct(#punct_str)) });
+                __tokens.push(Token::punct(#punct_str, Span::Unknown)) });
             }
             TokenTree::Literal(lit) => {
                 // There's probably a better way to do this.
@@ -74,17 +79,17 @@ fn emit_sql_token_exprs(
                 match lit {
                     syn::Lit::Int(i) => {
                         sql_token_exprs.push(quote_spanned! { i.span() =>
-                            __tokens.push(Token::Literal(Literal::int(#i)))
+                            __tokens.push(Token::Literal(Literal::int(#i, Span::Unknown)))
                         });
                     }
                     syn::Lit::Str(s) => {
                         sql_token_exprs.push(quote_spanned! { s.span() =>
-                            __tokens.push(Token::Literal(Literal::string(#s)))
+                            __tokens.push(Token::Literal(Literal::string(#s, Span::Unknown)))
                         });
                     }
                     syn::Lit::Float(f) => {
                         sql_token_exprs.push(quote_spanned! { f.span() =>
-                            __tokens.push(Token::Literal(Literal::float(#f)))
+                            __tokens.push(Token::Literal(Literal::float(#f, Span::Unknown)))
                         });
                     }
                     // syn::Lit::ByteStr(_) => todo!(),
