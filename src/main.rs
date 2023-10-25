@@ -7,8 +7,10 @@ mod ast;
 mod cmd;
 mod drivers;
 mod errors;
+mod scope;
 mod tokenizer;
 mod transforms;
+mod types;
 mod util;
 
 use cmd::{

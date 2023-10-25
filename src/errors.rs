@@ -132,7 +132,7 @@ impl error::Error for Error {
 /// Format an error message.
 macro_rules! format_err {
     ($($arg:tt)*) => {
-        Error::Other(format!($($arg)*).into())
+        $crate::errors::Error::Other(format!($($arg)*).into())
     };
 }
 
