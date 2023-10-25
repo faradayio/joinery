@@ -6,10 +6,11 @@
 use std::sync::Arc;
 
 use crate::{
-    ast,
-    errors::Result,
-    scope::{Scope, ScopeHandle},
-    types::{ColumnType, TableType, Type, TypeVar, ValueType},
+    ast::{self, SelectList},
+    errors::{format_err, Result},
+    scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
+    tokenizer::{Literal, LiteralValue},
+    types::{ArgumentType, ColumnType, SimpleType, TableType, Type, TypeVar, ValueType},
 };
 
 // TODO: Remember this rather scary example. Verify BigQuery supports it
@@ -36,11 +37,18 @@ use crate::{
 pub trait InferTypes {
     /// Infer types for this value. Returns the scope after inference in case
     /// the caller needs to use it for a later sibling node.
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle>;
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)>;
 }
 
 impl InferTypes for ast::SqlProgram {
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle> {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
+        let mut ty = None;
         let mut scope = scope.clone();
 
         // Example:
@@ -57,19 +65,22 @@ impl InferTypes for ast::SqlProgram {
         //   - Remove `foo` from the scope.
 
         for statement in self.statements.node_iter_mut() {
-            scope = statement.infer_types(&scope)?;
+            (ty, scope) = statement.infer_types(&scope)?;
         }
 
-        Ok(scope)
+        Ok((ty, scope))
     }
 }
 
 impl InferTypes for ast::Statement {
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle> {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
         match self {
             // TODO: This can't bind anything into our scope, but we should
             // check types anyway.
-            ast::Statement::Query(_) => Ok(scope.clone()),
+            ast::Statement::Query(_) => Ok((None, scope.clone())),
             ast::Statement::DeleteFrom(_) => todo!(),
             ast::Statement::InsertInto(_) => todo!(),
             ast::Statement::CreateTable(stmt) => stmt.infer_types(scope),
@@ -80,12 +91,25 @@ impl InferTypes for ast::Statement {
     }
 }
 
+/// Convert a table name to an identifier.
+fn ident_from_table_name(table_name: &ast::TableName) -> Result<CaseInsensitiveIdent> {
+    match table_name {
+        ast::TableName::Table { table, .. } => Ok(table.clone().into()),
+        _ => Err(format_err!(
+            "type inference doesn't yet support dotted name: {:?}",
+            table_name
+        )),
+    }
+}
+
 impl InferTypes for ast::CreateTableStatement {
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle> {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
         match self {
             ast::CreateTableStatement {
-                // TODO: Allow dotted names in scopes.
-                table_name: ast::TableName::Table { table, .. },
+                table_name,
                 definition: ast::CreateTableDefinition::Columns { columns, .. },
                 ..
             } => {
@@ -103,49 +127,74 @@ impl InferTypes for ast::CreateTableStatement {
                     })
                     .collect::<Result<Vec<_>>>()?;
                 scope.add(
-                    table.clone().into(),
+                    ident_from_table_name(table_name)?,
                     Arc::new(Type::Table(TableType {
                         columns: column_decls,
                     })),
                 )?;
-                Ok(scope.into_handle())
+                Ok((None, scope.into_handle()))
             }
-            _ => Ok(scope.clone()),
+            ast::CreateTableStatement {
+                table_name,
+                definition:
+                    ast::CreateTableDefinition::As {
+                        query_statement, ..
+                    },
+                ..
+            } => {
+                let (ty, _scope) = query_statement.infer_types(scope)?;
+                let mut scope = Scope::new(scope);
+                scope.add(ident_from_table_name(table_name)?, ty.unwrap())?;
+                Ok((None, scope.into_handle()))
+            }
         }
     }
 }
 
 impl InferTypes for ast::DropTableStatement {
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle> {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
+        let ast::DropTableStatement { table_name, .. } = self;
+        let mut scope = Scope::new(scope);
+        let table = ident_from_table_name(table_name)?;
+        scope.hide(&table)?;
+        Ok((None, scope.into_handle()))
+    }
+}
+
+impl InferTypes for ast::QueryStatement {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
+        let ast::QueryStatement { query_expression } = self;
+        query_expression.infer_types(scope)
+    }
+}
+
+impl InferTypes for ast::QueryExpression {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
         match self {
-            ast::DropTableStatement {
-                // TODO: Allow dotted names in scopes.
-                table_name: ast::TableName::Table { table, .. },
-                ..
-            } => {
-                let mut scope = Scope::new(scope);
-                scope.hide(&table.clone().into())?;
-                Ok(scope.into_handle())
-            }
-            _ => Ok(scope.clone()),
+            ast::QueryExpression::SelectExpression(expr) => expr.infer_types(scope),
+            ast::QueryExpression::Nested { query, .. } => query.infer_types(scope),
+            ast::QueryExpression::With {
+                ctes: _, query: _, ..
+            } => todo!(),
+            ast::QueryExpression::SetOperation { .. } => todo!(),
         }
     }
 }
 
 impl InferTypes for ast::SelectExpression {
-    fn infer_types(&mut self, _scope: &ScopeHandle) -> Result<ScopeHandle> {
-        // let SelectExpression {
-        //     select_options,
-        //     select_list,
-        //     from_clause,
-        //     where_clause,
-        //     group_by,
-        //     having,
-        //     qualify,
-        //     order_by,
-        //     limit,
-        // } = self;
-
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
         // In order of type inference:
         //
         // - FROM clause (including JOIN). Introduces both tables and columns.
@@ -161,7 +210,90 @@ impl InferTypes for ast::SelectExpression {
         // - ORDER BY. Only uses types.
         // - LIMIT. Only uses types.
 
-        unimplemented!("infer_types")
+        let ast::SelectExpression {
+            //select_options,
+            select_list: SelectList {
+                items: select_list, ..
+            },
+            //from_clause,
+            //where_clause,
+            //group_by,
+            //having,
+            //qualify,
+            //order_by,
+            //limit,
+            ..
+        } = self;
+
+        let mut cols = vec![];
+        for item in select_list.node_iter_mut() {
+            match item {
+                ast::SelectListItem::Expression {
+                    expression,
+                    alias: Some(ast::Alias { ident, .. }),
+                } => {
+                    // BigQuery does not allow select list items to see names
+                    // bound by other select list items.
+                    let (ty, _scope) = expression.infer_types(scope)?;
+                    // TODO: Something has gone seriously wrong with the
+                    // `InferType` API and the choice to wrap namespace entries
+                    // in `Arc` here. This is ugly and we'll be doing it often.
+                    let Type::Argument(ArgumentType::Value(ty)) = ty
+                        .expect("expression should have a type")
+                        .as_ref()
+                        .to_owned()
+                    else {
+                        panic!("expression should have a value type");
+                    };
+                    cols.push(ColumnType {
+                        name: ident.clone(),
+                        ty,
+                        not_null: false,
+                    });
+                }
+                _ => todo!(),
+            }
+        }
+        let table_type = Arc::new(Type::Table(TableType { columns: cols }));
+        Ok((Some(table_type), scope.clone()))
+    }
+}
+
+impl InferTypes for ast::Expression {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
+        match self {
+            ast::Expression::BoolValue(_) => Ok((
+                // TODO: This could be shorter.
+                Some(Arc::new(Type::Argument(crate::types::ArgumentType::Value(
+                    ValueType::Simple(crate::types::SimpleType::Bool),
+                )))),
+                scope.clone(),
+            )),
+            ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
+            _ => todo!(),
+        }
+    }
+}
+
+impl InferTypes for LiteralValue {
+    fn infer_types(
+        &mut self,
+        scope: &ScopeHandle,
+    ) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
+        let simple_ty = match self {
+            LiteralValue::Int64(_) => SimpleType::Int64,
+            LiteralValue::Float64(_) => SimpleType::Float64,
+            LiteralValue::String(_) => SimpleType::String,
+        };
+        Ok((
+            Some(Arc::new(Type::Argument(crate::types::ArgumentType::Value(
+                ValueType::Simple(simple_ty),
+            )))),
+            scope.clone(),
+        ))
     }
 }
 
@@ -180,7 +312,7 @@ mod tests {
 
     use super::*;
 
-    fn infer(sql: &str) -> Result<ScopeHandle> {
+    fn infer(sql: &str) -> Result<(Option<Arc<Type<TypeVar>>>, ScopeHandle)> {
         let mut program = match parse_sql(Path::new("test.sql"), sql) {
             Ok(program) => program,
             Err(e) => {
@@ -210,7 +342,7 @@ mod tests {
 
     #[test]
     fn root_scope_defines_functions() {
-        let scope = infer("SELECT 1").unwrap();
+        let (_, scope) = infer("SELECT 1").unwrap();
         assert_defines!(scope, "LOWER", "Fn(STRING) -> STRING");
         assert_defines!(scope, "lower", "Fn(STRING) -> STRING");
         assert_not_defines!(scope, "NO_SUCH_FUNCTION");
@@ -218,13 +350,19 @@ mod tests {
 
     #[test]
     fn create_table_adds_table_to_scope() {
-        let scope = infer("CREATE TABLE foo (x INT64, y STRING)").unwrap();
+        let (_, scope) = infer("CREATE TABLE foo (x INT64, y STRING)").unwrap();
         assert_defines!(scope, "foo", "TABLE<x INT64, y STRING>");
     }
 
     #[test]
     fn drop_table_removes_table_from_scope() {
-        let scope = infer("CREATE TABLE foo (x INT64, y STRING); DROP TABLE foo").unwrap();
+        let (_, scope) = infer("CREATE TABLE foo (x INT64, y STRING); DROP TABLE foo").unwrap();
         assert_not_defines!(scope, "foo");
+    }
+
+    #[test]
+    fn create_table_as_infers_column_types() {
+        let (_, scope) = infer("CREATE TABLE foo AS SELECT 'a' AS x, TRUE AS y").unwrap();
+        assert_defines!(scope, "foo", "TABLE<x STRING, y BOOL>");
     }
 }
