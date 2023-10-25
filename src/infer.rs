@@ -67,12 +67,14 @@ impl InferTypes for ast::SqlProgram {
 impl InferTypes for ast::Statement {
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle> {
         match self {
-            ast::Statement::Query(_) => todo!(),
+            // TODO: This can't bind anything into our scope, but we should
+            // check types anyway.
+            ast::Statement::Query(_) => Ok(scope.clone()),
             ast::Statement::DeleteFrom(_) => todo!(),
             ast::Statement::InsertInto(_) => todo!(),
             ast::Statement::CreateTable(stmt) => stmt.infer_types(scope),
             ast::Statement::CreateView(_) => todo!(),
-            ast::Statement::DropTable(_) => todo!(),
+            ast::Statement::DropTable(stmt) => stmt.infer_types(scope),
             ast::Statement::DropView(_) => todo!(),
         }
     }
@@ -106,6 +108,23 @@ impl InferTypes for ast::CreateTableStatement {
                         columns: column_decls,
                     })),
                 )?;
+                Ok(scope.into_handle())
+            }
+            _ => Ok(scope.clone()),
+        }
+    }
+}
+
+impl InferTypes for ast::DropTableStatement {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<ScopeHandle> {
+        match self {
+            ast::DropTableStatement {
+                // TODO: Allow dotted names in scopes.
+                table_name: ast::TableName::Table { table, .. },
+                ..
+            } => {
+                let mut scope = Scope::new(scope);
+                scope.hide(&table.clone().into())?;
                 Ok(scope.into_handle())
             }
             _ => Ok(scope.clone()),
@@ -201,5 +220,11 @@ mod tests {
     fn create_table_adds_table_to_scope() {
         let scope = infer("CREATE TABLE foo (x INT64, y STRING)").unwrap();
         assert_defines!(scope, "foo", "TABLE<x INT64, y STRING>");
+    }
+
+    #[test]
+    fn drop_table_removes_table_from_scope() {
+        let scope = infer("CREATE TABLE foo (x INT64, y STRING); DROP TABLE foo").unwrap();
+        assert_not_defines!(scope, "foo");
     }
 }
