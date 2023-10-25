@@ -21,10 +21,12 @@ use codespan_reporting::{
     diagnostic::{Diagnostic, Label},
     files::SimpleFiles,
 };
+use peg::{error::ParseError, str::LineCol};
 
 use crate::{
+    ast,
     drivers::bigquery::BigQueryName,
-    errors::{format_err, Result, SourceError},
+    errors::{format_err, Error, Result, SourceError},
     tokenizer::{Ident, Span},
     util::is_c_ident,
 };
@@ -86,8 +88,8 @@ impl fmt::Display for TypeVar {
 /// Basic types.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Type<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
-    /// A value which can be stored in a column.
-    Value(ValueType<TV>),
+    /// A value which may appear as a function argument.
+    Argument(ArgumentType<TV>),
     /// The type of a table, as seen in `CREATE TABLE` statements, or
     /// as returned from a sub-`SELECT`, or as passed to `UNNEST`.
     Table(TableType<TV>),
@@ -98,9 +100,27 @@ pub enum Type<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
 impl<TV: TypeVarSupport> fmt::Display for Type<TV> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Value(v) => write!(f, "{}", v),
+            Type::Argument(v) => write!(f, "{}", v),
             Type::Table(t) => write!(f, "{}", t),
             Type::Function(func) => write!(f, "{}", func),
+        }
+    }
+}
+
+/// An argument type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArgumentType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
+    /// A value type.
+    Value(ValueType<TV>),
+    /// An aggregating value type.
+    Aggregating(ValueType<TV>),
+}
+
+impl<TV: TypeVarSupport> fmt::Display for ArgumentType<TV> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArgumentType::Value(v) => write!(f, "{}", v),
+            ArgumentType::Aggregating(v) => write!(f, "Agg<{}>", v),
         }
     }
 }
@@ -285,7 +305,9 @@ impl fmt::Display for FunctionSignatureType {
 pub struct FunctionSignature {
     pub sig_type: FunctionSignatureType,
     pub type_vars: Vec<TypeVar>,
-    pub params: Vec<ValueType<TypeVar>>,
+    pub params: Vec<ArgumentType<TypeVar>>,
+    /// Trailing `..` parameter, which may be repeated. We do not support
+    /// aggregate functions with rest parameters.
     pub rest_params: Option<ValueType<TypeVar>>,
     pub return_type: ValueType<TypeVar>,
 }
@@ -320,9 +342,63 @@ impl fmt::Display for FunctionSignature {
     }
 }
 
-pub fn parse_function_decls(s: &str) -> Result<Vec<(Ident, FunctionType)>> {
-    match type_grammar::function_decls(s) {
-        Ok(decls) => Ok(decls),
+impl<TV: TypeVarSupport> TryFrom<&ast::DataType> for ValueType<TV> {
+    type Error = Error;
+
+    fn try_from(value: &ast::DataType) -> Result<Self, Self::Error> {
+        match value {
+            ast::DataType::Bool(_) => Ok(ValueType::Simple(SimpleType::Bool)),
+            ast::DataType::Bytes(_) => Ok(ValueType::Simple(SimpleType::Bytes)),
+            ast::DataType::Date(_) => Ok(ValueType::Simple(SimpleType::Date)),
+            ast::DataType::Datetime(_) => Ok(ValueType::Simple(SimpleType::Datetime)),
+            ast::DataType::Float64(_) => Ok(ValueType::Simple(SimpleType::Float64)),
+            ast::DataType::Geography(_) => Ok(ValueType::Simple(SimpleType::Geography)),
+            ast::DataType::Int64(_) => Ok(ValueType::Simple(SimpleType::Int64)),
+            ast::DataType::Numeric(_) => Ok(ValueType::Simple(SimpleType::Numeric)),
+            ast::DataType::String(_) => Ok(ValueType::Simple(SimpleType::String)),
+            ast::DataType::Time(_) => Ok(ValueType::Simple(SimpleType::Time)),
+            ast::DataType::Timestamp(_) => Ok(ValueType::Simple(SimpleType::Timestamp)),
+            ast::DataType::Array { data_type, .. } => {
+                if let ValueType::Simple(elem_type) = data_type.as_ref().try_into()? {
+                    Ok(ValueType::Array(Box::new(elem_type)))
+                } else {
+                    // TODO: Get scope from `data_type`.
+                    Err(format_err!("ARRAY<..> must not contain another ARRAY"))
+                }
+            }
+            ast::DataType::Struct { fields, .. } => {
+                let mut struct_fields = vec![];
+                for field in fields.node_iter() {
+                    struct_fields.push(StructElementType {
+                        name: field.name.clone(),
+                        ty: ValueType::try_from(&field.data_type)?,
+                    });
+                }
+                Ok(ValueType::Simple(SimpleType::Struct(StructType {
+                    fields: struct_fields,
+                })))
+            }
+        }
+    }
+}
+
+impl<TV: TypeVarSupport> TryFrom<&ast::DataType> for Type<TV> {
+    type Error = Error;
+
+    fn try_from(ty: &ast::DataType) -> Result<Self, Self::Error> {
+        Ok(Type::Argument(ArgumentType::Value(ValueType::try_from(
+            ty,
+        )?)))
+    }
+}
+
+/// Helper function called by type-parsing functions.
+fn parse_helper<T, F>(s: &str, f: F) -> Result<T>
+where
+    F: FnOnce(&str) -> Result<T, ParseError<LineCol>>,
+{
+    match f(s) {
+        Ok(parsed) => Ok(parsed),
         Err(e) => {
             let mut files = SimpleFiles::new();
             let file_id = files.add("function_decls".to_owned(), s.to_owned());
@@ -343,6 +419,11 @@ pub fn parse_function_decls(s: &str) -> Result<Vec<(Ident, FunctionType)>> {
     }
 }
 
+/// Parse a set of function declarations.
+pub fn parse_function_decls(s: &str) -> Result<Vec<(Ident, FunctionType)>> {
+    parse_helper(s, type_grammar::function_decls)
+}
+
 // A `peg` grammar for internal use only, used to define our built-in functions.
 //
 // This is much more of a "classic" parser than our main SQL parser. It throws
@@ -359,6 +440,42 @@ peg::parser! {
             = name:ident() _? "=" _? ty:function_type() {
                 (name, ty)
             }
+
+        pub rule ty() -> Type<TypeVar>
+            = t:argument_type() { Type::Argument(t) }
+            / t:table_type() { Type::Table(t) }
+            / t:function_type() { Type::Function(t) }
+
+        rule argument_type() -> ArgumentType<TypeVar>
+            = "Agg" _? "<" _? t:value_type() _? ">" { ArgumentType::Aggregating(t) }
+            / t:value_type() { ArgumentType::Value(t) }
+
+        rule value_type() -> ValueType<TypeVar>
+            = t:simple_type() { ValueType::Simple(t) }
+            / "ARRAY" _? "<" _? t:simple_type() _? ">" { ValueType::Array(Box::new(t)) }
+
+        // Longest match first.
+        rule simple_type() -> SimpleType<TypeVar>
+            = "BOOL" { SimpleType::Bool }
+            / "BYTES" { SimpleType::Bytes }
+            / "DATETIME" { SimpleType::Datetime }
+            / "DATEPART" { SimpleType::Datepart }
+            / "DATE" { SimpleType::Date }
+            / "FLOAT64" { SimpleType::Float64 }
+            / "GEOGRAPHY" { SimpleType::Geography }
+            / "INT64" { SimpleType::Int64 }
+            / "INTERVAL" { SimpleType::Interval }
+            / "NUMERIC" { SimpleType::Numeric }
+            / "STRING" { SimpleType::String }
+            / "TIMESTAMP" { SimpleType::Timestamp }
+            / "TIME" { SimpleType::Time }
+            / "STRUCT" _? "<" _? fields:(struct_field() ** (_? "," _?)) _? ">" {
+                SimpleType::Struct(StructType { fields }) }
+            / type_var:type_var() { SimpleType::Parameter(type_var) }
+
+        rule struct_field() -> StructElementType<TypeVar>
+            = t:value_type() { StructElementType { name: None, ty: t } }
+            / name:ident() _ t:value_type() { StructElementType { name: Some(name), ty: t } }
 
         rule function_type() -> FunctionType
             = signatures:(function_signature() ** (_? "|" _?)) {
@@ -387,8 +504,8 @@ peg::parser! {
             / "FnOver" { FunctionSignatureType::Window }
             / "Fn" { FunctionSignatureType::Scalar }
 
-        rule function_params() -> (Vec<ValueType<TypeVar>>, Option<ValueType<TypeVar>>)
-            = params:(value_type() ++ (_? "," _?))
+        rule function_params() -> (Vec<ArgumentType<TypeVar>>, Option<ValueType<TypeVar>>)
+            = params:(argument_type() ++ (_? "," _?))
               rest_params:(("," _? ".." _? rest_params:value_type() { rest_params })?)
             {
                 (params, rest_params)
@@ -396,39 +513,26 @@ peg::parser! {
             / ".." _? rest_params:value_type() { (Vec::new(), Some(rest_params)) }
             / { (Vec::new(), None) }
 
+        rule table_type() -> TableType<TypeVar>
+            = "TABLE" _? "<" _? columns:(column_type() ** (_? "," _?)) _? ">" {
+                TableType { columns }
+            }
+
+        rule column_type() -> ColumnType<TypeVar>
+            = name:ident() _ t:value_type() not_null:not_null() {
+                ColumnType { name, ty: t, not_null }
+            }
+
+        rule not_null() -> bool
+            = _ "NOT" _ "NULL" { true }
+            / { false }
+
         rule type_vars() -> Vec<TypeVar>
             = "<" _? vars:(type_var() ** (_? "," _?)) _? ">" _? { vars }
             / { Vec::new() }
 
-        pub rule value_type() -> ValueType<TypeVar>
-            = t:simple_type() { ValueType::Simple(t) }
-            / "ARRAY" _? "<" _? t:simple_type() _? ">" { ValueType::Array(Box::new(t)) }
-
-        // Longest match first.
-        rule simple_type() -> SimpleType<TypeVar>
-            = "BOOL" { SimpleType::Bool }
-            / "BYTES" { SimpleType::Bytes }
-            / "DATETIME" { SimpleType::Datetime }
-            / "DATEPART" { SimpleType::Datepart }
-            / "DATE" { SimpleType::Date }
-            / "FLOAT64" { SimpleType::Float64 }
-            / "GEOGRAPHY" { SimpleType::Geography }
-            / "INT64" { SimpleType::Int64 }
-            / "INTERVAL" { SimpleType::Interval }
-            / "NUMERIC" { SimpleType::Numeric }
-            / "STRING" { SimpleType::String }
-            / "TIMESTAMP" { SimpleType::Timestamp }
-            / "TIME" { SimpleType::Time }
-            / "STRUCT" _? "<" _? fields:(struct_field() ** (_? "," _?)) _? ">" {
-                SimpleType::Struct(StructType { fields }) }
-            / type_var:type_var() { SimpleType::Parameter(type_var) }
-
-        rule struct_field() -> StructElementType<TypeVar>
-            = t:value_type() { StructElementType { name: None, ty: t } }
-            / name:ident() _ t:value_type() { StructElementType { name: Some(name), ty: t } }
-
         rule ident() -> Ident
-            = name:$(['A'..='Z' | '_']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) {
+            = name:$(['A'..='Z' | 'a'..='z' | '_']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) {
                 Ident::new(name, Span::Unknown)
             }
 
@@ -438,5 +542,44 @@ peg::parser! {
             }
 
         rule _() = ([' ' | '\t' | '\r' | '\n' ] / "--" [^ '\n']* "\n")+
+    }
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+
+    /// Parse a type declaration.
+    pub fn ty(s: &str) -> Type<TypeVar> {
+        match parse_helper(s, type_grammar::ty) {
+            Ok(ty) => ty,
+            Err(e) => {
+                e.emit();
+                panic!("parse error");
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_function_decls() {
+        match parse_function_decls("ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;") {
+            Ok(decls) => {
+                assert_eq!(decls.len(), 1);
+                assert_eq!(decls[0].0.name, "ANY_VALUE");
+                assert_eq!(decls[0].1.to_string(), "FnAgg<?T>(Agg<?T>) -> ?T");
+            }
+            Err(e) => {
+                e.emit();
+                panic!("parse error");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_type() {
+        assert_eq!(
+            ty("BOOL"),
+            Type::Argument(ArgumentType::Value(ValueType::Simple(SimpleType::Bool)))
+        );
     }
 }

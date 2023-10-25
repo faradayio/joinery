@@ -8,8 +8,8 @@ use std::{collections::BTreeMap, fmt, hash, sync::Arc};
 use crate::{
     drivers::bigquery::BigQueryName,
     errors::{format_err, Result},
-    tokenizer::Ident,
-    types::{parse_function_decls, Type},
+    tokenizer::{Ident, Span},
+    types::{parse_function_decls, Type, TypeVar},
     util::is_c_ident,
 };
 
@@ -22,16 +22,25 @@ pub struct CaseInsensitiveIdent {
 
 impl CaseInsensitiveIdent {
     /// Create a new case-insensitive identifier.
-    pub fn new(ident: Ident) -> Self {
-        Self {
-            cmp_key: ident.name.to_ascii_lowercase(),
-            ident,
-        }
+    pub fn new(name: &str, span: Span) -> Self {
+        Ident::new(name, span).into()
     }
 
     /// Get the underlying identifier.
     pub fn ident(&self) -> &Ident {
         &self.ident
+    }
+}
+
+impl From<Ident> for CaseInsensitiveIdent {
+    fn from(ident: Ident) -> Self {
+        Self {
+            // We actually want ASCII lowercase, not Unicode lowercase, because
+            // BigQuery appears to consider `é` and `É` to be different
+            // characters. I checked using the UI.
+            cmp_key: ident.name.to_ascii_lowercase(),
+            ident,
+        }
     }
 }
 
@@ -76,23 +85,38 @@ impl fmt::Display for CaseInsensitiveIdent {
 }
 
 /// A value we can store in a scope. Details may change.
-type ScopeValue = Type;
+pub type ScopeValue = Arc<Type<TypeVar>>;
+
+/// We need to both define and hide names in a scope.
+#[derive(Clone, Debug)]
+enum ScopeEntry {
+    /// A name that is defined in this scope.
+    Defined(ScopeValue),
+    /// A name that is hidden in this scope.
+    Hidden,
+}
+
+/// A handle to a scope.
+pub type ScopeHandle = Arc<Scope>;
 
 /// A scope is a namespace for SQL code. We use it to look up names,
 /// and associate them with types and other information.
 #[derive(Clone, Debug)]
 pub struct Scope {
     /// The parent scope.
-    parent: Option<Arc<Scope>>,
+    parent: Option<ScopeHandle>,
 
     /// The names in this scope.
-    names: BTreeMap<CaseInsensitiveIdent, ScopeValue>,
+    names: BTreeMap<CaseInsensitiveIdent, ScopeEntry>,
 }
 
 impl Scope {
     /// Create a new scope with no parent.
-    pub fn root() -> Self {
-        let mut scope = Self::new(None);
+    pub fn root() -> ScopeHandle {
+        let mut scope = Self {
+            parent: None,
+            names: BTreeMap::new(),
+        };
 
         // Add built-in functions.
         let built_ins = match parse_function_decls(BUILT_IN_FUNCTIONS) {
@@ -104,46 +128,83 @@ impl Scope {
         };
         for (name, ty) in built_ins {
             scope
-                .add(CaseInsensitiveIdent::new(name), Type::Function(ty))
+                .add(
+                    CaseInsensitiveIdent::from(name),
+                    Arc::new(Type::Function(ty)),
+                )
                 .expect("duplicate built-in function");
         }
 
-        scope
+        Arc::new(scope)
     }
 
     /// Create a new scope.
-    pub fn new(parent: Option<Arc<Scope>>) -> Self {
+    pub fn new(parent: &ScopeHandle) -> Scope {
         Self {
-            parent,
+            parent: Some(parent.clone()),
             names: BTreeMap::new(),
         }
+    }
+
+    /// Freeze this scope and get a handle.
+    ///
+    /// You cannot do this once you have called [`Self::into_handle()`].
+    pub fn into_handle(self) -> ScopeHandle {
+        Arc::new(self)
     }
 
     /// Add a new value to the scope.
     pub fn add(&mut self, name: CaseInsensitiveIdent, value: ScopeValue) -> Result<()> {
         if self.names.contains_key(&name) {
+            // We don't try to do anything fancy like replacing a hidden name
+            // with a defined name, because we probably don't need that.
             return Err(format_err!("duplicate name: {}", name));
         }
-        self.names.insert(name, value);
+        self.names.insert(name, ScopeEntry::Defined(value));
+        Ok(())
+    }
+
+    /// "Drop" a value from the scope by hiding it. This is used to implement
+    /// `DROP TABLE`, etc.
+    ///
+    /// You cannot do this once you have called [`Self::into_handle()`].
+    pub fn hide(&mut self, name: &CaseInsensitiveIdent) -> Result<()> {
+        if self.names.contains_key(name) {
+            // We do not allow hiding a name that was defined in this scope.
+            // Make a new scope for that.
+            return Err(format_err!(
+                "cannot hide name {} because it was defined in this scope",
+                name
+            ));
+        }
+        self.names.insert(name.clone(), ScopeEntry::Hidden);
         Ok(())
     }
 
     /// Get a value from the scope.
-    pub fn get(&self, name: &CaseInsensitiveIdent) -> Option<&ScopeValue> {
-        self.names
-            .get(name)
-            .or_else(|| self.parent.as_ref().and_then(|parent| parent.get(name)))
+    pub fn get(&self, name: &CaseInsensitiveIdent) -> Option<ScopeValue> {
+        match self.names.get(name) {
+            Some(ScopeEntry::Defined(value)) => Some(value.to_owned()),
+            Some(ScopeEntry::Hidden) => None,
+            None => {
+                if let Some(parent) = self.parent.as_ref() {
+                    parent.get(name)
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
 
 /// Built-in function declarations in the default scope.
 static BUILT_IN_FUNCTIONS: &str = "
-ANY_VALUE = FnAgg<?T>(?T) -> ?T;
+ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;
 ARRAY_LENGTH = Fn<?T>(ARRAY<?T>) -> INT64;
 ARRAY_TO_STRING = Fn<?T>(ARRAY<?T>, STRING) -> STRING;
 COALESCE = Fn<?T>(?T, ..?T) -> ?T;
 CONCAT = Fn(STRING, ..STRING) -> STRING | Fn(BYTES, ..BYTES) -> BYTES;
-COUNTIF = FnAgg(BOOL) -> INT64 | FnOver(BOOL) -> INT64;
+COUNTIF = FnAgg(Agg<BOOL>) -> INT64 | FnOver(Agg<BOOL>) -> INT64;
 CURRENT_DATETIME = Fn() -> DATETIME;
 DATE = Fn(STRING) -> DATE;
 DATE_ADD = Fn(DATE, INTERVAL) -> DATE;
@@ -156,23 +217,24 @@ DATETIME_SUB = Fn(DATETIME, INTERVAL) -> DATETIME;
 DATETIME_TRUNC = Fn(DATETIME, DATEPART) -> DATETIME;
 EXP = Fn(FLOAT64) -> FLOAT64;
 FARM_FINGERPRINT = Fn(STRING) -> INT64 | Fn(BYTES) -> INT64;
-FIRST_VALUE = FnOver<?T>(?T) -> ?T;
+FIRST_VALUE = FnOver<?T>(Agg<?T>) -> ?T;
 FORMAT_DATETIME = Fn(DATETIME, STRING) -> STRING;
 GENERATE_DATE_ARRAY = Fn(DATE, DATE, INTERVAL) -> ARRAY<DATE>;
 GENERATE_UUID = Fn() -> STRING;
-LAG = FnOver<?T>(?T) -> ?T;
+LAG = FnOver<?T>(Agg<?T>) -> ?T;
 LEAST = Fn<?T>(?T, ..?T) -> ?T;
 LENGTH = Fn(STRING) -> INT64 | Fn(BYTES) -> INT64;
 LOWER = Fn(STRING) -> STRING;
-MAX = FnAgg(INT64) -> INT64 | FnAgg(FLOAT64) -> FLOAT64;
-MIN = FnAgg(INT64) -> INT64 | FnAgg(FLOAT64) -> FLOAT64;
+MAX = FnAgg(Agg<INT64>) -> INT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64;
+MIN = FnAgg(Agg<INT64>) -> INT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64;
 RAND = Fn() -> FLOAT64;
 RANK = FnOver() -> INT64;
 REGEXP_EXTRACT = Fn(STRING, STRING) -> STRING;
 REGEXP_REPLACE = Fn(STRING, STRING, STRING) -> STRING;
 ROW_NUMBER = FnOver() -> INT64;
 SHA256 = Fn(STRING) -> BYTES;
-SUM = FnAgg(INT64) -> INT64 | FnAgg(FLOAT64) -> FLOAT64 | FnOver(INT64) -> INT64 | FnOver(FLOAT64) -> FLOAT64;
+SUM = FnAgg(Agg<INT64>) -> INT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64
+    | FnOver(Agg<INT64>) -> INT64 | FnOver(Agg<FLOAT64>) -> FLOAT64;
 TO_HEX = Fn(BYTES) -> STRING;
 TRIM = Fn(STRING) -> STRING;
 UPPER = Fn(STRING) -> STRING;
