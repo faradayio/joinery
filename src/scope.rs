@@ -179,9 +179,9 @@ impl Scope {
     }
 
     /// Get a value from the scope.
-    pub fn get(&self, name: &CaseInsensitiveIdent) -> Option<ScopeValue> {
+    pub fn get<'scope>(&'scope self, name: &CaseInsensitiveIdent) -> Option<&'scope ScopeValue> {
         match self.names.get(name) {
-            Some(ScopeEntry::Defined(value)) => Some(value.to_owned()),
+            Some(ScopeEntry::Defined(value)) => Some(value),
             Some(ScopeEntry::Hidden) => None,
             None => {
                 if let Some(parent) = self.parent.as_ref() {

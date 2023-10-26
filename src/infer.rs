@@ -302,7 +302,9 @@ mod tests {
     }
 
     fn lookup(scope: &ScopeHandle, name: &str) -> Option<Type<TypeVar>> {
-        scope.get(&CaseInsensitiveIdent::new(name, Span::Unknown))
+        scope
+            .get(&CaseInsensitiveIdent::new(name, Span::Unknown))
+            .cloned()
     }
 
     macro_rules! assert_defines {
