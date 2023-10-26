@@ -85,7 +85,7 @@ impl fmt::Display for CaseInsensitiveIdent {
 }
 
 /// A value we can store in a scope. Details may change.
-pub type ScopeValue = Arc<Type<TypeVar>>;
+pub type ScopeValue = Type<TypeVar>;
 
 /// We need to both define and hide names in a scope.
 #[derive(Clone, Debug)]
@@ -128,10 +128,7 @@ impl Scope {
         };
         for (name, ty) in built_ins {
             scope
-                .add(
-                    CaseInsensitiveIdent::from(name),
-                    Arc::new(Type::Function(ty)),
-                )
+                .add(CaseInsensitiveIdent::from(name), Type::Function(ty))
                 .expect("duplicate built-in function");
         }
 
