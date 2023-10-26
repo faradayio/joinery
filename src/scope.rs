@@ -7,9 +7,9 @@ use std::{collections::BTreeMap, fmt, hash, sync::Arc};
 
 use crate::{
     drivers::bigquery::BigQueryName,
-    errors::{format_err, Result},
+    errors::{format_err, Error, Result},
     known_files::KnownFiles,
-    tokenizer::{Ident, Span},
+    tokenizer::{Ident, Span, Spanned, ToTokens, Token},
     types::{parse_function_decls, Type},
     util::is_c_ident,
 };
@@ -82,6 +82,18 @@ impl fmt::Display for CaseInsensitiveIdent {
         } else {
             write!(f, "{}", BigQueryName(&self.ident.name))
         }
+    }
+}
+
+impl ToTokens for CaseInsensitiveIdent {
+    fn to_tokens(&self, tokens: &mut Vec<Token>) {
+        self.ident.to_tokens(tokens)
+    }
+}
+
+impl Spanned for CaseInsensitiveIdent {
+    fn span(&self) -> Span {
+        self.ident.span()
     }
 }
 
@@ -196,6 +208,17 @@ impl Scope {
                 }
             }
         }
+    }
+
+    /// Get a value, or return an error if it is not defined.
+    pub fn get_or_err(&self, name: &CaseInsensitiveIdent) -> Result<&ScopeValue> {
+        self.get(name).ok_or_else(|| {
+            Error::annotated(
+                format!("unknown name: {}", name),
+                name.ident.span(),
+                "not defined",
+            )
+        })
     }
 }
 

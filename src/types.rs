@@ -24,7 +24,7 @@ use crate::{
     drivers::bigquery::BigQueryName,
     errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
-    tokenizer::{Ident, Span},
+    tokenizer::{Ident, Span, Spanned},
     util::is_c_ident,
 };
 
@@ -105,6 +105,32 @@ pub enum Type<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Table(TableType),
     /// A function type.
     Function(FunctionType),
+}
+
+impl<TV: TypeVarSupport> Type<TV> {
+    /// Convert this type into a [`ValueType`], if possible.
+    pub fn try_as_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
+        match self {
+            Type::Argument(ArgumentType::Value(t)) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected value type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
+    /// Convert this type into a [`TableType`], if possible.
+    pub fn try_as_table_type(&self, spanned: &dyn Spanned) -> Result<&TableType> {
+        match self {
+            Type::Table(t) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected table type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
 }
 
 impl<TV: TypeVarSupport> fmt::Display for Type<TV> {

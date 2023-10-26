@@ -5,7 +5,7 @@
 
 use crate::{
     ast::{self, SelectList},
-    errors::{format_err, Error, Result},
+    errors::{Error, Result},
     scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
     types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
@@ -300,17 +300,7 @@ impl InferTypes for ast::FromItem {
         match self {
             ast::FromItem::TableName { table_name, alias } => {
                 let table = ident_from_table_name(table_name)?;
-                let table_type = scope
-                    .get(&table)
-                    .ok_or_else(|| format_err!("table {:?} not found in scope", table_name))?;
-                let table_type = match table_type {
-                    Type::Table(table_type) => table_type,
-                    _ => Err(format_err!(
-                        "table {:?} is not a table: {:?}",
-                        table_name,
-                        table_type
-                    ))?,
-                };
+                let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
 
                 if alias.is_some() {
                     return Err(nyi(alias, "from with alias"));
@@ -343,13 +333,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
             ast::Expression::ColumnName(ident) => {
                 let ident = ident.to_owned().into();
-                let ty = scope
-                    .get(&ident)
-                    .ok_or_else(|| format_err!("column {:?} not found in scope", ident))?;
-                let ty = match ty {
-                    Type::Argument(ArgumentType::Value(ty)) => ty,
-                    _ => Err(format_err!("column {:?} is not a value: {:?}", ident, ty))?,
-                };
+                let ty = scope.get_or_err(&ident)?.try_as_value_type(&ident)?;
                 Ok((ty.to_owned(), scope.clone()))
             }
             ast::Expression::TableAndColumnName(ast::TableAndColumnName {
@@ -358,23 +342,17 @@ impl InferTypes for ast::Expression {
                 ..
             }) => {
                 let table = ident_from_table_name(table_name)?;
-                let table_type = scope
-                    .get(&table)
-                    .ok_or_else(|| format_err!("table {:?} not found in scope", table_name))?;
-                let table_type = match table_type {
-                    Type::Table(table_type) => table_type,
-                    _ => Err(format_err!(
-                        "table {:?} is not a table: {:?}",
-                        table_name,
-                        table_type
-                    ))?,
-                };
+                let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
                 let column_type = table_type
                     .columns
                     .iter()
                     .find(|column_type| column_type.name == *column_name)
                     .ok_or_else(|| {
-                        format_err!("column {:?} not found in table {:?}", column_name, table)
+                        Error::annotated(
+                            format!("column {:?} not found in table {:?}", column_name, table),
+                            column_name.span(),
+                            "not found",
+                        )
                     })?;
                 Ok((column_type.ty.to_owned(), scope.clone()))
             }
@@ -434,7 +412,7 @@ fn nyi(spanned: &dyn Spanned, name: &str) -> Error {
     Error::annotated(
         "could not infer types",
         spanned.span(),
-        format!("not yet implemented: ({})", name),
+        format!("not yet implemented: {}", name),
     )
 }
 
