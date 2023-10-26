@@ -16,7 +16,10 @@ use codespan_reporting::{
 };
 use owo_colors::OwoColorize;
 
-use crate::known_files::{FileId, KnownFiles};
+use crate::{
+    known_files::{FileId, KnownFiles},
+    tokenizer::Span,
+};
 
 /// Our standard result type.
 pub type Result<T, E = Error> = result::Result<T, E>;
@@ -41,6 +44,35 @@ pub enum Error {
 }
 
 impl Error {
+    /// A pretty annotated error, pointing to a specific span in a file.
+    pub fn annotated(
+        summary: impl Into<String>,
+        span: Span,
+        annotation: impl Into<String>,
+    ) -> Self {
+        Self::annotated_helper(summary.into(), span, annotation.into())
+    }
+
+    /// Helper function for [`annotated`]. The [`annotated`] function has type
+    /// parameters, and it will be compiled once for each combination of types.
+    /// But that's fine, because it's just a wrapper. This function does the
+    /// real work, and we only need to compile it once.
+    fn annotated_helper(summary: String, span: Span, annotation: String) -> Self {
+        if let Some((file_id, range)) = span.for_diagnostic() {
+            let alternate_summary = format!("{}: {}", summary, annotation);
+            let diagnostic = Diagnostic::error().with_message(summary).with_labels(vec![
+                codespan_reporting::diagnostic::Label::primary(file_id, range)
+                    .with_message(annotation),
+            ]);
+            Error::Source(Box::new(SourceError {
+                alternate_summary,
+                diagnostic,
+            }))
+        } else {
+            Error::Other(format!("{} (at unknown location): {}", summary, annotation).into())
+        }
+    }
+
     /// Create a new `Error::TablesNotEqual`.
     pub fn tables_not_equal(message: impl Into<String>) -> Self {
         Error::TablesNotEqual {
@@ -172,7 +204,7 @@ where
 
 #[derive(Debug)]
 pub struct SourceError {
-    pub expected: String,
+    pub alternate_summary: String,
     pub diagnostic: Diagnostic<FileId>,
 }
 
@@ -187,7 +219,7 @@ impl SourceError {
 
 impl fmt::Display for SourceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "parser error: expected {}", self.expected)
+        write!(f, "parser error: expected {}", self.alternate_summary)
     }
 }
 

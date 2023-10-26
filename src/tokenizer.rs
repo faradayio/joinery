@@ -32,16 +32,15 @@ use std::{
     str::from_utf8,
 };
 
-use codespan_reporting::diagnostic::{Diagnostic, Label};
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::ToTokens;
-use peg::{error::ParseError, Parse, ParseElem, RuleResult};
+use peg::{error::ParseError, str::LineCol, Parse, ParseElem, RuleResult};
 use tracing::{error, trace};
 
 use crate::{
     ast,
     drivers::bigquery::BigQueryString,
-    errors::{Result, SourceError},
+    errors::{Error, Result},
     known_files::{FileId, KnownFiles},
 };
 
@@ -65,14 +64,18 @@ pub enum Span {
 }
 
 impl Span {
+    /// Build a span from a [`LineCol`].
+    pub fn from_line_col(file_id: FileId, line_col: LineCol) -> Self {
+        Span::File {
+            file_id,
+            span: line_col.column..line_col.column,
+        }
+    }
+
     /// Get information about this span for use in a
     /// [`codespan_reporting::diagnostic::Diagnostic`].
     pub fn for_diagnostic(&self) -> Option<(FileId, Range<usize>)> {
         match self {
-            // I think we want to return a non-empty range for a `Diagnostic`?
-            Span::File { file_id, span } if span.start == span.end => {
-                Some((*file_id, span.start..span.start + 1))
-            }
             Span::File { file_id, span } => Some((*file_id, span.clone())),
             Span::Unknown => None,
         }
@@ -574,12 +577,11 @@ impl TokenStream {
             Ok(t) => Ok(t),
             Err(err) => {
                 error!(error = ?err, token_stream = ?self.tokens, "failed to re-parse token stream from `sql_quote!`");
-                let diagnostic = Diagnostic::error().with_message("Failed to parse token stream");
-                Err(SourceError {
-                    expected: err.to_string(),
-                    diagnostic,
-                }
-                .into())
+                Err(Error::annotated(
+                    "Failed to re-parse token stream from `sql_quote!`",
+                    self.span,
+                    format!("expected: {}", err.expected),
+                ))
             }
         }
     }
@@ -963,20 +965,11 @@ pub fn tokenize_sql(files: &KnownFiles, file_id: FileId) -> Result<TokenStream> 
             span: stream_span,
             tokens,
         }),
-        Err(err) => {
-            let diagnostic = Diagnostic::error()
-                .with_message("Failed to tokenize query")
-                .with_labels(vec![Label::primary(
-                    file_id,
-                    err.location.offset..err.location.offset + 1,
-                )
-                .with_message(format!("expected {}", err.expected))]);
-            Err(SourceError {
-                expected: err.to_string(),
-                diagnostic,
-            }
-            .into())
-        }
+        Err(err) => Err(Error::annotated(
+            "Failed to tokenize query",
+            Span::from_line_col(file_id, err.location),
+            format!("expected {}", err.expected),
+        )),
     }
 }
 

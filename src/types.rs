@@ -17,13 +17,12 @@
 
 use std::fmt;
 
-use codespan_reporting::diagnostic::{Diagnostic, Label};
 use peg::{error::ParseError, str::LineCol};
 
 use crate::{
     ast,
     drivers::bigquery::BigQueryName,
-    errors::{format_err, Error, Result, SourceError},
+    errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
     tokenizer::{Ident, Span},
     util::is_c_ident,
@@ -411,20 +410,11 @@ where
     let s = files.source_code(file_id)?;
     match f(s) {
         Ok(parsed) => Ok(parsed),
-        Err(e) => {
-            let diagnostic = Diagnostic::error()
-                .with_message("parse error")
-                .with_labels(vec![Label::primary(
-                    file_id,
-                    e.location.offset..e.location.offset,
-                )
-                .with_message(format!("expected {}", e.expected))]);
-            Err(SourceError {
-                expected: e.expected.to_string(),
-                diagnostic,
-            }
-            .into())
-        }
+        Err(e) => Err(Error::annotated(
+            "error parsing type expression",
+            Span::from_line_col(file_id, e.location),
+            format!("expected {}", e.expected),
+        )),
     }
 }
 

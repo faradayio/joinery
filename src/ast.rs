@@ -23,7 +23,6 @@ use std::{
     mem::take,
 };
 
-use codespan_reporting::diagnostic::{Diagnostic, Label};
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::{Emit, EmitDefault, Spanned, ToTokens};
 
@@ -34,7 +33,7 @@ use crate::{
         sqlite3::KEYWORDS as SQLITE3_KEYWORDS,
         trino::{TrinoString, KEYWORDS as TRINO_KEYWORDS},
     },
-    errors::{Result, SourceError},
+    errors::{Error, Result},
     known_files::{FileId, KnownFiles},
     tokenizer::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
@@ -1687,25 +1686,11 @@ pub fn parse_sql(files: &KnownFiles, file_id: FileId) -> Result<SqlProgram> {
     match result {
         Ok(sql_program) => Ok(sql_program),
         // Prepare a user-friendly error message.
-        Err(e) => {
-            let span = e.location.clone();
-            let diagnostic = if let Some((file_id, range)) = span.for_diagnostic() {
-                Diagnostic::error()
-                    .with_message("Failed to parse query")
-                    .with_labels(vec![Label::primary(file_id, range)
-                        .with_message(format!("expected {}", e.expected))])
-            } else {
-                Diagnostic::error().with_message(format!(
-                    "Failed to parse query (at unknown location): expected {}",
-                    e.expected
-                ))
-            };
-            Err(SourceError {
-                expected: e.to_string(),
-                diagnostic,
-            }
-            .into())
-        }
+        Err(e) => Err(Error::annotated(
+            "Failed to parse query",
+            e.location.clone(),
+            format!("expected {}", e.expected),
+        )),
     }
 }
 
