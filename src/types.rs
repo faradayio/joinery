@@ -131,6 +131,18 @@ impl<TV: TypeVarSupport> Type<TV> {
             )),
         }
     }
+
+    /// Convert this type into a [`FunctionType`], if possible.
+    pub fn try_as_function_type(&self, spanned: &dyn Spanned) -> Result<&FunctionType> {
+        match self {
+            Type::Function(t) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected function type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
 }
 
 impl<TV: TypeVarSupport> fmt::Display for Type<TV> {
@@ -150,6 +162,22 @@ pub enum ArgumentType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Value(ValueType<TV>),
     /// An aggregating value type.
     Aggregating(ValueType<TV>),
+}
+
+impl<TV: TypeVarSupport> ArgumentType<TV> {
+    /// Expect a value type.
+    ///
+    /// TODO: We will update this later to use [`Spanned`] once we update
+    /// [`crate::infer::InferTypes`] to return [`ArgumentType`] instead of
+    /// [`ValueType`].
+    pub fn expect_value_type(&self) -> Result<&ValueType<TV>> {
+        match self {
+            ArgumentType::Value(t) => Ok(t),
+            ArgumentType::Aggregating(_) => {
+                Err(format_err!("expected value type, found aggregate {}", self))
+            }
+        }
+    }
 }
 
 impl<TV: TypeVarSupport> fmt::Display for ArgumentType<TV> {
@@ -248,6 +276,16 @@ impl<TV: TypeVarSupport> ValueType<TV> {
     }
 }
 
+impl ValueType<TypeVar> {
+    /// Resolve this type, failing if we encounter a type variable.
+    pub fn resolve(&self) -> Result<ValueType<ResolvedTypeVarsOnly>> {
+        match self {
+            ValueType::Simple(s) => Ok(ValueType::Simple(s.resolve()?)),
+            ValueType::Array(t) => Ok(ValueType::Array(t.resolve()?)),
+        }
+    }
+}
+
 impl<TV: TypeVarSupport> fmt::Display for ValueType<TV> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -287,6 +325,33 @@ pub enum SimpleType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Parameter(TV),
 }
 
+impl SimpleType<TypeVar> {
+    /// Resolve this type, failing if we encounter a type variable.
+    pub fn resolve(&self) -> Result<SimpleType<ResolvedTypeVarsOnly>> {
+        // We need to spell this out because we're converting between two
+        // versions of the same type.
+        match self {
+            SimpleType::Bool => Ok(SimpleType::Bool),
+            SimpleType::Bottom => Ok(SimpleType::Bottom),
+            SimpleType::Bytes => Ok(SimpleType::Bytes),
+            SimpleType::Date => Ok(SimpleType::Date),
+            SimpleType::Datepart => Ok(SimpleType::Datepart),
+            SimpleType::Datetime => Ok(SimpleType::Datetime),
+            SimpleType::Float64 => Ok(SimpleType::Float64),
+            SimpleType::Geography => Ok(SimpleType::Geography),
+            SimpleType::Int64 => Ok(SimpleType::Int64),
+            SimpleType::Interval => Ok(SimpleType::Interval),
+            SimpleType::Numeric => Ok(SimpleType::Numeric),
+            SimpleType::Null => Ok(SimpleType::Null),
+            SimpleType::String => Ok(SimpleType::String),
+            SimpleType::Time => Ok(SimpleType::Time),
+            SimpleType::Timestamp => Ok(SimpleType::Timestamp),
+            SimpleType::Struct(s) => Ok(SimpleType::Struct(s.resolve()?)),
+            SimpleType::Parameter(tv) => Err(format_err!("unresolved type variable: {}", tv)),
+        }
+    }
+}
+
 impl<TV: TypeVarSupport> fmt::Display for SimpleType<TV> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -315,6 +380,22 @@ impl<TV: TypeVarSupport> fmt::Display for SimpleType<TV> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     pub fields: Vec<StructElementType<TV>>,
+}
+
+impl StructType<TypeVar> {
+    /// Resolve this type, failing if we encounter a type variable.
+    pub fn resolve(&self) -> Result<StructType<ResolvedTypeVarsOnly>> {
+        let mut resolved_fields = vec![];
+        for field in &self.fields {
+            resolved_fields.push(StructElementType {
+                name: field.name.clone(),
+                ty: field.ty.resolve()?,
+            });
+        }
+        Ok(StructType {
+            fields: resolved_fields,
+        })
+    }
 }
 
 impl<TV: TypeVarSupport> fmt::Display for StructType<TV> {
@@ -476,6 +557,18 @@ pub struct FunctionType {
     pub signatures: Vec<FunctionSignature>,
 }
 
+impl FunctionType {
+    /// Find the best (first matching) signature for a set of arguments.
+    pub fn best_signature(&self, arg_types: &[ValueType]) -> Result<Option<&FunctionSignature>> {
+        for sig in &self.signatures {
+            if sig.matches(arg_types)? {
+                return Ok(Some(sig));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl fmt::Display for FunctionType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, sig) in self.signatures.iter().enumerate() {
@@ -515,6 +608,34 @@ pub struct FunctionSignature {
     /// aggregate functions with rest parameters.
     pub rest_params: Option<ValueType<TypeVar>>,
     pub return_type: ValueType<TypeVar>,
+}
+
+impl FunctionSignature {
+    /// Does this signature match a set of argument types?
+    ///
+    /// TODO: Handle aggregates and type variables.
+    pub fn matches(&self, arg_types: &[ValueType]) -> Result<bool> {
+        if self.params.len() > arg_types.len() {
+            return Ok(false);
+        }
+        for (i, param_ty) in self.params.iter().enumerate() {
+            let param_ty = param_ty.expect_value_type()?.resolve()?;
+            if !arg_types[i].is_subtype_of(&param_ty) {
+                return Ok(false);
+            }
+        }
+        if let Some(rest_params) = &self.rest_params {
+            let rest_params = rest_params.resolve()?;
+            for arg_type in &arg_types[self.params.len()..] {
+                if !arg_type.is_subtype_of(&rest_params) {
+                    return Ok(false);
+                }
+            }
+        } else if self.params.len() < arg_types.len() {
+            return Ok(false);
+        }
+        Ok(true)
+    }
 }
 
 impl fmt::Display for FunctionSignature {

@@ -97,14 +97,6 @@ impl InferTypes for ast::Statement {
     }
 }
 
-/// Convert a table name to an identifier.
-fn ident_from_table_name(table_name: &ast::TableName) -> Result<CaseInsensitiveIdent> {
-    match table_name {
-        ast::TableName::Table { table, .. } => Ok(table.clone().into()),
-        _ => Err(nyi(table_name, "dotted name")),
-    }
-}
-
 impl InferTypes for ast::CreateTableStatement {
     type Type = ();
 
@@ -414,6 +406,10 @@ impl InferTypes for ast::Expression {
                 let ty = ValueType::try_from(&*data_type)?;
                 Ok((ty, scope.clone()))
             }
+            ast::Expression::FunctionCall(fcall) => {
+                let (ty, _) = fcall.infer_types(scope)?;
+                Ok((ty, scope.clone()))
+            }
             _ => Err(nyi(self, "expression")),
         }
     }
@@ -429,6 +425,45 @@ impl InferTypes for LiteralValue {
             LiteralValue::String(_) => SimpleType::String,
         };
         Ok((ValueType::Simple(simple_ty), scope.clone()))
+    }
+}
+
+impl InferTypes for ast::FunctionCall {
+    type Type = ValueType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::FunctionCall {
+            name,
+            args,
+            over_clause,
+            ..
+        } = self;
+
+        let name = ident_from_function_name(name)?;
+        let func_ty = scope.get_or_err(&name)?.try_as_function_type(&name)?;
+
+        if over_clause.is_some() {
+            return Err(nyi(over_clause, "over clause"));
+        }
+
+        let mut arg_tys = vec![];
+        for arg in args.node_iter_mut() {
+            let (ty, _scope) = arg.infer_types(scope)?;
+            arg_tys.push(ty);
+        }
+        let sig = func_ty.best_signature(&arg_tys).map_err(|e| {
+            Error::annotated(e.to_string(), name.span(), "error occurred in arguments")
+        })?;
+        if let Some(sig) = sig {
+            // TODO: Don't resolve here. Overhaul `best_signature`.
+            Ok((sig.return_type.clone().resolve()?, scope.clone()))
+        } else {
+            Err(Error::annotated(
+                format!("expected arguments to {} to match one of {}", name, func_ty),
+                name.span(),
+                "no matching signature",
+            ))
+        }
     }
 }
 
@@ -462,6 +497,22 @@ impl InferColumnName for ast::Expression {
 impl InferColumnName for ast::Alias {
     fn infer_column_name(&mut self) -> Option<Ident> {
         Some(self.ident.clone())
+    }
+}
+
+/// Convert a table name to an identifier.
+fn ident_from_table_name(table_name: &ast::TableName) -> Result<CaseInsensitiveIdent> {
+    match table_name {
+        ast::TableName::Table { table, .. } => Ok(table.clone().into()),
+        _ => Err(nyi(table_name, "dotted name")),
+    }
+}
+
+/// Convert a function name to an identifier.
+fn ident_from_function_name(function_name: &ast::FunctionName) -> Result<CaseInsensitiveIdent> {
+    match function_name {
+        ast::FunctionName::Function { function, .. } => Ok(function.clone().into()),
+        _ => Err(nyi(function_name, "dotted name")),
     }
 }
 
