@@ -8,7 +8,7 @@ use crate::{
     errors::{format_err, Result},
     scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
     tokenizer::{Literal, LiteralValue},
-    types::{ColumnType, SimpleType, TableType, Type, TypeVar, ValueType},
+    types::{ColumnType, SimpleType, TableType, Type, ValueType},
 };
 
 // TODO: Remember this rather scary example. Verify BigQuery supports it
@@ -42,7 +42,7 @@ pub trait InferTypes {
 }
 
 impl InferTypes for ast::SqlProgram {
-    type Type = Option<TableType<TypeVar>>;
+    type Type = Option<TableType>;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let mut ty = None;
@@ -70,7 +70,7 @@ impl InferTypes for ast::SqlProgram {
 }
 
 impl InferTypes for ast::Statement {
-    type Type = Option<TableType<TypeVar>>;
+    type Type = Option<TableType>;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
@@ -118,7 +118,7 @@ impl InferTypes for ast::CreateTableStatement {
                 let column_decls = columns
                     .node_iter()
                     .map(|column| {
-                        let ty = ValueType::<TypeVar>::try_from(&column.data_type)?;
+                        let ty = ValueType::try_from(&column.data_type)?;
                         Ok(ColumnType {
                             name: column.name.clone(),
                             ty,
@@ -165,7 +165,7 @@ impl InferTypes for ast::DropTableStatement {
 }
 
 impl InferTypes for ast::QueryStatement {
-    type Type = TableType<TypeVar>;
+    type Type = TableType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let ast::QueryStatement { query_expression } = self;
@@ -174,7 +174,7 @@ impl InferTypes for ast::QueryStatement {
 }
 
 impl InferTypes for ast::QueryExpression {
-    type Type = TableType<TypeVar>;
+    type Type = TableType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
@@ -189,7 +189,7 @@ impl InferTypes for ast::QueryExpression {
 }
 
 impl InferTypes for ast::SelectExpression {
-    type Type = TableType<TypeVar>;
+    type Type = TableType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         // In order of type inference:
@@ -247,7 +247,7 @@ impl InferTypes for ast::SelectExpression {
 }
 
 impl InferTypes for ast::Expression {
-    type Type = ValueType<TypeVar>;
+    type Type = ValueType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
@@ -262,7 +262,7 @@ impl InferTypes for ast::Expression {
 }
 
 impl InferTypes for LiteralValue {
-    type Type = ValueType<TypeVar>;
+    type Type = ValueType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let simple_ty = match self {
@@ -289,7 +289,7 @@ mod tests {
 
     use super::*;
 
-    fn infer(sql: &str) -> Result<(Option<TableType<TypeVar>>, ScopeHandle)> {
+    fn infer(sql: &str) -> Result<(Option<TableType>, ScopeHandle)> {
         let mut program = match parse_sql(Path::new("test.sql"), sql) {
             Ok(program) => program,
             Err(e) => {

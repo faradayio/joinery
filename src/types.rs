@@ -33,14 +33,23 @@ use crate::{
 
 /// Sometimes we want concrete types, and sometimes we want types with type
 /// variables. This trait convers both those cases.
-pub trait TypeVarSupport: fmt::Display {}
+pub trait TypeVarSupport: fmt::Display + Sized {
+    /// Convert a [`TypeVar`] into a [`SimpleType`], if possible.
+    fn simple_type_from_type_var(tv: TypeVar) -> Result<SimpleType<Self>, &'static str>;
+}
 
 /// This type can never be instantiated. We use this to represent a type variable with
 /// all type variables resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedTypeVarsOnly {}
 
-impl TypeVarSupport for ResolvedTypeVarsOnly {}
+impl TypeVarSupport for ResolvedTypeVarsOnly {
+    fn simple_type_from_type_var(_tv: TypeVar) -> Result<SimpleType<Self>, &'static str> {
+        // This will be a parser error with `"expected "` prepended. So it's
+        // hard to word well.
+        Err("something other than a type variable")
+    }
+}
 
 impl fmt::Display for ResolvedTypeVarsOnly {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -76,7 +85,11 @@ impl TypeVar {
     }
 }
 
-impl TypeVarSupport for TypeVar {}
+impl TypeVarSupport for TypeVar {
+    fn simple_type_from_type_var(tv: TypeVar) -> Result<SimpleType<Self>, &'static str> {
+        Ok(SimpleType::Parameter(tv))
+    }
+}
 
 impl fmt::Display for TypeVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -92,7 +105,7 @@ pub enum Type<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Argument(ArgumentType<TV>),
     /// The type of a table, as seen in `CREATE TABLE` statements, or
     /// as returned from a sub-`SELECT`, or as passed to `UNNEST`.
-    Table(TableType<TV>),
+    Table(TableType),
     /// A function type.
     Function(FunctionType),
 }
@@ -229,11 +242,11 @@ impl<TV: TypeVarSupport> fmt::Display for StructElementType<TV> {
 
 /// A table type.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TableType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
-    pub columns: Vec<ColumnType<TV>>,
+pub struct TableType {
+    pub columns: Vec<ColumnType>,
 }
 
-impl<TV: TypeVarSupport> fmt::Display for TableType<TV> {
+impl fmt::Display for TableType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TABLE<")?;
         for (i, column) in self.columns.iter().enumerate() {
@@ -249,13 +262,13 @@ impl<TV: TypeVarSupport> fmt::Display for TableType<TV> {
 
 /// A column type.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ColumnType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
+pub struct ColumnType {
     pub name: Ident,
-    pub ty: ValueType<TV>,
+    pub ty: ValueType,
     pub not_null: bool,
 }
 
-impl<TV: TypeVarSupport> fmt::Display for ColumnType<TV> {
+impl fmt::Display for ColumnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", BigQueryName(&self.name.name), self.ty)?;
         if self.not_null {
@@ -441,21 +454,21 @@ peg::parser! {
                 (name, ty)
             }
 
-        pub rule ty() -> Type<TypeVar>
+        pub rule ty<TV: TypeVarSupport>() -> Type<TV>
             = t:argument_type() { Type::Argument(t) }
             / t:table_type() { Type::Table(t) }
             / t:function_type() { Type::Function(t) }
 
-        rule argument_type() -> ArgumentType<TypeVar>
+        rule argument_type<TV: TypeVarSupport>() -> ArgumentType<TV>
             = "Agg" _? "<" _? t:value_type() _? ">" { ArgumentType::Aggregating(t) }
             / t:value_type() { ArgumentType::Value(t) }
 
-        rule value_type() -> ValueType<TypeVar>
+        rule value_type<TV: TypeVarSupport>() -> ValueType<TV>
             = t:simple_type() { ValueType::Simple(t) }
             / "ARRAY" _? "<" _? t:simple_type() _? ">" { ValueType::Array(Box::new(t)) }
 
         // Longest match first.
-        rule simple_type() -> SimpleType<TypeVar>
+        rule simple_type<TV: TypeVarSupport>() -> SimpleType<TV>
             = "BOOL" { SimpleType::Bool }
             / "BYTES" { SimpleType::Bytes }
             / "DATETIME" { SimpleType::Datetime }
@@ -471,9 +484,9 @@ peg::parser! {
             / "TIME" { SimpleType::Time }
             / "STRUCT" _? "<" _? fields:(struct_field() ** (_? "," _?)) _? ">" {
                 SimpleType::Struct(StructType { fields }) }
-            / type_var:type_var() { SimpleType::Parameter(type_var) }
+            / type_var:type_var() {? TV::simple_type_from_type_var(type_var) }
 
-        rule struct_field() -> StructElementType<TypeVar>
+        rule struct_field<TV: TypeVarSupport>() -> StructElementType<TV>
             = t:value_type() { StructElementType { name: None, ty: t } }
             / name:ident() _ t:value_type() { StructElementType { name: Some(name), ty: t } }
 
@@ -513,14 +526,14 @@ peg::parser! {
             / ".." _? rest_params:value_type() { (Vec::new(), Some(rest_params)) }
             / { (Vec::new(), None) }
 
-        rule table_type() -> TableType<TypeVar>
+        rule table_type() -> TableType
             = "TABLE" _? "<" _? columns:(column_type() ** (_? "," _?)) _? ">" {
                 TableType { columns }
             }
 
-        rule column_type() -> ColumnType<TypeVar>
-            = name:ident() _ t:value_type() not_null:not_null() {
-                ColumnType { name, ty: t, not_null }
+        rule column_type() -> ColumnType
+            = name:ident() _ ty:value_type() not_null:not_null() {
+                ColumnType { name, ty, not_null }
             }
 
         rule not_null() -> bool
