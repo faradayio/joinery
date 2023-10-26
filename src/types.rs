@@ -15,7 +15,7 @@
 // Work in progress.
 #![allow(dead_code)]
 
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use peg::{error::ParseError, str::LineCol};
 
@@ -30,7 +30,7 @@ use crate::{
 
 /// Sometimes we want concrete types, and sometimes we want types with type
 /// variables. This trait convers both those cases.
-pub trait TypeVarSupport: fmt::Display + Sized {
+pub trait TypeVarSupport: Clone + fmt::Display + PartialEq + Sized {
     /// Convert a [`TypeVar`] into a [`SimpleType`], if possible.
     fn simple_type_from_type_var(tv: TypeVar) -> Result<SimpleType<Self>, &'static str>;
 }
@@ -169,7 +169,83 @@ pub enum ValueType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
 
     /// An array of values. BigQuery does not support nesting arrays, although
     /// you can have `ARRAY<STRUCT<ARRAY<T>>>` if you wish.
-    Array(Box<SimpleType<TV>>),
+    Array(SimpleType<TV>),
+}
+
+impl<TV: TypeVarSupport> ValueType<TV> {
+    /// Is this a subtype of `other`?
+    pub fn is_subtype_of(&self, other: &ValueType<TV>) -> bool {
+        match (self, other) {
+            // Every type is a subtype of itself.
+            (a, b) if a == b => true,
+
+            // Bottom is a subtype of every type.
+            (ValueType::Simple(SimpleType::Bottom), _) => true,
+
+            // Null is a subtype of every type except bottom.
+            (_, ValueType::Simple(SimpleType::Bottom)) => false,
+            (ValueType::Simple(SimpleType::Null), _) => true,
+
+            // Integers are a subtype of floats.
+            (ValueType::Simple(SimpleType::Int64), ValueType::Simple(SimpleType::Float64)) => true,
+
+            // An ARRAY<⊥> is a subset of any other array type. However,
+            // an ARRAY<INT64> is not a subtype of ARRAY<FLOAT64>, as
+            (ValueType::Array(SimpleType::Bottom), ValueType::Array(_)) => true,
+
+            // TODO: Structs with anonymous fields may be subtype of structs
+            // with named fields.
+
+            // TODO: Tables with unknown column names, built by `SELECT` and
+            // combined with `UNION`, may be subtypes of tables with known
+            // column names.
+
+            // Otherwise, assume it isn't a subtype.
+            _ => false,
+        }
+    }
+
+    /// Return an error if we are not a subtype of `other`.
+    pub fn expect_subtype_of(&self, other: &ValueType<TV>, spanned: &dyn Spanned) -> Result<()> {
+        if !self.is_subtype_of(other) {
+            return Err(Error::annotated(
+                format!("expected {}, found {}", other, self),
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Compute the greatest common subtype of two types. Will return ⊥ if it
+    /// can't find anything better.
+    ///
+    /// For some nice theoretical terminology, see [this
+    /// page](https://orc.csres.utexas.edu/documentation/html/refmanual/ref.types.subtyping.html).
+    pub fn greatest_common_subtype<'a>(
+        &'a self,
+        other: &'a ValueType<TV>,
+    ) -> Cow<'a, ValueType<TV>> {
+        if self.is_subtype_of(other) {
+            Cow::Borrowed(self)
+        } else if other.is_subtype_of(self) {
+            Cow::Borrowed(other)
+        } else {
+            Cow::Owned(ValueType::Simple(SimpleType::Bottom))
+        }
+    }
+
+    /// Expect this type to be inhabited by at least one value.
+    pub fn expect_inhabited(&self, spanned: &dyn Spanned) -> Result<()> {
+        match self {
+            ValueType::Simple(SimpleType::Bottom) => Err(Error::annotated(
+                "cannot construct a value of this type",
+                spanned.span(),
+                "no valid values",
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl<TV: TypeVarSupport> fmt::Display for ValueType<TV> {
@@ -185,6 +261,10 @@ impl<TV: TypeVarSupport> fmt::Display for ValueType<TV> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimpleType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Bool,
+    /// The "bottom" type "⊥", which contains no values, and is a subtype of
+    /// all other types. The expression `ARRAY[]` has the type `ARRAY<⊥>`,
+    /// because it can be used as an array of any type.
+    Bottom,
     Bytes,
     Date,
     /// This type can be used a function argument, but does not exist as an
@@ -196,6 +276,9 @@ pub enum SimpleType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Geography,
     Int64,
     Interval,
+    /// The NULL type. This is somewhat similar to `Bottom`. It's a subtype of
+    /// almost every type. It contains a single value, `NULL`.
+    Null,
     Numeric,
     String,
     Time,
@@ -208,6 +291,7 @@ impl<TV: TypeVarSupport> fmt::Display for SimpleType<TV> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SimpleType::Bool => write!(f, "BOOL"),
+            SimpleType::Bottom => write!(f, "⊥"),
             SimpleType::Bytes => write!(f, "BYTES"),
             SimpleType::Date => write!(f, "DATE"),
             SimpleType::Datepart => write!(f, "DATEPART"),
@@ -217,6 +301,7 @@ impl<TV: TypeVarSupport> fmt::Display for SimpleType<TV> {
             SimpleType::Int64 => write!(f, "INT64"),
             SimpleType::Interval => write!(f, "INTERVAL"),
             SimpleType::Numeric => write!(f, "NUMERIC"),
+            SimpleType::Null => write!(f, "NULL"),
             SimpleType::String => write!(f, "STRING"),
             SimpleType::Time => write!(f, "TIME"),
             SimpleType::Timestamp => write!(f, "TIMESTAMP"),
@@ -269,6 +354,61 @@ pub struct TableType {
     pub columns: Vec<ColumnType>,
 }
 
+impl TableType {
+    /// Look up a column by name.
+    pub fn column_by_name(&self, name: &Ident) -> Option<&ColumnType> {
+        for column in &self.columns {
+            if let Some(column_name) = &column.name {
+                if column_name == name {
+                    return Some(column);
+                }
+            }
+        }
+        None
+    }
+
+    /// Look up a column by name, and return an error if it doesn't exist.
+    pub fn column_by_name_or_err(&self, name: &Ident) -> Result<&ColumnType> {
+        match self.column_by_name(name) {
+            Some(column) => Ok(column),
+            None => Err(Error::annotated(
+                format!("no such column: {}", name.name),
+                name.span(),
+                "not defined",
+            )),
+        }
+    }
+
+    /// Is this table a subtype of `other`, ignoring nullability?
+    pub fn is_subtype_ignoring_nullability_of(&self, other: &TableType) -> bool {
+        if self.columns.len() != other.columns.len() {
+            return false;
+        }
+        for (a, b) in self.columns.iter().zip(&other.columns) {
+            if !a.is_subtype_ignoring_nullability_of(b) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Return an error if this table is not a subtype of `other`.
+    pub fn expect_subtype_ignoring_nullability_of(
+        &self,
+        other: &TableType,
+        spanned: &dyn Spanned,
+    ) -> Result<()> {
+        if !self.is_subtype_ignoring_nullability_of(other) {
+            return Err(Error::annotated(
+                format!("expected {}, found {}", other, self),
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for TableType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TABLE<")?;
@@ -286,14 +426,43 @@ impl fmt::Display for TableType {
 /// A column type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnType {
-    pub name: Ident,
+    /// The name of the column, if it has one. Anonymous columns may be produced
+    /// using things like `SELECT 1`, but they cannot occur in stored tables.
+    pub name: Option<Ident>,
     pub ty: ValueType,
     pub not_null: bool,
 }
 
+impl ColumnType {
+    /// Return an error if this column is not storable.
+    pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
+        self.ty.expect_inhabited(spanned)?;
+        if self.name.is_none() {
+            return Err(Error::annotated(
+                "cannot store a table with anonymous columns",
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Is this column a subtype of `other`, ignoring nullability?
+    pub fn is_subtype_ignoring_nullability_of(&self, other: &ColumnType) -> bool {
+        self.ty.is_subtype_of(&other.ty)
+            && match (&self.name, &other.name) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+    }
+}
+
 impl fmt::Display for ColumnType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", BigQueryName(&self.name.name), self.ty)?;
+        if let Some(name) = &self.name {
+            write!(f, "{} ", BigQueryName(&name.name))?;
+        }
+        write!(f, "{}", self.ty)?;
         if self.not_null {
             write!(f, " NOT NULL")?;
         }
@@ -396,7 +565,7 @@ impl<TV: TypeVarSupport> TryFrom<&ast::DataType> for ValueType<TV> {
             ast::DataType::Timestamp(_) => Ok(ValueType::Simple(SimpleType::Timestamp)),
             ast::DataType::Array { data_type, .. } => {
                 if let ValueType::Simple(elem_type) = data_type.as_ref().try_into()? {
-                    Ok(ValueType::Array(Box::new(elem_type)))
+                    Ok(ValueType::Array(elem_type))
                 } else {
                     // TODO: Get scope from `data_type`.
                     Err(format_err!("ARRAY<..> must not contain another ARRAY"))
@@ -480,11 +649,12 @@ peg::parser! {
 
         rule value_type<TV: TypeVarSupport>() -> ValueType<TV>
             = t:simple_type() { ValueType::Simple(t) }
-            / "ARRAY" _? "<" _? t:simple_type() _? ">" { ValueType::Array(Box::new(t)) }
+            / "ARRAY" _? "<" _? t:simple_type() _? ">" { ValueType::Array(t) }
 
         // Longest match first.
         rule simple_type<TV: TypeVarSupport>() -> SimpleType<TV>
             = "BOOL" { SimpleType::Bool }
+            / "⊥" { SimpleType::Bottom }
             / "BYTES" { SimpleType::Bytes }
             / "DATETIME" { SimpleType::Datetime }
             / "DATEPART" { SimpleType::Datepart }
@@ -493,6 +663,7 @@ peg::parser! {
             / "GEOGRAPHY" { SimpleType::Geography }
             / "INT64" { SimpleType::Int64 }
             / "INTERVAL" { SimpleType::Interval }
+            / "NULL" { SimpleType::Null }
             / "NUMERIC" { SimpleType::Numeric }
             / "STRING" { SimpleType::String }
             / "TIMESTAMP" { SimpleType::Timestamp }
@@ -547,8 +718,11 @@ peg::parser! {
             }
 
         rule column_type() -> ColumnType
-            = name:ident() _ ty:value_type() not_null:not_null() {
-                ColumnType { name, ty, not_null }
+            = ty:value_type() not_null:not_null() {
+                ColumnType { name: None, ty, not_null }
+            }
+            / name:ident() _ ty:value_type() not_null:not_null() {
+                ColumnType { name: Some(name), ty, not_null }
             }
 
         rule not_null() -> bool

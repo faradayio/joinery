@@ -75,11 +75,14 @@ impl InferTypes for ast::Statement {
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
             ast::Statement::Query(stmt) => {
-                let (ty, _scope) = stmt.infer_types(scope)?;
-                Ok((Some(ty), scope.clone()))
+                let (ty, scope) = stmt.infer_types(scope)?;
+                Ok((Some(ty), scope))
             }
             ast::Statement::DeleteFrom(_) => Err(nyi(self, "DELETE FROM")),
-            ast::Statement::InsertInto(_) => Err(nyi(self, "INSERT INTO")),
+            ast::Statement::InsertInto(stmt) => {
+                let ((), scope) = stmt.infer_types(scope)?;
+                Ok((None, scope))
+            }
             ast::Statement::CreateTable(stmt) => {
                 let ((), scope) = stmt.infer_types(scope)?;
                 Ok((None, scope))
@@ -117,14 +120,17 @@ impl InferTypes for ast::CreateTableStatement {
                     .node_iter()
                     .map(|column| {
                         let ty = ValueType::try_from(&column.data_type)?;
-                        Ok(ColumnType {
-                            name: column.name.clone(),
+                        let col_ty = ColumnType {
+                            name: Some(column.name.clone()),
                             ty,
                             // TODO: We don't support this in the main grammar yet.
                             not_null: false,
-                        })
+                        };
+                        col_ty.expect_creatable(column)?;
+                        Ok(col_ty)
                     })
                     .collect::<Result<Vec<_>>>()?;
+
                 scope.add(
                     ident_from_table_name(table_name)?,
                     Type::Table(TableType {
@@ -142,6 +148,9 @@ impl InferTypes for ast::CreateTableStatement {
                 ..
             } => {
                 let (ty, _scope) = query_statement.infer_types(scope)?;
+                for col_ty in &ty.columns {
+                    col_ty.expect_creatable(query_statement)?;
+                }
                 let mut scope = Scope::new(scope);
                 scope.add(ident_from_table_name(table_name)?, Type::Table(ty))?;
                 Ok(((), scope.into_handle()))
@@ -159,6 +168,49 @@ impl InferTypes for ast::DropTableStatement {
         let table = ident_from_table_name(table_name)?;
         scope.hide(&table)?;
         Ok(((), scope.into_handle()))
+    }
+}
+
+impl InferTypes for ast::InsertIntoStatement {
+    type Type = ();
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::InsertIntoStatement {
+            table_name,
+            inserted_data,
+            ..
+        } = self;
+        let table = ident_from_table_name(table_name)?;
+        let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
+
+        match inserted_data {
+            ast::InsertedData::Values { rows, .. } => {
+                for row in rows.node_iter_mut() {
+                    let (ty, _scope) = row.infer_types(scope)?;
+                    ty.expect_subtype_ignoring_nullability_of(table_type, row)?;
+                }
+                Ok(((), scope.clone()))
+            }
+            ast::InsertedData::Select { query, .. } => Err(nyi(query, "INSERT INTO .. AS")),
+        }
+    }
+}
+
+impl InferTypes for ast::Row {
+    type Type = TableType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::Row { expressions, .. } = self;
+        let mut cols = vec![];
+        for expr in expressions.node_iter_mut() {
+            let (ty, _scope) = expr.infer_types(scope)?;
+            cols.push(ColumnType {
+                name: None,
+                ty,
+                not_null: false,
+            });
+        }
+        Ok((TableType { columns: cols }, scope.clone()))
     }
 }
 
@@ -250,6 +302,9 @@ impl InferTypes for ast::SelectExpression {
                 ast::SelectListItem::Expression { expression, alias } => {
                     // BigQuery does not allow select list items to see names
                     // bound by other select list items.
+                    //
+                    // TODO: Delay assigning anonymous names until we actually
+                    // create a table?
                     let (ty, _scope) = expression.infer_types(&scope)?;
                     let name = alias
                         .infer_column_name()
@@ -263,7 +318,7 @@ impl InferTypes for ast::SelectExpression {
                         });
 
                     cols.push(ColumnType {
-                        name,
+                        name: Some(name),
                         ty,
                         not_null: false,
                     });
@@ -308,10 +363,12 @@ impl InferTypes for ast::FromItem {
 
                 let mut scope = Scope::new(scope);
                 for column in &table_type.columns {
-                    scope.add(
-                        column.name.clone().into(),
-                        Type::Argument(ArgumentType::Value(column.ty.clone())),
-                    )?;
+                    if let Some(column_name) = &column.name {
+                        scope.add(
+                            column_name.clone().into(),
+                            Type::Argument(ArgumentType::Value(column.ty.clone())),
+                        )?;
+                    }
                 }
                 Ok(((), scope.into_handle()))
             }
@@ -326,11 +383,13 @@ impl InferTypes for ast::Expression {
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
-            ast::Expression::BoolValue(_) => Ok((
-                ValueType::Simple(crate::types::SimpleType::Bool),
-                scope.clone(),
-            )),
+            ast::Expression::BoolValue(_) => {
+                Ok((ValueType::Simple(SimpleType::Bool), scope.clone()))
+            }
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
+            ast::Expression::Null { .. } => {
+                Ok((ValueType::Simple(SimpleType::Null), scope.clone()))
+            }
             ast::Expression::ColumnName(ident) => {
                 let ident = ident.to_owned().into();
                 let ty = scope.get_or_err(&ident)?.try_as_value_type(&ident)?;
@@ -343,18 +402,17 @@ impl InferTypes for ast::Expression {
             }) => {
                 let table = ident_from_table_name(table_name)?;
                 let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
-                let column_type = table_type
-                    .columns
-                    .iter()
-                    .find(|column_type| column_type.name == *column_name)
-                    .ok_or_else(|| {
-                        Error::annotated(
-                            format!("column {:?} not found in table {:?}", column_name, table),
-                            column_name.span(),
-                            "not found",
-                        )
-                    })?;
+                let column_type = table_type.column_by_name_or_err(column_name)?;
                 Ok((column_type.ty.to_owned(), scope.clone()))
+            }
+            ast::Expression::Cast(ast::Cast {
+                expression,
+                data_type,
+                ..
+            }) => {
+                expression.infer_types(scope)?;
+                let ty = ValueType::try_from(&*data_type)?;
+                Ok((ty, scope.clone()))
             }
             _ => Err(nyi(self, "expression")),
         }
@@ -531,4 +589,13 @@ SELECT t.x FROM t";
     //         let (_, _, scope) = infer(sql).unwrap();
     //         assert_defines!(scope, "foo", "TABLE<x STRING>");
     //     }
+
+    #[test]
+    fn insert_into() {
+        let sql = "
+CREATE TABLE foo (x FLOAT64);
+INSERT INTO foo VALUES (3.0), (2), (NULL)";
+        let (_, _, scope) = infer(sql).unwrap();
+        assert_defines!(scope, "foo", "TABLE<x FLOAT64>");
+    }
 }

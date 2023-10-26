@@ -829,12 +829,12 @@ pub struct DatePart {
 /// A cast expression.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct Cast {
-    cast_type: CastType,
-    paren1: Punct,
-    expression: Box<Expression>,
-    as_token: Keyword,
-    data_type: DataType,
-    paren2: Punct,
+    pub cast_type: CastType,
+    pub paren1: Punct,
+    pub expression: Box<Expression>,
+    pub as_token: Keyword,
+    pub data_type: DataType,
+    pub paren2: Punct,
 }
 
 /// What type of cast do we want to perform?
