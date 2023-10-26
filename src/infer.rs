@@ -5,7 +5,7 @@
 
 use crate::{
     ast::{self, SelectList},
-    errors::{format_err, Result},
+    errors::{format_err, Error, Result},
     scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
     types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
@@ -78,18 +78,18 @@ impl InferTypes for ast::Statement {
                 let (ty, _scope) = stmt.infer_types(scope)?;
                 Ok((Some(ty), scope.clone()))
             }
-            ast::Statement::DeleteFrom(_) => todo!("DELETE FROM"),
-            ast::Statement::InsertInto(_) => todo!("INSERT INTO"),
+            ast::Statement::DeleteFrom(_) => Err(nyi(self, "DELETE FROM")),
+            ast::Statement::InsertInto(_) => Err(nyi(self, "INSERT INTO")),
             ast::Statement::CreateTable(stmt) => {
                 let ((), scope) = stmt.infer_types(scope)?;
                 Ok((None, scope))
             }
-            ast::Statement::CreateView(_) => todo!("CREATE VIEW"),
+            ast::Statement::CreateView(_) => Err(nyi(self, "CREATE VIEW")),
             ast::Statement::DropTable(stmt) => {
                 let ((), scope) = stmt.infer_types(scope)?;
                 Ok((None, scope))
             }
-            ast::Statement::DropView(_) => todo!("DROP VIEW"),
+            ast::Statement::DropView(_) => Err(nyi(self, "DROP VIEW")),
         }
     }
 }
@@ -98,10 +98,7 @@ impl InferTypes for ast::Statement {
 fn ident_from_table_name(table_name: &ast::TableName) -> Result<CaseInsensitiveIdent> {
     match table_name {
         ast::TableName::Table { table, .. } => Ok(table.clone().into()),
-        _ => Err(format_err!(
-            "type inference doesn't yet support dotted name: {:?}",
-            table_name
-        )),
+        _ => Err(nyi(table_name, "dotted name")),
     }
 }
 
@@ -190,7 +187,7 @@ impl InferTypes for ast::QueryExpression {
                 }
                 query.infer_types(&scope)
             }
-            ast::QueryExpression::SetOperation { .. } => todo!("set operation"),
+            ast::QueryExpression::SetOperation { .. } => Err(nyi(self, "set operation")),
         }
     }
 }
@@ -271,7 +268,7 @@ impl InferTypes for ast::SelectExpression {
                         not_null: false,
                     });
                 }
-                _ => todo!("select list item"),
+                _ => return Err(nyi(item, "select list item")),
             }
         }
         let table_type = TableType { columns: cols };
@@ -290,7 +287,7 @@ impl InferTypes for ast::FromClause {
         } = self;
         let ((), scope) = from_item.infer_types(scope)?;
         if !join_operations.is_empty() {
-            todo!("join operations")
+            return Err(nyi(self, "join operations"));
         }
         Ok(((), scope))
     }
@@ -316,7 +313,7 @@ impl InferTypes for ast::FromItem {
                 };
 
                 if alias.is_some() {
-                    todo!("from with alias");
+                    return Err(nyi(alias, "from with alias"));
                 }
 
                 let mut scope = Scope::new(scope);
@@ -328,8 +325,8 @@ impl InferTypes for ast::FromItem {
                 }
                 Ok(((), scope.into_handle()))
             }
-            ast::FromItem::Subquery { .. } => todo!("from subquery"),
-            ast::FromItem::Unnest { .. } => todo!("from unnest"),
+            ast::FromItem::Subquery { .. } => Err(nyi(self, "from subquery")),
+            ast::FromItem::Unnest { .. } => Err(nyi(self, "from unnest")),
         }
     }
 }
@@ -381,7 +378,7 @@ impl InferTypes for ast::Expression {
                     })?;
                 Ok((column_type.ty.to_owned(), scope.clone()))
             }
-            _ => todo!("expression: {:?}", self),
+            _ => Err(nyi(self, "expression")),
         }
     }
 }
@@ -432,6 +429,15 @@ impl InferColumnName for ast::Alias {
     }
 }
 
+/// Print a pretty error message when we haven't implemented something.
+fn nyi(spanned: &dyn Spanned, name: &str) -> Error {
+    Error::annotated(
+        "could not infer types",
+        spanned.span(),
+        format!("not yet implemented: ({})", name),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
@@ -457,8 +463,13 @@ mod tests {
             }
         };
         let scope = Scope::root();
-        let (ty, scope) = program.infer_types(&scope)?;
-        Ok((files, ty, scope))
+        match program.infer_types(&scope) {
+            Ok((ty, scope)) => Ok((files, ty, scope)),
+            Err(e) => {
+                e.emit(&files);
+                panic!("type inference error");
+            }
+        }
     }
 
     fn lookup(scope: &ScopeHandle, name: &str) -> Option<ScopeValue> {
@@ -524,7 +535,7 @@ SELECT x FROM t2";
     }
 
     #[test]
-    fn columns_scoped_by_table() {
+    fn table_dot_column() {
         let sql = "
 CREATE TABLE foo AS
 WITH t AS (SELECT 'a' AS x)
@@ -532,4 +543,14 @@ SELECT t.x FROM t";
         let (_, _, scope) = infer(sql).unwrap();
         assert_defines!(scope, "foo", "TABLE<x STRING>");
     }
+
+    //     #[test]
+    //     fn table_dot_star() {
+    //         let sql = "
+    // CREATE TABLE foo AS
+    // WITH t AS (SELECT 'a' AS x)
+    // SELECT t.* FROM t";
+    //         let (_, _, scope) = infer(sql).unwrap();
+    //         assert_defines!(scope, "foo", "TABLE<x STRING>");
+    //     }
 }
