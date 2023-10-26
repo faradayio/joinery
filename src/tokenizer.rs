@@ -32,10 +32,7 @@ use std::{
     str::from_utf8,
 };
 
-use codespan_reporting::{
-    diagnostic::{Diagnostic, Label},
-    files::SimpleFiles,
-};
+use codespan_reporting::diagnostic::{Diagnostic, Label};
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::ToTokens;
 use peg::{error::ParseError, Parse, ParseElem, RuleResult};
@@ -44,7 +41,8 @@ use tracing::{error, trace};
 use crate::{
     ast,
     drivers::bigquery::BigQueryString,
-    errors::{Context, Result, SourceError},
+    errors::{Result, SourceError},
+    known_files::{FileId, KnownFiles},
 };
 
 /// A source span.
@@ -54,7 +52,7 @@ pub enum Span {
     File {
         /// The file ID used to identify this file. The actual source lives in
         /// a `codespan_reporting` data structure.
-        file_id: usize,
+        file_id: FileId,
 
         /// The byte range for this span.
         span: Range<usize>,
@@ -69,7 +67,7 @@ pub enum Span {
 impl Span {
     /// Get information about this span for use in a
     /// [`codespan_reporting::diagnostic::Diagnostic`].
-    pub fn for_diagnostic(&self) -> Option<(usize, Range<usize>)> {
+    pub fn for_diagnostic(&self) -> Option<(FileId, Range<usize>)> {
         match self {
             // I think we want to return a non-empty range for a `Diagnostic`?
             Span::File { file_id, span } if span.start == span.end => {
@@ -579,7 +577,6 @@ impl TokenStream {
                 let diagnostic = Diagnostic::error().with_message("Failed to parse token stream");
                 Err(SourceError {
                     expected: err.to_string(),
-                    files: SimpleFiles::new(),
                     diagnostic,
                 }
                 .into())
@@ -955,12 +952,8 @@ fn never_merges(c: char) -> bool {
 }
 
 /// Convert `sql` into a series of tokens.
-pub fn tokenize_sql(files: &SimpleFiles<String, String>, file_id: usize) -> Result<TokenStream> {
-    let sql = files
-        .get(file_id)
-        .with_context(|| "cannot find file by ID")?
-        .source()
-        .as_str();
+pub fn tokenize_sql(files: &KnownFiles, file_id: FileId) -> Result<TokenStream> {
+    let sql = files.source_code(file_id)?;
     let stream_span = Span::File {
         file_id,
         span: 0..sql.len(),
@@ -980,7 +973,6 @@ pub fn tokenize_sql(files: &SimpleFiles<String, String>, file_id: usize) -> Resu
                 .with_message(format!("expected {}", err.expected))]);
             Err(SourceError {
                 expected: err.to_string(),
-                files: files.to_owned(),
                 diagnostic,
             }
             .into())
@@ -989,7 +981,7 @@ pub fn tokenize_sql(files: &SimpleFiles<String, String>, file_id: usize) -> Resu
 }
 
 peg::parser! {
-    grammar lexer(file_id: usize) for str {
+    grammar lexer(file_id: FileId) for str {
         pub rule tokens() -> Vec<Token>
             = leading_ws:whitespace_only() tokens:(token()*) {
                 if tokens.is_empty() {
@@ -1166,6 +1158,9 @@ mod test {
 
     #[test]
     fn tokenize_sql_tests() {
+        // Keep track of all the files we've seen, to report errors.
+        let mut files = KnownFiles::new();
+
         // Get the path to `tests/sql`.
         let tests_sql_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -1182,15 +1177,14 @@ mod test {
             println!("Tokenizing {:?}", path);
 
             // Read the file.
-            let sql = std::fs::read_to_string(&path).expect("failed to read SQL test file");
+            let file_id = files.add(&path).expect("failed to add SQL test file");
+            let sql = files.source_code(file_id).unwrap();
 
             // Tokenize it.
-            let mut files = SimpleFiles::new();
-            let file_id = files.add(path.to_string_lossy().into_owned(), sql.clone());
             let tokens = match tokenize_sql(&files, file_id) {
                 Ok(tokens) => tokens,
                 Err(err) => {
-                    err.emit();
+                    err.emit(&files);
                     panic!("failed to tokenize SQL test file");
                 }
             };
@@ -1215,12 +1209,11 @@ mod test {
                     .expect("failed to write token");
             }
             let stripped_sql = from_utf8(&buf).unwrap();
-            let stripped_file_id =
-                files.add(path.to_string_lossy().into_owned(), stripped_sql.to_owned());
+            let stripped_file_id = files.add_string(&path, stripped_sql);
             let stripped_tokens = match tokenize_sql(&files, stripped_file_id) {
                 Ok(tokens) => tokens,
                 Err(err) => {
-                    err.emit();
+                    err.emit(&files);
                     panic!("failed to tokenize stripped SQL test file");
                 }
             };
@@ -1278,8 +1271,8 @@ mod test {
     #[test]
     fn toy_parser_operates_on_token_stream() {
         let sql = "select * from t";
-        let mut files = SimpleFiles::new();
-        let file_id = files.add("test.sql".to_owned(), sql.to_owned());
+        let mut files = KnownFiles::new();
+        let file_id = files.add_string("test.sql", sql);
         let tokens = tokenize_sql(&files, file_id).unwrap();
         println!("==== PARSING ====\n{:?}\n====", tokens);
         let parsed = test_parser::query(&tokens).unwrap();

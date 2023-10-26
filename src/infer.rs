@@ -434,12 +434,11 @@ impl InferColumnName for ast::Alias {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use pretty_assertions::assert_eq;
 
     use crate::{
         ast::parse_sql,
+        known_files::KnownFiles,
         scope::{CaseInsensitiveIdent, Scope, ScopeValue},
         tokenizer::Span,
         types::tests::ty,
@@ -447,16 +446,19 @@ mod tests {
 
     use super::*;
 
-    fn infer(sql: &str) -> Result<(Option<TableType>, ScopeHandle)> {
-        let mut program = match parse_sql(Path::new("test.sql"), sql) {
+    fn infer(sql: &str) -> Result<(KnownFiles, Option<TableType>, ScopeHandle)> {
+        let mut files = KnownFiles::new();
+        let file_id = files.add_string("test.sql", sql);
+        let mut program = match parse_sql(&files, file_id) {
             Ok(program) => program,
             Err(e) => {
-                e.emit();
+                e.emit(&files);
                 panic!("parse error");
             }
         };
         let scope = Scope::root();
-        program.infer_types(&scope)
+        let (ty, scope) = program.infer_types(&scope)?;
+        Ok((files, ty, scope))
     }
 
     fn lookup(scope: &ScopeHandle, name: &str) -> Option<ScopeValue> {
@@ -479,7 +481,7 @@ mod tests {
 
     #[test]
     fn root_scope_defines_functions() {
-        let (_, scope) = infer("SELECT 1 AS x").unwrap();
+        let (_, _, scope) = infer("SELECT 1 AS x").unwrap();
         assert_defines!(scope, "LOWER", "Fn(STRING) -> STRING");
         assert_defines!(scope, "lower", "Fn(STRING) -> STRING");
         assert_not_defines!(scope, "NO_SUCH_FUNCTION");
@@ -487,19 +489,19 @@ mod tests {
 
     #[test]
     fn create_table_adds_table_to_scope() {
-        let (_, scope) = infer("CREATE TABLE foo (x INT64, y STRING)").unwrap();
+        let (_, _, scope) = infer("CREATE TABLE foo (x INT64, y STRING)").unwrap();
         assert_defines!(scope, "foo", "TABLE<x INT64, y STRING>");
     }
 
     #[test]
     fn drop_table_removes_table_from_scope() {
-        let (_, scope) = infer("CREATE TABLE foo (x INT64, y STRING); DROP TABLE foo").unwrap();
+        let (_, _, scope) = infer("CREATE TABLE foo (x INT64, y STRING); DROP TABLE foo").unwrap();
         assert_not_defines!(scope, "foo");
     }
 
     #[test]
     fn create_table_as_infers_column_types() {
-        let (_, scope) = infer("CREATE TABLE foo AS SELECT 'a' AS x, TRUE AS y").unwrap();
+        let (_, _, scope) = infer("CREATE TABLE foo AS SELECT 'a' AS x, TRUE AS y").unwrap();
         assert_defines!(scope, "foo", "TABLE<x STRING, y BOOL>");
     }
 
@@ -511,13 +513,13 @@ WITH
     t1 AS (SELECT 'a' AS x),
     t2 AS (SELECT x FROM t1)
 SELECT x FROM t2";
-        let (_, scope) = infer(sql).unwrap();
+        let (_, _, scope) = infer(sql).unwrap();
         assert_defines!(scope, "foo", "TABLE<x STRING>");
     }
 
     #[test]
     fn anon_and_aliased_columns() {
-        let (_, scope) = infer("CREATE TABLE foo AS SELECT 1, 2 AS x, 3").unwrap();
+        let (_, _, scope) = infer("CREATE TABLE foo AS SELECT 1, 2 AS x, 3").unwrap();
         assert_defines!(scope, "foo", "TABLE<_f0 INT64, x INT64, _f1 INT64>");
     }
 
@@ -527,7 +529,7 @@ SELECT x FROM t2";
 CREATE TABLE foo AS
 WITH t AS (SELECT 'a' AS x)
 SELECT t.x FROM t";
-        let (_, scope) = infer(sql).unwrap();
+        let (_, _, scope) = infer(sql).unwrap();
         assert_defines!(scope, "foo", "TABLE<x STRING>");
     }
 }

@@ -10,6 +10,7 @@ use crate::{
     analyze::FunctionCallCounts,
     ast::{self},
     errors::{Context, Result},
+    known_files::KnownFiles,
 };
 
 /// Parse SQL from a CSV file containing `id` and `query` columns.
@@ -34,7 +35,7 @@ struct Row {
 
 /// Parse queries from a CSV file.
 #[instrument(skip(opt))]
-pub fn cmd_parse(opt: &ParseOpt) -> Result<()> {
+pub fn cmd_parse(files: &mut KnownFiles, opt: &ParseOpt) -> Result<()> {
     // Keep track of how many rows we've processed and how many queries we've
     // successfully parsed.
     let mut row_count = 0;
@@ -64,7 +65,8 @@ pub fn cmd_parse(opt: &ParseOpt) -> Result<()> {
         }
 
         // Parse query.
-        match ast::parse_sql(&opt.csv_path, &row.query) {
+        let file_id = files.add_string(&opt.csv_path, &row.query);
+        match ast::parse_sql(files, file_id) {
             Ok(sql_program) => {
                 ok_count += 1;
                 ok_line_count += row.query.lines().count();
@@ -75,7 +77,7 @@ pub fn cmd_parse(opt: &ParseOpt) -> Result<()> {
             }
             Err(e) => {
                 println!("ERR {}", row.id);
-                e.emit();
+                e.emit(files);
             }
         }
     }

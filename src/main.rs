@@ -8,6 +8,7 @@ mod cmd;
 mod drivers;
 mod errors;
 mod infer;
+mod known_files;
 mod scope;
 mod tokenizer;
 mod transforms;
@@ -19,6 +20,7 @@ use cmd::{
     sql_test::{cmd_sql_test, SqlTestOpt},
     transpile::{cmd_transpile, TranspileOpt},
 };
+use known_files::KnownFiles;
 use tracing::info_span;
 
 #[derive(Debug, Parser)]
@@ -38,13 +40,14 @@ async fn main() {
     let _span = info_span!("joinery").entered();
 
     let opt = Opt::parse();
+    let mut files = KnownFiles::new();
     let result = match opt {
-        Opt::Parse(parse_opt) => cmd_parse(&parse_opt),
-        Opt::SqlTest(sql_test_opt) => cmd_sql_test(&sql_test_opt).await,
-        Opt::Transpile(transpile_opt) => cmd_transpile(&transpile_opt).await,
+        Opt::Parse(parse_opt) => cmd_parse(&mut files, &parse_opt),
+        Opt::SqlTest(sql_test_opt) => cmd_sql_test(&mut files, &sql_test_opt).await,
+        Opt::Transpile(transpile_opt) => cmd_transpile(&mut files, &transpile_opt).await,
     };
     if let Err(e) = result {
-        e.emit();
+        e.emit(&files);
         exit(1);
     }
 }

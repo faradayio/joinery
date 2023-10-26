@@ -8,6 +8,7 @@ use std::{collections::BTreeMap, fmt, hash, sync::Arc};
 use crate::{
     drivers::bigquery::BigQueryName,
     errors::{format_err, Result},
+    known_files::KnownFiles,
     tokenizer::{Ident, Span},
     types::{parse_function_decls, Type},
     util::is_c_ident,
@@ -118,11 +119,15 @@ impl Scope {
             names: BTreeMap::new(),
         };
 
-        // Add built-in functions.
-        let built_ins = match parse_function_decls(BUILT_IN_FUNCTIONS) {
+        // Add built-in functions. We use a local `known_files` here since we
+        // never return any parse errors, and our caller doesn't need to know we
+        // parse at all.
+        let mut files = KnownFiles::new();
+        let file_id = files.add_string("built-in functions", BUILT_IN_FUNCTIONS);
+        let built_ins = match parse_function_decls(&files, file_id) {
             Ok(built_ins) => built_ins,
             Err(err) => {
-                err.emit();
+                err.emit(&files);
                 panic!("built-in function parse error");
             }
         };
@@ -243,9 +248,6 @@ mod tests {
 
     #[test]
     fn parse_built_in_functions() {
-        if let Err(err) = parse_function_decls(BUILT_IN_FUNCTIONS) {
-            err.emit();
-            panic!("parse error");
-        }
+        Scope::root();
     }
 }

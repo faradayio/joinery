@@ -9,13 +9,14 @@ use anstream::eprintln;
 use async_rusqlite::AlreadyClosed;
 use codespan_reporting::{
     diagnostic::Diagnostic,
-    files::SimpleFiles,
     term::{
         self,
         termcolor::{ColorChoice, StandardStream},
     },
 };
 use owo_colors::OwoColorize;
+
+use crate::known_files::{FileId, KnownFiles};
 
 /// Our standard result type.
 pub type Result<T, E = Error> = result::Result<T, E>;
@@ -57,10 +58,10 @@ impl Error {
 
     /// Emit this error to stderr. This does extra formatting for `SourceError`,
     /// with colors and source code snippets.
-    pub fn emit(&self) {
+    pub fn emit(&self, files: &KnownFiles) {
         match self {
             Error::Source(e) => {
-                e.emit();
+                e.emit(files);
             }
             _ => {
                 let first = if self.is_transparent() {
@@ -172,15 +173,14 @@ where
 #[derive(Debug)]
 pub struct SourceError {
     pub expected: String,
-    pub files: SimpleFiles<String, String>,
-    pub diagnostic: Diagnostic<usize>,
+    pub diagnostic: Diagnostic<FileId>,
 }
 
 impl SourceError {
-    pub fn emit(&self) {
+    pub fn emit(&self, files: &KnownFiles) {
         let writer = StandardStream::stderr(ColorChoice::Auto);
         let config = term::Config::default();
-        term::emit(&mut writer.lock(), &config, &self.files, &self.diagnostic)
+        term::emit(&mut writer.lock(), &config, files, &self.diagnostic)
             .expect("could not write to stderr");
     }
 }

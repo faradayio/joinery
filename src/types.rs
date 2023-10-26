@@ -17,16 +17,14 @@
 
 use std::fmt;
 
-use codespan_reporting::{
-    diagnostic::{Diagnostic, Label},
-    files::SimpleFiles,
-};
+use codespan_reporting::diagnostic::{Diagnostic, Label};
 use peg::{error::ParseError, str::LineCol};
 
 use crate::{
     ast,
     drivers::bigquery::BigQueryName,
     errors::{format_err, Error, Result, SourceError},
+    known_files::{FileId, KnownFiles},
     tokenizer::{Ident, Span},
     util::is_c_ident,
 };
@@ -406,15 +404,14 @@ impl<TV: TypeVarSupport> TryFrom<&ast::DataType> for Type<TV> {
 }
 
 /// Helper function called by type-parsing functions.
-fn parse_helper<T, F>(s: &str, f: F) -> Result<T>
+fn parse_helper<T, F>(files: &KnownFiles, file_id: FileId, f: F) -> Result<T>
 where
     F: FnOnce(&str) -> Result<T, ParseError<LineCol>>,
 {
+    let s = files.source_code(file_id)?;
     match f(s) {
         Ok(parsed) => Ok(parsed),
         Err(e) => {
-            let mut files = SimpleFiles::new();
-            let file_id = files.add("function_decls".to_owned(), s.to_owned());
             let diagnostic = Diagnostic::error()
                 .with_message("parse error")
                 .with_labels(vec![Label::primary(
@@ -424,7 +421,6 @@ where
                 .with_message(format!("expected {}", e.expected))]);
             Err(SourceError {
                 expected: e.expected.to_string(),
-                files,
                 diagnostic,
             }
             .into())
@@ -433,8 +429,11 @@ where
 }
 
 /// Parse a set of function declarations.
-pub fn parse_function_decls(s: &str) -> Result<Vec<(Ident, FunctionType)>> {
-    parse_helper(s, type_grammar::function_decls)
+pub fn parse_function_decls(
+    files: &KnownFiles,
+    file_id: FileId,
+) -> Result<Vec<(Ident, FunctionType)>> {
+    parse_helper(files, file_id, type_grammar::function_decls)
 }
 
 // A `peg` grammar for internal use only, used to define our built-in functions.
@@ -564,10 +563,14 @@ pub mod tests {
 
     /// Parse a type declaration.
     pub fn ty(s: &str) -> Type {
-        match parse_helper(s, type_grammar::ty) {
+        // We use local `KnownFiles` here, because we panic on parse errors, and
+        // our caller doesn't need to know we parse at all.
+        let mut files = KnownFiles::new();
+        let file_id = files.add_string("type", s);
+        match parse_helper(&files, file_id, type_grammar::ty) {
             Ok(ty) => ty,
             Err(e) => {
-                e.emit();
+                e.emit(&files);
                 panic!("parse error");
             }
         }
@@ -575,14 +578,16 @@ pub mod tests {
 
     #[test]
     fn test_parse_function_decls() {
-        match parse_function_decls("ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;") {
+        let mut files = KnownFiles::new();
+        let file_id = files.add_string("fn_decls", "ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;");
+        match parse_function_decls(&files, file_id) {
             Ok(decls) => {
                 assert_eq!(decls.len(), 1);
                 assert_eq!(decls[0].0.name, "ANY_VALUE");
                 assert_eq!(decls[0].1.to_string(), "FnAgg<?T>(Agg<?T>) -> ?T");
             }
             Err(e) => {
-                e.emit();
+                e.emit(&files);
                 panic!("parse error");
             }
         }

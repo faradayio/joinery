@@ -21,13 +21,9 @@ use std::{
     fmt::{self},
     io::{self, Write as _},
     mem::take,
-    path::Path,
 };
 
-use codespan_reporting::{
-    diagnostic::{Diagnostic, Label},
-    files::SimpleFiles,
-};
+use codespan_reporting::diagnostic::{Diagnostic, Label};
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::{Emit, EmitDefault, Spanned, ToTokens};
 
@@ -39,6 +35,7 @@ use crate::{
         trino::{TrinoString, KEYWORDS as TRINO_KEYWORDS},
     },
     errors::{Result, SourceError},
+    known_files::{FileId, KnownFiles},
     tokenizer::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
         RawToken, Spanned, ToTokens, Token, TokenStream, TokenWriter,
@@ -1673,10 +1670,8 @@ pub struct IfExists {
 }
 
 /// Parse BigQuery SQL.
-pub fn parse_sql(filename: &Path, sql: &str) -> Result<SqlProgram> {
-    let mut files = SimpleFiles::new();
-    let file_id = files.add(filename.to_string_lossy().into_owned(), sql.to_string());
-    let token_stream = tokenize_sql(&files, file_id)?;
+pub fn parse_sql(files: &KnownFiles, file_id: FileId) -> Result<SqlProgram> {
+    let token_stream = tokenize_sql(files, file_id)?;
     //println!("token_stream = {:?}", token_stream);
 
     // Parse with or without tracing, as appropriate. The tracing code throws
@@ -1707,7 +1702,6 @@ pub fn parse_sql(filename: &Path, sql: &str) -> Result<SqlProgram> {
             };
             Err(SourceError {
                 expected: e.to_string(),
-                files,
                 diagnostic,
             }
             .into())
@@ -2972,13 +2966,15 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
             .await
             .expect("failed to create SQLite3 fixtures");
 
+        let mut files = KnownFiles::new();
         for &(sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);
+            let file_id = files.add_string("test.sql", sql);
             let normalized = normalized.unwrap_or(sql);
-            let parsed = match parse_sql(Path::new("test.sql"), sql) {
+            let parsed = match parse_sql(&files, file_id) {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    err.emit();
+                    err.emit(&files);
                     panic!("{}", err);
                 }
             };

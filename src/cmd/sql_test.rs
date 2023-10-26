@@ -17,6 +17,7 @@ use crate::{
     ast::{self, parse_sql, CreateTableStatement, CreateViewStatement, Target},
     drivers::{self, Driver},
     errors::{format_err, Context, Error, Result},
+    known_files::{FileId, KnownFiles},
 };
 
 /// Run SQL tests from a directory.
@@ -36,7 +37,7 @@ pub struct SqlTestOpt {
 
 /// Run our SQL test suite.
 #[instrument(skip(opt))]
-pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
+pub async fn cmd_sql_test(files: &mut KnownFiles, opt: &SqlTestOpt) -> Result<()> {
     // Get a database driver for our target.
     let locator = opt.database.parse::<Box<dyn drivers::Locator>>()?;
 
@@ -68,13 +69,14 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
         let path = entry.context("Failed to read test file")?;
 
         // Read file.
-        let query = std::fs::read_to_string(&path).context("Failed to read test file")?;
+        let file_id = files.add(&path)?;
+        let sql = files.source_code(file_id)?;
 
         // Skip pending tests unless asked to run them.
         if !opt.pending {
             let short_path = path.strip_prefix(&base_dir).unwrap_or(&path);
             if let Some(pending_test_info) =
-                PendingTestInfo::for_target(locator.target(), short_path, &query)
+                PendingTestInfo::for_target(locator.target(), short_path, sql)
             {
                 progress('P');
                 pending.push(pending_test_info);
@@ -84,7 +86,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
 
         // Test query.
         let mut driver = locator.driver().await?;
-        match run_test(&mut *driver, &path, &query).await {
+        match run_test(&mut *driver, files, file_id).await {
             Ok(_) => {
                 progress('.');
                 test_ok_count += 1;
@@ -99,7 +101,7 @@ pub async fn cmd_sql_test(opt: &SqlTestOpt) -> Result<()> {
 
     for (i, (path, e)) in test_failures.iter().enumerate() {
         println!("\n{} {}: {}", "FAILED".red(), i + 1, path.display());
-        e.emit();
+        e.emit(files);
     }
 
     if !pending.is_empty() {
@@ -135,13 +137,13 @@ fn progress(c: char) {
     let _ = io::stdout().flush();
 }
 
-#[instrument(skip_all, fields(path = %path.display()))]
+#[instrument(skip_all)]
 async fn run_test(
     driver: &mut dyn Driver,
-    path: &Path,
-    sql: &str,
+    files: &mut KnownFiles,
+    file_id: FileId,
 ) -> std::result::Result<(), Error> {
-    let ast = parse_sql(path, sql)?;
+    let ast = parse_sql(files, file_id)?;
     //eprintln!("SQLite3: {}", ast.emit_to_string(Target::SQLite3));
     let output_tables = find_output_tables(&ast)?;
 

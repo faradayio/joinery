@@ -8,7 +8,8 @@ use tracing::instrument;
 use crate::{
     ast::{parse_sql, Emit},
     drivers,
-    errors::{Context, Result},
+    errors::Result,
+    known_files::KnownFiles,
 };
 
 /// Run SQL tests from a directory.
@@ -25,16 +26,14 @@ pub struct TranspileOpt {
 
 /// Run our SQL test suite.
 #[instrument(skip(opt))]
-pub async fn cmd_transpile(opt: &TranspileOpt) -> Result<()> {
+pub async fn cmd_transpile(files: &mut KnownFiles, opt: &TranspileOpt) -> Result<()> {
     // Get a database driver for our target.
     let locator = opt.database.parse::<Box<dyn drivers::Locator>>()?;
     let driver = locator.driver().await?;
 
     // Parse our SQL.
-    let sql = tokio::fs::read_to_string(&opt.sql_path)
-        .await
-        .with_context(|| format!("could not read SQL file {}", opt.sql_path.display()))?;
-    let ast = parse_sql(&opt.sql_path, &sql)?;
+    let file_id = files.add(&opt.sql_path)?;
+    let ast = parse_sql(files, file_id)?;
     let rewritten_ast = driver.rewrite_ast(&ast)?;
 
     // Print our rewritten AST.
