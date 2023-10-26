@@ -8,7 +8,7 @@ use crate::{
     errors::{format_err, Result},
     scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
     tokenizer::{Literal, LiteralValue},
-    types::{ColumnType, SimpleType, TableType, Type, ValueType},
+    types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
 };
 
 // TODO: Remember this rather scary example. Verify BigQuery supports it
@@ -76,19 +76,22 @@ impl InferTypes for ast::Statement {
         match self {
             // TODO: This can't bind anything into our scope, but we should
             // check types anyway.
-            ast::Statement::Query(_) => Ok((None, scope.clone())),
-            ast::Statement::DeleteFrom(_) => todo!(),
-            ast::Statement::InsertInto(_) => todo!(),
+            ast::Statement::Query(stmt) => {
+                let (ty, scope) = stmt.infer_types(scope)?;
+                Ok((Some(ty), scope))
+            }
+            ast::Statement::DeleteFrom(_) => todo!("DELETE FROM"),
+            ast::Statement::InsertInto(_) => todo!("INSERT INTO"),
             ast::Statement::CreateTable(stmt) => {
                 let ((), scope) = stmt.infer_types(scope)?;
                 Ok((None, scope))
             }
-            ast::Statement::CreateView(_) => todo!(),
+            ast::Statement::CreateView(_) => todo!("CREATE VIEW"),
             ast::Statement::DropTable(stmt) => {
                 let ((), scope) = stmt.infer_types(scope)?;
                 Ok((None, scope))
             }
-            ast::Statement::DropView(_) => todo!(),
+            ast::Statement::DropView(_) => todo!("DROP VIEW"),
         }
     }
 }
@@ -180,11 +183,29 @@ impl InferTypes for ast::QueryExpression {
         match self {
             ast::QueryExpression::SelectExpression(expr) => expr.infer_types(scope),
             ast::QueryExpression::Nested { query, .. } => query.infer_types(scope),
-            ast::QueryExpression::With {
-                ctes: _, query: _, ..
-            } => todo!(),
-            ast::QueryExpression::SetOperation { .. } => todo!(),
+            ast::QueryExpression::With { ctes, query, .. } => {
+                // Non-recursive CTEs, so each will create a new namespace.
+                let mut scope = scope.to_owned();
+                for cte in ctes.node_iter_mut() {
+                    let ((), new_scope) = cte.infer_types(&scope)?;
+                    scope = new_scope;
+                }
+                query.infer_types(&scope)
+            }
+            ast::QueryExpression::SetOperation { .. } => todo!("set operation"),
         }
+    }
+}
+
+impl InferTypes for ast::CommonTableExpression {
+    type Type = ();
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::CommonTableExpression { name, query, .. } = self;
+        let (ty, scope) = query.infer_types(scope)?;
+        let mut scope = Scope::new(&scope);
+        scope.add(name.to_owned().into(), Type::Table(ty))?;
+        Ok(((), scope.into_handle()))
     }
 }
 
@@ -212,7 +233,7 @@ impl InferTypes for ast::SelectExpression {
             select_list: SelectList {
                 items: select_list, ..
             },
-            //from_clause,
+            from_clause,
             //where_clause,
             //group_by,
             //having,
@@ -222,27 +243,105 @@ impl InferTypes for ast::SelectExpression {
             ..
         } = self;
 
+        let mut scope = scope.to_owned();
+        if let Some(from_clause) = from_clause {
+            ((), scope) = from_clause.infer_types(&scope)?;
+        }
+
         let mut cols = vec![];
         for item in select_list.node_iter_mut() {
             match item {
+                ast::SelectListItem::Expression {
+                    expression: ast::Expression::ColumnName(ident),
+                    alias: None,
+                } => match scope.get(&ident.to_owned().into()) {
+                    Some(Type::Argument(ArgumentType::Value(ty))) => {
+                        cols.push(ColumnType {
+                            name: ident.clone(),
+                            ty: ty.clone(),
+                            not_null: false,
+                        });
+                    }
+                    Some(ty) => Err(format_err!(
+                        "column {:?} is does not have a value type: {:?}",
+                        ident,
+                        ty
+                    ))?,
+                    None => Err(format_err!("column {:?} not found", ident))?,
+                },
                 ast::SelectListItem::Expression {
                     expression,
                     alias: Some(ast::Alias { ident, .. }),
                 } => {
                     // BigQuery does not allow select list items to see names
                     // bound by other select list items.
-                    let (ty, _scope) = expression.infer_types(scope)?;
+                    let (ty, _scope) = expression.infer_types(&scope)?;
                     cols.push(ColumnType {
                         name: ident.clone(),
                         ty,
                         not_null: false,
                     });
                 }
-                _ => todo!(),
+                _ => todo!("select list item"),
             }
         }
         let table_type = TableType { columns: cols };
         Ok((table_type, scope.clone()))
+    }
+}
+
+impl InferTypes for ast::FromClause {
+    type Type = ();
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::FromClause {
+            from_item,
+            join_operations,
+            ..
+        } = self;
+        let ((), scope) = from_item.infer_types(scope)?;
+        if !join_operations.is_empty() {
+            todo!("join operations")
+        }
+        Ok(((), scope))
+    }
+}
+
+impl InferTypes for ast::FromItem {
+    type Type = ();
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        match self {
+            ast::FromItem::TableName { table_name, alias } => {
+                let table = ident_from_table_name(table_name)?;
+                let table_type = scope
+                    .get(&table)
+                    .ok_or_else(|| format_err!("table {:?} not found in scope", table_name))?;
+                let table_type = match table_type {
+                    Type::Table(table_type) => table_type,
+                    _ => Err(format_err!(
+                        "table {:?} is not a table: {:?}",
+                        table_name,
+                        table_type
+                    ))?,
+                };
+
+                if alias.is_some() {
+                    todo!("from with alias");
+                }
+
+                let mut scope = Scope::new(scope);
+                for column in &table_type.columns {
+                    scope.add(
+                        column.name.clone().into(),
+                        Type::Argument(ArgumentType::Value(column.ty.clone())),
+                    )?;
+                }
+                Ok(((), scope.into_handle()))
+            }
+            ast::FromItem::Subquery { .. } => todo!("from subquery"),
+            ast::FromItem::Unnest { .. } => todo!("from unnest"),
+        }
     }
 }
 
@@ -256,7 +355,7 @@ impl InferTypes for ast::Expression {
                 scope.clone(),
             )),
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
-            _ => todo!(),
+            _ => todo!("expression"),
         }
     }
 }
@@ -282,9 +381,9 @@ mod tests {
 
     use crate::{
         ast::parse_sql,
-        scope::{CaseInsensitiveIdent, Scope},
+        scope::{CaseInsensitiveIdent, Scope, ScopeValue},
         tokenizer::Span,
-        types::{tests::ty, Type, TypeVar},
+        types::tests::ty,
     };
 
     use super::*;
@@ -301,7 +400,7 @@ mod tests {
         program.infer_types(&scope)
     }
 
-    fn lookup(scope: &ScopeHandle, name: &str) -> Option<Type<TypeVar>> {
+    fn lookup(scope: &ScopeHandle, name: &str) -> Option<ScopeValue> {
         scope
             .get(&CaseInsensitiveIdent::new(name, Span::Unknown))
             .cloned()
@@ -321,7 +420,7 @@ mod tests {
 
     #[test]
     fn root_scope_defines_functions() {
-        let (_, scope) = infer("SELECT 1").unwrap();
+        let (_, scope) = infer("SELECT 1 AS x").unwrap();
         assert_defines!(scope, "LOWER", "Fn(STRING) -> STRING");
         assert_defines!(scope, "lower", "Fn(STRING) -> STRING");
         assert_not_defines!(scope, "NO_SUCH_FUNCTION");
@@ -344,4 +443,26 @@ mod tests {
         let (_, scope) = infer("CREATE TABLE foo AS SELECT 'a' AS x, TRUE AS y").unwrap();
         assert_defines!(scope, "foo", "TABLE<x STRING, y BOOL>");
     }
+
+    #[test]
+    fn ctes_are_added_to_scope() {
+        let sql = "
+CREATE TABLE foo AS
+WITH
+    t1 AS (SELECT 'a' AS x),
+    t2 AS (SELECT x FROM t1)
+SELECT x FROM t2";
+        let (_, scope) = infer(sql).unwrap();
+        assert_defines!(scope, "foo", "TABLE<x STRING>");
+    }
+
+    //     #[test]
+    //     fn columns_scoped_by_table() {
+    //         let sql = "
+    // CREATE TABLE foo AS
+    // WITH t AS (SELECT 'a' AS x)
+    // SELECT t.x FROM t";
+    //         let (_, scope) = infer(sql).unwrap();
+    //         assert_defines!(scope, "foo", "TABLE<x STRING>");
+    //     }
 }

@@ -563,7 +563,7 @@ pub mod tests {
     use super::*;
 
     /// Parse a type declaration.
-    pub fn ty(s: &str) -> Type<TypeVar> {
+    pub fn ty(s: &str) -> Type {
         match parse_helper(s, type_grammar::ty) {
             Ok(ty) => ty,
             Err(e) => {

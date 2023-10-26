@@ -9,7 +9,7 @@ use crate::{
     drivers::bigquery::BigQueryName,
     errors::{format_err, Result},
     tokenizer::{Ident, Span},
-    types::{parse_function_decls, Type, TypeVar},
+    types::{parse_function_decls, Type},
     util::is_c_ident,
 };
 
@@ -85,7 +85,7 @@ impl fmt::Display for CaseInsensitiveIdent {
 }
 
 /// A value we can store in a scope. Details may change.
-pub type ScopeValue = Type<TypeVar>;
+pub type ScopeValue = Type;
 
 /// We need to both define and hide names in a scope.
 #[derive(Clone, Debug)]
