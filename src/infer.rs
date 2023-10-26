@@ -355,7 +355,33 @@ impl InferTypes for ast::Expression {
                 };
                 Ok((ty.to_owned(), scope.clone()))
             }
-            _ => todo!("expression"),
+            ast::Expression::TableAndColumnName(ast::TableAndColumnName {
+                table_name,
+                column_name,
+                ..
+            }) => {
+                let table = ident_from_table_name(table_name)?;
+                let table_type = scope
+                    .get(&table)
+                    .ok_or_else(|| format_err!("table {:?} not found in scope", table_name))?;
+                let table_type = match table_type {
+                    Type::Table(table_type) => table_type,
+                    _ => Err(format_err!(
+                        "table {:?} is not a table: {:?}",
+                        table_name,
+                        table_type
+                    ))?,
+                };
+                let column_type = table_type
+                    .columns
+                    .iter()
+                    .find(|column_type| column_type.name == *column_name)
+                    .ok_or_else(|| {
+                        format_err!("column {:?} not found in table {:?}", column_name, table)
+                    })?;
+                Ok((column_type.ty.to_owned(), scope.clone()))
+            }
+            _ => todo!("expression: {:?}", self),
         }
     }
 }
@@ -392,6 +418,9 @@ impl InferColumnName for ast::Expression {
     fn infer_column_name(&mut self) -> Option<Ident> {
         match self {
             ast::Expression::ColumnName(ident) => Some(ident.clone()),
+            ast::Expression::TableAndColumnName(ast::TableAndColumnName {
+                column_name, ..
+            }) => Some(column_name.clone()),
             _ => None,
         }
     }
@@ -492,13 +521,13 @@ SELECT x FROM t2";
         assert_defines!(scope, "foo", "TABLE<_f0 INT64, x INT64, _f1 INT64>");
     }
 
-    //     #[test]
-    //     fn columns_scoped_by_table() {
-    //         let sql = "
-    // CREATE TABLE foo AS
-    // WITH t AS (SELECT 'a' AS x)
-    // SELECT t.x FROM t";
-    //         let (_, scope) = infer(sql).unwrap();
-    //         assert_defines!(scope, "foo", "TABLE<x STRING>");
-    //     }
+    #[test]
+    fn columns_scoped_by_table() {
+        let sql = "
+CREATE TABLE foo AS
+WITH t AS (SELECT 'a' AS x)
+SELECT t.x FROM t";
+        let (_, scope) = infer(sql).unwrap();
+        assert_defines!(scope, "foo", "TABLE<x STRING>");
+    }
 }
