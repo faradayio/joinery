@@ -765,8 +765,8 @@ impl FunctionType {
         Err(Error::annotated(
             format!(
                 "arguments {} do not match {}",
+                DisplayArgTypes(arg_types),
                 self,
-                DisplayArgTypes(arg_types)
             ),
             spanned.span(),
             "no matching signature found",
