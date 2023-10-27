@@ -246,6 +246,7 @@ FIRST_VALUE = FnOver<?T>(Agg<?T>) -> ?T;
 FORMAT_DATETIME = Fn(DATETIME, STRING) -> STRING;
 GENERATE_DATE_ARRAY = Fn(DATE, DATE, INTERVAL) -> ARRAY<DATE>;
 GENERATE_UUID = Fn() -> STRING;
+GREATEST = Fn<?T>(?T, ..?T) -> ?T;
 LAG = FnOver<?T>(Agg<?T>) -> ?T;
 LEAST = Fn<?T>(?T, ..?T) -> ?T;
 LENGTH = Fn(STRING) -> INT64 | Fn(BYTES) -> INT64;

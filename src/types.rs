@@ -15,7 +15,7 @@
 // Work in progress.
 #![allow(dead_code)]
 
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
 use peg::{error::ParseError, str::LineCol};
 
@@ -25,6 +25,7 @@ use crate::{
     errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
     tokenizer::{Ident, Span, Spanned},
+    unification::{UnificationTable, Unify},
     util::is_c_ident,
 };
 
@@ -55,7 +56,7 @@ impl fmt::Display for ResolvedTypeVarsOnly {
 }
 
 /// A type variable.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TypeVar {
     name: String,
 }
@@ -108,6 +109,18 @@ pub enum Type<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
 }
 
 impl<TV: TypeVarSupport> Type<TV> {
+    /// Convert this type into an [`ArgumentType`], if possible.
+    pub fn try_as_argument_type(&self, spanned: &dyn Spanned) -> Result<&ArgumentType<TV>> {
+        match self {
+            Type::Argument(t) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected argument type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
     /// Convert this type into a [`ValueType`], if possible.
     pub fn try_as_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {
@@ -165,16 +178,87 @@ pub enum ArgumentType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
 }
 
 impl<TV: TypeVarSupport> ArgumentType<TV> {
-    /// Expect a value type.
-    ///
-    /// TODO: We will update this later to use [`Spanned`] once we update
-    /// [`crate::infer::InferTypes`] to return [`ArgumentType`] instead of
-    /// [`ValueType`].
-    pub fn expect_value_type(&self) -> Result<&ValueType<TV>> {
+    /// Expect a [`ValueType`].
+    pub fn expect_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {
             ArgumentType::Value(t) => Ok(t),
-            ArgumentType::Aggregating(_) => {
-                Err(format_err!("expected value type, found aggregate {}", self))
+            ArgumentType::Aggregating(_) => Err(Error::annotated(
+                format!("expected value type, found aggregate type {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
+    /// Expect a [`SimpleType`].
+    pub fn expect_simple_type(&self, spanned: &dyn Spanned) -> Result<&SimpleType<TV>> {
+        match self {
+            ArgumentType::Value(ValueType::Simple(t)) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected simple type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
+    /// Is this a subtype of `other`?
+    pub fn is_subtype_of(&self, other: &ArgumentType<TV>) -> bool {
+        // Value types can't be subtypes of aggregating types or vice versa,
+        // at least until we discover otherwise.
+        match (self, other) {
+            (ArgumentType::Value(a), ArgumentType::Value(b)) => a.is_subtype_of(b),
+            (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => a.is_subtype_of(b),
+            _ => false,
+        }
+    }
+
+    /// Find a common supertype of two types. Returns `None` if the only common
+    /// super type would be top (⊤), which isn't part of our type system.
+    pub fn common_supertype<'a>(&'a self, other: &'a ArgumentType<TV>) -> Option<ArgumentType<TV>> {
+        match (self, other) {
+            // Recurse if structure matches.
+            (ArgumentType::Value(a), ArgumentType::Value(b)) => {
+                Some(ArgumentType::Value(a.common_supertype(b)?))
+            }
+
+            (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => {
+                Some(ArgumentType::Aggregating(a.common_supertype(b)?))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Unify for ArgumentType<TypeVar> {
+    type Resolved = ArgumentType<ResolvedTypeVarsOnly>;
+
+    fn unify(
+        &self,
+        other: &Self::Resolved,
+        table: &mut UnificationTable,
+        spanned: &dyn Spanned,
+    ) -> Result<Self::Resolved> {
+        match (self, other) {
+            (ArgumentType::Value(a), ArgumentType::Value(b)) => {
+                Ok(ArgumentType::Value(a.unify(b, table, spanned)?))
+            }
+            (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => {
+                Ok(ArgumentType::Aggregating(a.unify(b, table, spanned)?))
+            }
+            _ => Err(Error::annotated(
+                format!("cannot unify {} and {}", self, other),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
+    fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
+        match self {
+            ArgumentType::Value(t) => Ok(ArgumentType::Value(t.resolve(table, spanned)?)),
+            ArgumentType::Aggregating(t) => {
+                Ok(ArgumentType::Aggregating(t.resolve(table, spanned)?))
             }
         }
     }
@@ -207,11 +291,12 @@ impl<TV: TypeVarSupport> ValueType<TV> {
             // Every type is a subtype of itself.
             (a, b) if a == b => true,
 
-            // Bottom is a subtype of every type.
+            // Bottom is a subtype of every type, but no other type is a
+            // subtype of bottom.
             (ValueType::Simple(SimpleType::Bottom), _) => true,
+            (_, ValueType::Simple(SimpleType::Bottom)) => false,
 
             // Null is a subtype of every type except bottom.
-            (_, ValueType::Simple(SimpleType::Bottom)) => false,
             (ValueType::Simple(SimpleType::Null), _) => true,
 
             // Integers are a subtype of floats.
@@ -245,21 +330,19 @@ impl<TV: TypeVarSupport> ValueType<TV> {
         Ok(())
     }
 
-    /// Compute the greatest common subtype of two types. Will return ⊥ if it
-    /// can't find anything better.
+    /// Compute the least common supertype of two types. Returns `None` if the
+    /// only common super type would be top (⊤), which isn't part of our type
+    /// system.
     ///
     /// For some nice theoretical terminology, see [this
     /// page](https://orc.csres.utexas.edu/documentation/html/refmanual/ref.types.subtyping.html).
-    pub fn greatest_common_subtype<'a>(
-        &'a self,
-        other: &'a ValueType<TV>,
-    ) -> Cow<'a, ValueType<TV>> {
+    pub fn common_supertype<'a>(&'a self, other: &'a ValueType<TV>) -> Option<ValueType<TV>> {
         if self.is_subtype_of(other) {
-            Cow::Borrowed(self)
+            Some(other.clone())
         } else if other.is_subtype_of(self) {
-            Cow::Borrowed(other)
+            Some(self.clone())
         } else {
-            Cow::Owned(ValueType::Simple(SimpleType::Bottom))
+            None
         }
     }
 
@@ -276,12 +359,44 @@ impl<TV: TypeVarSupport> ValueType<TV> {
     }
 }
 
-impl ValueType<TypeVar> {
-    /// Resolve this type, failing if we encounter a type variable.
-    pub fn resolve(&self) -> Result<ValueType<ResolvedTypeVarsOnly>> {
+impl Unify for ValueType<TypeVar> {
+    type Resolved = ValueType<ResolvedTypeVarsOnly>;
+
+    fn unify(
+        &self,
+        other: &Self::Resolved,
+        table: &mut UnificationTable,
+        spanned: &dyn Spanned,
+    ) -> Result<Self::Resolved> {
+        match (self, other) {
+            // TODO: Unify an array with with a TypeVar.
+            (ValueType::Simple(a), ValueType::Simple(b)) => {
+                Ok(ValueType::Simple(a.unify(b, table, spanned)?))
+            }
+            (ValueType::Array(a), ValueType::Array(b)) => {
+                Ok(ValueType::Array(a.unify(b, table, spanned)?))
+            }
+            _ => {
+                // To handle things like passing a `NULL` value to a function
+                // expecting an `ARRAY<INT64>`, we need to check subtyping.
+                if let Ok(rself) = self.resolve(table, spanned) {
+                    if other.is_subtype_of(&rself) {
+                        return Ok(rself);
+                    }
+                }
+                Err(Error::annotated(
+                    format!("cannot unify {} and {}", self, other),
+                    spanned.span(),
+                    "type mismatch",
+                ))
+            }
+        }
+    }
+
+    fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
         match self {
-            ValueType::Simple(s) => Ok(ValueType::Simple(s.resolve()?)),
-            ValueType::Array(t) => Ok(ValueType::Array(t.resolve()?)),
+            ValueType::Simple(t) => Ok(ValueType::Simple(t.resolve(table, spanned)?)),
+            ValueType::Array(t) => Ok(ValueType::Array(t.resolve(table, spanned)?)),
         }
     }
 }
@@ -325,11 +440,63 @@ pub enum SimpleType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     Parameter(TV),
 }
 
-impl SimpleType<TypeVar> {
-    /// Resolve this type, failing if we encounter a type variable.
-    pub fn resolve(&self) -> Result<SimpleType<ResolvedTypeVarsOnly>> {
-        // We need to spell this out because we're converting between two
-        // versions of the same type.
+impl Unify for SimpleType<TypeVar> {
+    type Resolved = SimpleType<ResolvedTypeVarsOnly>;
+
+    fn unify(
+        &self,
+        other: &Self::Resolved,
+        table: &mut UnificationTable,
+        spanned: &dyn Spanned,
+    ) -> Result<Self::Resolved> {
+        match (self, other) {
+            (SimpleType::Parameter(var), matched) => table
+                .update(
+                    var.clone(),
+                    ArgumentType::Value(ValueType::Simple(matched.clone())),
+                    spanned,
+                )?
+                .expect_simple_type(spanned)
+                .cloned(),
+            (SimpleType::Bool, SimpleType::Bool) => Ok(SimpleType::Bool),
+            (SimpleType::Bottom, SimpleType::Bottom) => Ok(SimpleType::Bottom),
+            (SimpleType::Bytes, SimpleType::Bytes) => Ok(SimpleType::Bytes),
+            (SimpleType::Date, SimpleType::Date) => Ok(SimpleType::Date),
+            (SimpleType::Datepart, SimpleType::Datepart) => Ok(SimpleType::Datepart),
+            (SimpleType::Datetime, SimpleType::Datetime) => Ok(SimpleType::Datetime),
+            (SimpleType::Float64, SimpleType::Float64) => Ok(SimpleType::Float64),
+            (SimpleType::Geography, SimpleType::Geography) => Ok(SimpleType::Geography),
+            (SimpleType::Int64, SimpleType::Int64) => Ok(SimpleType::Int64),
+            (SimpleType::Interval, SimpleType::Interval) => Ok(SimpleType::Interval),
+            (SimpleType::Numeric, SimpleType::Numeric) => Ok(SimpleType::Numeric),
+            (SimpleType::Null, SimpleType::Null) => Ok(SimpleType::Null),
+            (SimpleType::String, SimpleType::String) => Ok(SimpleType::String),
+            (SimpleType::Time, SimpleType::Time) => Ok(SimpleType::Time),
+            (SimpleType::Timestamp, SimpleType::Timestamp) => Ok(SimpleType::Timestamp),
+            (SimpleType::Struct(a), SimpleType::Struct(b)) => {
+                Ok(SimpleType::Struct(a.unify(b, table, spanned)?))
+            }
+            _ => {
+                // To handle things like passing a `INT64` value to a function
+                // expecting an `FLOAT64`, we need to check subtyping.
+                if let Ok(rself) = self.resolve(table, spanned) {
+                    // TODO: We shouldn't need to use wrappers here.
+                    if ValueType::Simple(other.clone())
+                        .is_subtype_of(&ValueType::Simple(rself.clone()))
+                    {
+                        return Ok(rself);
+                    }
+                }
+                Err(Error::annotated(
+                    format!("cannot unify {} and {}", self, other),
+                    spanned.span(),
+                    "type mismatch",
+                ))
+            }
+        }
+    }
+
+    fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
         match self {
             SimpleType::Bool => Ok(SimpleType::Bool),
             SimpleType::Bottom => Ok(SimpleType::Bottom),
@@ -346,8 +513,18 @@ impl SimpleType<TypeVar> {
             SimpleType::String => Ok(SimpleType::String),
             SimpleType::Time => Ok(SimpleType::Time),
             SimpleType::Timestamp => Ok(SimpleType::Timestamp),
-            SimpleType::Struct(s) => Ok(SimpleType::Struct(s.resolve()?)),
-            SimpleType::Parameter(tv) => Err(format_err!("unresolved type variable: {}", tv)),
+            SimpleType::Struct(s) => Ok(SimpleType::Struct(s.resolve(table, spanned)?)),
+            SimpleType::Parameter(var) => table
+                .get(var.clone())
+                .ok_or_else(|| {
+                    Error::annotated(
+                        format!("cannot resolve type variable: {}", var),
+                        spanned.span(),
+                        "unbound type variable",
+                    )
+                })?
+                .expect_simple_type(spanned)
+                .cloned(),
         }
     }
 }
@@ -382,19 +559,34 @@ pub struct StructType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     pub fields: Vec<StructElementType<TV>>,
 }
 
-impl StructType<TypeVar> {
-    /// Resolve this type, failing if we encounter a type variable.
-    pub fn resolve(&self) -> Result<StructType<ResolvedTypeVarsOnly>> {
-        let mut resolved_fields = vec![];
+impl Unify for StructType<TypeVar> {
+    type Resolved = StructType<ResolvedTypeVarsOnly>;
+
+    fn unify(
+        &self,
+        other: &Self::Resolved,
+        _table: &mut UnificationTable,
+        spanned: &dyn Spanned,
+    ) -> Result<Self::Resolved> {
+        // This isn't particularly complicated, but until we have an actual use
+        // case for it, it's better not to risk getting it _almost_ right.
+        Err(Error::annotated(
+            format!("cannot unify {} and {}", self, other),
+            spanned.span(),
+            "not yet implemented",
+        ))
+    }
+
+    fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
+        let mut fields = Vec::new();
         for field in &self.fields {
-            resolved_fields.push(StructElementType {
+            let ty = field.ty.resolve(table, spanned)?;
+            fields.push(StructElementType {
                 name: field.name.clone(),
-                ty: field.ty.resolve()?,
+                ty,
             });
         }
-        Ok(StructType {
-            fields: resolved_fields,
-        })
+        Ok(StructType { fields })
     }
 }
 
@@ -559,13 +751,43 @@ pub struct FunctionType {
 
 impl FunctionType {
     /// Find the best (first matching) signature for a set of arguments.
-    pub fn best_signature(&self, arg_types: &[ValueType]) -> Result<Option<&FunctionSignature>> {
+    pub fn return_type_for(
+        &self,
+        arg_types: &[ArgumentType],
+        spanned: &dyn Spanned,
+    ) -> Result<ArgumentType> {
         for sig in &self.signatures {
-            if sig.matches(arg_types)? {
-                return Ok(Some(sig));
+            if let Some(return_type) = sig.return_type_for(arg_types, spanned)? {
+                return Ok(return_type);
             }
         }
-        Ok(None)
+
+        Err(Error::annotated(
+            format!(
+                "arguments {} do not match {}",
+                self,
+                DisplayArgTypes(arg_types)
+            ),
+            spanned.span(),
+            "no matching signature found",
+        ))
+    }
+}
+
+/// Wrapper to display a list of argument types (for error messages).
+struct DisplayArgTypes<'a>(&'a [ArgumentType]);
+
+impl<'a> fmt::Display for DisplayArgTypes<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(")?;
+        for (i, arg) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", arg)?;
+        }
+        write!(f, ")")?;
+        Ok(())
     }
 }
 
@@ -613,28 +835,37 @@ pub struct FunctionSignature {
 impl FunctionSignature {
     /// Does this signature match a set of argument types?
     ///
-    /// TODO: Handle aggregates and type variables.
-    pub fn matches(&self, arg_types: &[ValueType]) -> Result<bool> {
+    /// TODO: Distinguish between failed matches and errors.
+    pub fn return_type_for(
+        &self,
+        arg_types: &[ArgumentType],
+        spanned: &dyn Spanned,
+    ) -> Result<Option<ArgumentType>> {
         if self.params.len() > arg_types.len() {
-            return Ok(false);
+            return Ok(None);
+        }
+        let mut table = UnificationTable::default();
+        for tv in &self.type_vars {
+            table.declare(tv.clone(), spanned)?;
         }
         for (i, param_ty) in self.params.iter().enumerate() {
-            let param_ty = param_ty.expect_value_type()?.resolve()?;
-            if !arg_types[i].is_subtype_of(&param_ty) {
-                return Ok(false);
+            if param_ty.unify(&arg_types[i], &mut table, spanned).is_err() {
+                return Ok(None);
             }
         }
         if let Some(rest_params) = &self.rest_params {
-            let rest_params = rest_params.resolve()?;
+            let rest_params = ArgumentType::Value(rest_params.clone());
             for arg_type in &arg_types[self.params.len()..] {
-                if !arg_type.is_subtype_of(&rest_params) {
-                    return Ok(false);
+                if rest_params.unify(arg_type, &mut table, spanned).is_err() {
+                    return Ok(None);
                 }
             }
         } else if self.params.len() < arg_types.len() {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(true)
+        self.return_type
+            .resolve(&table, spanned)
+            .map(|ty| Some(ArgumentType::Value(ty)))
     }
 }
 
@@ -884,6 +1115,26 @@ pub mod tests {
                 e.emit(&files);
                 panic!("parse error");
             }
+        }
+    }
+
+    #[test]
+    fn common_supertype() {
+        let examples = &[
+            ("INT64", "FLOAT64", Some("FLOAT64")),
+            ("NULL", "FLOAT64", Some("FLOAT64")),
+            ("⊥", "FLOAT64", Some("FLOAT64")),
+            ("FLOAT64", "STRING", None),
+            ("ARRAY<INT64>", "ARRAY<FLOAT64>", None),
+            ("ARRAY<⊥>", "ARRAY<FLOAT64>", Some("ARRAY<FLOAT64>")),
+        ];
+        for &(a, b, expected) in examples {
+            let s: Option<Ident> = None;
+            let a = ty(a).try_as_argument_type(&s).unwrap().clone();
+            let b = ty(b).try_as_argument_type(&s).unwrap().clone();
+            let expected = expected.map(|e| ty(e).try_as_argument_type(&s).unwrap().clone());
+            assert_eq!(a.common_supertype(&b), expected);
+            assert_eq!(b.common_supertype(&a), expected);
         }
     }
 

@@ -13,6 +13,7 @@ mod scope;
 mod tokenizer;
 mod transforms;
 mod types;
+mod unification;
 mod util;
 
 use cmd::{

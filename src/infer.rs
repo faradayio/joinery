@@ -196,6 +196,7 @@ impl InferTypes for ast::Row {
         let mut cols = vec![];
         for expr in expressions.node_iter_mut() {
             let (ty, _scope) = expr.infer_types(scope)?;
+            let ty = ty.expect_value_type(expr)?.to_owned();
             cols.push(ColumnType {
                 name: None,
                 ty,
@@ -298,6 +299,7 @@ impl InferTypes for ast::SelectExpression {
                     // TODO: Delay assigning anonymous names until we actually
                     // create a table?
                     let (ty, _scope) = expression.infer_types(&scope)?;
+                    let ty = ty.expect_value_type(expression)?.to_owned();
                     let name = alias
                         .infer_column_name()
                         .or_else(|| expression.infer_column_name())
@@ -371,20 +373,18 @@ impl InferTypes for ast::FromItem {
 }
 
 impl InferTypes for ast::Expression {
-    type Type = ValueType;
+    type Type = ArgumentType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let arg = ArgumentType::Value;
+        let arg_simple = |ty| arg(ValueType::Simple(ty));
         match self {
-            ast::Expression::BoolValue(_) => {
-                Ok((ValueType::Simple(SimpleType::Bool), scope.clone()))
-            }
+            ast::Expression::BoolValue(_) => Ok((arg_simple(SimpleType::Bool), scope.clone())),
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
-            ast::Expression::Null { .. } => {
-                Ok((ValueType::Simple(SimpleType::Null), scope.clone()))
-            }
+            ast::Expression::Null { .. } => Ok((arg_simple(SimpleType::Null), scope.clone())),
             ast::Expression::ColumnName(ident) => {
                 let ident = ident.to_owned().into();
-                let ty = scope.get_or_err(&ident)?.try_as_value_type(&ident)?;
+                let ty = scope.get_or_err(&ident)?.try_as_argument_type(&ident)?;
                 Ok((ty.to_owned(), scope.clone()))
             }
             ast::Expression::TableAndColumnName(ast::TableAndColumnName {
@@ -395,7 +395,9 @@ impl InferTypes for ast::Expression {
                 let table = ident_from_table_name(table_name)?;
                 let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
                 let column_type = table_type.column_by_name_or_err(column_name)?;
-                Ok((column_type.ty.to_owned(), scope.clone()))
+                // TODO: Actually, we ought to be able store `ArgumentType` in a
+                // column. See the test case `scoped_aggregates.sql`.
+                Ok((arg(column_type.ty.to_owned()), scope.clone()))
             }
             ast::Expression::Cast(ast::Cast {
                 expression,
@@ -404,7 +406,7 @@ impl InferTypes for ast::Expression {
             }) => {
                 expression.infer_types(scope)?;
                 let ty = ValueType::try_from(&*data_type)?;
-                Ok((ty, scope.clone()))
+                Ok((arg(ty), scope.clone()))
             }
             ast::Expression::FunctionCall(fcall) => {
                 let (ty, _) = fcall.infer_types(scope)?;
@@ -416,7 +418,7 @@ impl InferTypes for ast::Expression {
 }
 
 impl InferTypes for LiteralValue {
-    type Type = ValueType;
+    type Type = ArgumentType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let simple_ty = match self {
@@ -424,12 +426,15 @@ impl InferTypes for LiteralValue {
             LiteralValue::Float64(_) => SimpleType::Float64,
             LiteralValue::String(_) => SimpleType::String,
         };
-        Ok((ValueType::Simple(simple_ty), scope.clone()))
+        Ok((
+            ArgumentType::Value(ValueType::Simple(simple_ty)),
+            scope.clone(),
+        ))
     }
 }
 
 impl InferTypes for ast::FunctionCall {
-    type Type = ValueType;
+    type Type = ArgumentType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let ast::FunctionCall {
@@ -446,24 +451,13 @@ impl InferTypes for ast::FunctionCall {
             return Err(nyi(over_clause, "over clause"));
         }
 
-        let mut arg_tys = vec![];
+        let mut arg_types = vec![];
         for arg in args.node_iter_mut() {
             let (ty, _scope) = arg.infer_types(scope)?;
-            arg_tys.push(ty);
+            arg_types.push(ty);
         }
-        let sig = func_ty.best_signature(&arg_tys).map_err(|e| {
-            Error::annotated(e.to_string(), name.span(), "error occurred in arguments")
-        })?;
-        if let Some(sig) = sig {
-            // TODO: Don't resolve here. Overhaul `best_signature`.
-            Ok((sig.return_type.clone().resolve()?, scope.clone()))
-        } else {
-            Err(Error::annotated(
-                format!("expected arguments to {} to match one of {}", name, func_ty),
-                name.span(),
-                "no matching signature",
-            ))
-        }
+        let ret_ty = func_ty.return_type_for(&arg_types, &name)?;
+        Ok((ret_ty, scope.clone()))
     }
 }
 
@@ -648,5 +642,12 @@ CREATE TABLE foo (x FLOAT64);
 INSERT INTO foo VALUES (3.0), (2), (NULL)";
         let (_, _, scope) = infer(sql).unwrap();
         assert_defines!(scope, "foo", "TABLE<x FLOAT64>");
+    }
+
+    #[test]
+    fn function_call_with_type_vars() {
+        let sql = "SELECT GREATEST(1, NULL, 3.0) AS x";
+        let (_, rty, _) = infer(sql).unwrap();
+        assert_eq!(Type::Table(rty.unwrap()), ty("TABLE<x FLOAT64>"));
     }
 }

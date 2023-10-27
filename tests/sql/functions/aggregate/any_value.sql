@@ -1,4 +1,4 @@
--- pending: sqlite3 ANY_VALUES is not available.
+-- pending: sqlite3 ANY_VALUE is not available.
 
 CREATE TEMP TABLE vals (i INT64);
 INSERT INTO vals VALUES (1), (1);
