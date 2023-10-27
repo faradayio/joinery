@@ -227,6 +227,7 @@ static BUILT_IN_FUNCTIONS: &str = "
 ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;
 ARRAY_LENGTH = Fn<?T>(ARRAY<?T>) -> INT64;
 ARRAY_TO_STRING = Fn<?T>(ARRAY<?T>, STRING) -> STRING;
+AVG = FnAgg(Agg<INT64>) -> FLOAT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64;
 COALESCE = Fn<?T>(?T, ..?T) -> ?T;
 CONCAT = Fn(STRING, ..STRING) -> STRING | Fn(BYTES, ..BYTES) -> BYTES;
 COUNTIF = FnAgg(Agg<BOOL>) -> INT64 | FnOver(Agg<BOOL>) -> INT64;
