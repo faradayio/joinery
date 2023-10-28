@@ -383,11 +383,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::BoolValue(_) => Ok((arg_simple(SimpleType::Bool), scope.clone())),
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
             ast::Expression::Null { .. } => Ok((arg_simple(SimpleType::Null), scope.clone())),
-            ast::Expression::ColumnName(ident) => {
-                let ident = ident.to_owned().into();
-                let ty = scope.get_or_err(&ident)?.try_as_argument_type(&ident)?;
-                Ok((ty.to_owned(), scope.clone()))
-            }
+            ast::Expression::ColumnName(ident) => ident.infer_types(scope),
             ast::Expression::TableAndColumnName(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
@@ -409,6 +405,16 @@ impl InferTypes for LiteralValue {
             ArgumentType::Value(ValueType::Simple(simple_ty)),
             scope.clone(),
         ))
+    }
+}
+
+impl InferTypes for Ident {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ident = self.to_owned().into();
+        let ty = scope.get_or_err(&ident)?.try_as_argument_type(&ident)?;
+        Ok((ty.to_owned(), scope.clone()))
     }
 }
 
