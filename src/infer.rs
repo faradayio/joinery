@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    ast::{self, SelectList},
+    ast,
     errors::{Error, Result},
     scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
@@ -114,7 +114,7 @@ impl InferTypes for ast::CreateTableStatement {
                         let ty = ValueType::try_from(&column.data_type)?;
                         let col_ty = ColumnType {
                             name: Some(column.name.clone()),
-                            ty,
+                            ty: ArgumentType::Value(ty),
                             // TODO: We don't support this in the main grammar yet.
                             not_null: false,
                         };
@@ -199,7 +199,7 @@ impl InferTypes for ast::Row {
             let ty = ty.expect_value_type(expr)?.to_owned();
             cols.push(ColumnType {
                 name: None,
-                ty,
+                ty: ArgumentType::Value(ty),
                 not_null: false,
             });
         }
@@ -270,7 +270,7 @@ impl InferTypes for ast::SelectExpression {
 
         let ast::SelectExpression {
             //select_options,
-            select_list: SelectList {
+            select_list: ast::SelectList {
                 items: select_list, ..
             },
             from_clause,
@@ -299,6 +299,7 @@ impl InferTypes for ast::SelectExpression {
                     // TODO: Delay assigning anonymous names until we actually
                     // create a table?
                     let (ty, _scope) = expression.infer_types(&scope)?;
+                    // Make sure any aggregates have been turned into values.
                     let ty = ty.expect_value_type(expression)?.to_owned();
                     let name = alias
                         .infer_column_name()
@@ -313,7 +314,7 @@ impl InferTypes for ast::SelectExpression {
 
                     cols.push(ColumnType {
                         name: Some(name),
-                        ty,
+                        ty: ArgumentType::Value(ty),
                         not_null: false,
                     });
                 }
@@ -360,7 +361,7 @@ impl InferTypes for ast::FromItem {
                     if let Some(column_name) = &column.name {
                         scope.add(
                             column_name.clone().into(),
-                            Type::Argument(ArgumentType::Value(column.ty.clone())),
+                            Type::Argument(column.ty.clone()),
                         )?;
                     }
                 }
@@ -387,31 +388,9 @@ impl InferTypes for ast::Expression {
                 let ty = scope.get_or_err(&ident)?.try_as_argument_type(&ident)?;
                 Ok((ty.to_owned(), scope.clone()))
             }
-            ast::Expression::TableAndColumnName(ast::TableAndColumnName {
-                table_name,
-                column_name,
-                ..
-            }) => {
-                let table = ident_from_table_name(table_name)?;
-                let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
-                let column_type = table_type.column_by_name_or_err(column_name)?;
-                // TODO: Actually, we ought to be able store `ArgumentType` in a
-                // column. See the test case `scoped_aggregates.sql`.
-                Ok((arg(column_type.ty.to_owned()), scope.clone()))
-            }
-            ast::Expression::Cast(ast::Cast {
-                expression,
-                data_type,
-                ..
-            }) => {
-                expression.infer_types(scope)?;
-                let ty = ValueType::try_from(&*data_type)?;
-                Ok((arg(ty), scope.clone()))
-            }
-            ast::Expression::FunctionCall(fcall) => {
-                let (ty, _) = fcall.infer_types(scope)?;
-                Ok((ty, scope.clone()))
-            }
+            ast::Expression::TableAndColumnName(name) => name.infer_types(scope),
+            ast::Expression::Cast(cast) => cast.infer_types(scope),
+            ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             _ => Err(nyi(self, "expression")),
         }
     }
@@ -430,6 +409,41 @@ impl InferTypes for LiteralValue {
             ArgumentType::Value(ValueType::Simple(simple_ty)),
             scope.clone(),
         ))
+    }
+}
+
+impl InferTypes for ast::TableAndColumnName {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::TableAndColumnName {
+            table_name,
+            column_name,
+            ..
+        } = self;
+
+        let table = ident_from_table_name(table_name)?;
+        let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
+        let column_type = table_type.column_by_name_or_err(column_name)?;
+        // TODO: Actually, we ought to be able store `ArgumentType` in a
+        // column. See the test case `scoped_aggregates.sql`.
+        Ok((column_type.ty.to_owned(), scope.clone()))
+    }
+}
+
+impl InferTypes for ast::Cast {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let ast::Cast {
+            expression,
+            data_type,
+            ..
+        } = self;
+        // TODO: Pass through aggregate status.
+        expression.infer_types(scope)?;
+        let ty = ValueType::try_from(&*data_type)?;
+        Ok((ArgumentType::Value(ty), scope.clone()))
     }
 }
 

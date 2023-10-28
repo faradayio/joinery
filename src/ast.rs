@@ -724,9 +724,7 @@ impl Emit for Except {
 pub enum Expression {
     Literal(Literal),
     BoolValue(Keyword),
-    Null {
-        null_token: Keyword,
-    },
+    Null(Keyword),
     Interval(IntervalExpression),
     ColumnName(Ident),
     TableAndColumnName(TableAndColumnName),
@@ -1975,7 +1973,7 @@ peg::parser! {
             paren1:p("(") expression:expression() paren2:p(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { Expression::Literal(literal) }
             bool_token:(k("TRUE") / k("FALSE")) { Expression::BoolValue(bool_token) }
-            null_token:k("NULL") { Expression::Null { null_token } }
+            null_token:k("NULL") { Expression::Null(null_token) }
             interval_expression:interval_expression() { Expression::Interval(interval_expression) }
             cast:cast() { Expression::Cast(cast) }
             array_agg:array_agg() { Expression::ArrayAgg(array_agg) }

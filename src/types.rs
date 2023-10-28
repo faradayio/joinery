@@ -702,22 +702,34 @@ pub struct ColumnType {
     /// The name of the column, if it has one. Anonymous columns may be produced
     /// using things like `SELECT 1`, but they cannot occur in stored tables.
     pub name: Option<Ident>,
-    pub ty: ValueType,
+    /// This needs to be an ArgumentType, not a value type, because we may be
+    /// aggregating over a table, rendering some table entries into aggregate
+    /// types.
+    pub ty: ArgumentType,
     pub not_null: bool,
 }
 
 impl ColumnType {
     /// Return an error if this column is not storable.
     pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
-        self.ty.expect_inhabited(spanned)?;
-        if self.name.is_none() {
-            return Err(Error::annotated(
-                "cannot store a table with anonymous columns",
+        match &self.ty {
+            ArgumentType::Value(ty) => {
+                ty.expect_inhabited(spanned)?;
+                if self.name.is_none() {
+                    return Err(Error::annotated(
+                        "cannot store a table with anonymous columns",
+                        spanned.span(),
+                        "type mismatch",
+                    ));
+                }
+                Ok(())
+            }
+            ArgumentType::Aggregating(_) => Err(Error::annotated(
+                "Cannot store an aggregate column",
                 spanned.span(),
                 "type mismatch",
-            ));
+            )),
         }
-        Ok(())
     }
 
     /// Is this column a subtype of `other`, ignoring nullability?
@@ -1070,10 +1082,10 @@ peg::parser! {
             }
 
         rule column_type() -> ColumnType
-            = ty:value_type() not_null:not_null() {
+            = ty:argument_type() not_null:not_null() {
                 ColumnType { name: None, ty, not_null }
             }
-            / name:ident() _ ty:value_type() not_null:not_null() {
+            / name:ident() _ ty:argument_type() not_null:not_null() {
                 ColumnType { name: Some(name), ty, not_null }
             }
 
