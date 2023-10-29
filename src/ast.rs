@@ -729,61 +729,14 @@ pub enum Expression {
     ColumnName(Ident),
     TableAndColumnName(TableAndColumnName),
     Cast(Cast),
-    Is {
-        left: Box<Expression>,
-        is_token: Keyword,
-        not_token: Option<Keyword>,
-        right: Box<Expression>,
-    },
-    In {
-        left: Box<Expression>,
-        not_token: Option<Keyword>,
-        in_token: Keyword,
-        value_set: InValueSet,
-    },
-    Between {
-        left: Box<Expression>,
-        not_token: Option<Keyword>,
-        between_token: Keyword,
-        middle: Box<Expression>,
-        and_token: Keyword,
-        right: Box<Expression>,
-    },
-    And {
-        left: Box<Expression>,
-        and_token: Keyword,
-        right: Box<Expression>,
-    },
-    Or {
-        left: Box<Expression>,
-        or_token: Keyword,
-        right: Box<Expression>,
-    },
-    Not {
-        not_token: Keyword,
-        expression: Box<Expression>,
-    },
-    If {
-        if_token: Keyword,
-        paren1: Punct,
-        condition: Box<Expression>,
-        comma1: Punct,
-        then_expression: Box<Expression>,
-        comma2: Punct,
-        else_expression: Box<Expression>,
-        paren2: Punct,
-    },
-    Case {
-        case_token: Keyword,
-        when_clauses: Vec<CaseWhenClause>,
-        else_clause: Option<CaseElseClause>,
-        end_token: Keyword,
-    },
-    Binop {
-        left: Box<Expression>,
-        op_token: Punct,
-        right: Box<Expression>,
-    },
+    Is(IsExpression),
+    In(InExpression),
+    Between(BetweenExpression),
+    KeywordBinop(KeywordBinopExpression),
+    Not(NotExpression),
+    If(IfExpression),
+    Case(CaseExpression),
+    Binop(BinopExpression),
     Parens {
         paren1: Punct,
         expression: Box<Expression>,
@@ -800,13 +753,22 @@ pub enum Expression {
 }
 
 impl Expression {
+    /// Create a new keyword binary operator expression.
+    fn keyword_binop(left: Expression, op_keyword: Keyword, right: Expression) -> Expression {
+        Expression::KeywordBinop(KeywordBinopExpression {
+            left: Box::new(left),
+            op_keyword,
+            right: Box::new(right),
+        })
+    }
+
     /// Create a new binary operator expression.
     fn binop(left: Expression, op_token: Punct, right: Expression) -> Expression {
-        Expression::Binop {
+        Expression::Binop(BinopExpression {
             left: Box::new(left),
             op_token,
             right: Box::new(right),
-        }
+        })
     }
 }
 
@@ -860,6 +822,75 @@ impl Emit for CastType {
     }
 }
 
+/// An `IS` expression.
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+pub struct IsExpression {
+    pub left: Box<Expression>,
+    pub is_token: Keyword,
+    pub not_token: Option<Keyword>,
+    pub predicate: IsExpressionPredicate,
+}
+
+impl Emit for IsExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
+        match (&self.predicate, t) {
+            // BigQuery allows anything.
+            (_, Target::BigQuery) => self.emit_default(t, f),
+            // `UNKNOWN` will be translated to `NULL` everywhere else.
+            (IsExpressionPredicate::Null(_), _) | (IsExpressionPredicate::Unknown(_), _) => {
+                self.emit_default(t, f)
+            }
+            // `TRUE` and `FALSE` work on SQLite3.
+            (IsExpressionPredicate::True(_), Target::SQLite3)
+            | (IsExpressionPredicate::False(_), Target::SQLite3) => self.emit_default(t, f),
+            // For everyone else, we need to use CASE.
+            (IsExpressionPredicate::True(keyword), _)
+            | (IsExpressionPredicate::False(keyword), _) => {
+                f.write_token_start("CASE")?;
+                self.left.emit(t, f)?;
+                f.write_token_start("WHEN")?;
+                keyword.emit(t, f)?;
+                f.write_token_start("THEN")?;
+                f.write_token_start("TRUE")?;
+                f.write_token_start("ELSE")?;
+                f.write_token_start("FALSE")?;
+                f.write_token_start("END")
+            }
+        }
+    }
+}
+
+/// An `IS` predicate.
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+pub enum IsExpressionPredicate {
+    Null(Keyword),
+    True(Keyword),
+    False(Keyword),
+    Unknown(PseudoKeyword),
+}
+
+impl Emit for IsExpressionPredicate {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
+        // Remap UNKNOWN to NULL for everyone but BigQuery.
+        match (self, t) {
+            (IsExpressionPredicate::Unknown(_), Target::BigQuery) => self.emit_default(t, f),
+            (IsExpressionPredicate::Unknown(unknown_token), _) => {
+                unknown_token.ident.token.with_str("NULL").emit(t, f)
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// An `IN` expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct InExpression {
+    pub left: Box<Expression>,
+    pub not_token: Option<Keyword>,
+    pub in_token: Keyword,
+    pub value_set: InValueSet,
+}
+
 /// A value set for an `IN` expression. See the [official grammar][].
 ///
 /// [official grammar]:
@@ -883,6 +914,62 @@ pub enum InValueSet {
         expression: Box<Expression>,
         paren2: Punct,
     },
+}
+
+/// A `BETWEEN` expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct BetweenExpression {
+    pub left: Box<Expression>,
+    pub not_token: Option<Keyword>,
+    pub between_token: Keyword,
+    pub middle: Box<Expression>,
+    pub and_token: Keyword,
+    pub right: Box<Expression>,
+}
+
+/// A binary operator represented as a keyword.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct KeywordBinopExpression {
+    pub left: Box<Expression>,
+    pub op_keyword: Keyword,
+    pub right: Box<Expression>,
+}
+
+/// A `NOT` expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct NotExpression {
+    pub not_token: Keyword,
+    pub expression: Box<Expression>,
+}
+
+/// An `IF` expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct IfExpression {
+    pub if_token: Keyword,
+    pub paren1: Punct,
+    pub condition: Box<Expression>,
+    pub comma1: Punct,
+    pub then_expression: Box<Expression>,
+    pub comma2: Punct,
+    pub else_expression: Box<Expression>,
+    pub paren2: Punct,
+}
+
+/// A `CASE` expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct CaseExpression {
+    pub case_token: Keyword,
+    pub when_clauses: Vec<CaseWhenClause>,
+    pub else_clause: Option<CaseElseClause>,
+    pub end_token: Keyword,
+}
+
+/// A binary operator.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct BinopExpression {
+    pub left: Box<Expression>,
+    pub op_token: Punct,
+    pub right: Box<Expression>,
 }
 
 /// An `ARRAY` expression. This takes a bunch of different forms in BigQuery.
@@ -1895,34 +1982,36 @@ peg::parser! {
         /// [precedence table]:
         ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/operators#operator_precedence
         pub rule expression() -> Expression = precedence! {
-            left:(@) or_token:k("OR") right:@ { Expression::Or { left: Box::new(left), or_token, right: Box::new(right) } }
+            left:(@) or_token:k("OR") right:@ { Expression::keyword_binop(left, or_token, right) }
             --
-            left:(@) and_token:k("AND") right:@ { Expression::And { left: Box::new(left), and_token, right: Box::new(right) } }
+            left:(@) and_token:k("AND") right:@ { Expression::keyword_binop(left, and_token, right) }
             --
             expr:expression_no_and() { expr }
         }
 
         rule expression_no_and() -> Expression = precedence! {
-            not_token:k("NOT") expression:@ { Expression::Not { not_token, expression: Box::new(expression) } }
+            not_token:k("NOT") expression:@ { Expression::Not(NotExpression { not_token, expression: Box::new(expression) }) }
             --
-            left:(@) is_token:k("IS") not_token:k("NOT")? right:@ { Expression::Is { left: Box::new(left), is_token, not_token, right: Box::new(right) } }
+            left:(@) is_token:k("IS") not_token:k("NOT")? predicate:is_expression_predicate() {
+                Expression::Is(IsExpression { left: Box::new(left), is_token, not_token, predicate })
+            }
             left:(@) not_token:k("NOT")? in_token:k("IN") value_set:in_value_set() {
-                Expression::In {
+                Expression::In(InExpression {
                     left: Box::new(left),
                     not_token,
                     in_token,
                     value_set,
-                }
+                })
             }
             left:(@) not_token:k("NOT")? between_token:k("BETWEEN") middle:expression_no_and() and_token:k("AND") right:@ {
-                Expression::Between {
+                Expression::Between(BetweenExpression {
                     left: Box::new(left),
                     not_token,
                     between_token,
                     middle: Box::new(middle),
                     and_token,
                     right: Box::new(right),
-                }
+                })
             }
             left:(@) op_token:p("=") right:@ { Expression::binop(left, op_token, right) }
             left:(@) op_token:p("!=") right:@ { Expression::binop(left, op_token, right) }
@@ -1947,15 +2036,15 @@ peg::parser! {
             }
             --
             case_token:k("CASE") when_clauses:(case_when_clause()*) else_clause:case_else_clause()? end_token:k("END") {
-                Expression::Case {
+                Expression::Case(CaseExpression {
                     case_token,
                     when_clauses,
                     else_clause,
                     end_token,
-                }
+                })
             }
             if_token:k("IF") paren1:p("(") condition:expression() comma1:p(",") then_expression:expression() comma2:p(",") else_expression:expression() paren2:p(")") {
-                Expression::If {
+                Expression::If(IfExpression {
                     if_token,
                     paren1,
                     condition: Box::new(condition),
@@ -1964,7 +2053,7 @@ peg::parser! {
                     comma2,
                     else_expression: Box::new(else_expression),
                     paren2,
-                }
+                })
             }
             array_expression:array_expression() { Expression::Array(array_expression) }
             struct_expression:struct_expression() { Expression::Struct(struct_expression) }
@@ -2000,6 +2089,12 @@ peg::parser! {
             = date_part_token:(pk("YEAR") / pk("QUARTER") / pk("MONTH") / pk("WEEK") / pk("DAY") / pk("HOUR") / pk("MINUTE") / pk("SECOND")) {
                 DatePart { date_part_token }
             }
+
+        rule is_expression_predicate() -> IsExpressionPredicate
+            = null_token:k("NULL") { IsExpressionPredicate::Null(null_token) }
+            / true_token:k("TRUE") { IsExpressionPredicate::True(true_token) }
+            / false_token:k("FALSE") { IsExpressionPredicate::False(false_token) }
+            / unknown_token:pk("UNKNOWN") { IsExpressionPredicate::Unknown(unknown_token) }
 
         rule in_value_set() -> InValueSet
             = paren1:p("(") query_expression:query_expression() paren2:p(")") {

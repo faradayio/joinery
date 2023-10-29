@@ -224,10 +224,34 @@ impl Scope {
 
 /// Built-in function declarations in the default scope.
 static BUILT_IN_FUNCTIONS: &str = "
+
+-- Primitives.
+
+%AND = Fn(BOOL, BOOL) -> BOOL;
+%BETWEEN = Fn<?T>(?T, ?T, ?T) -> BOOL;
+%IF = Fn<?T>(BOOL, ?T, ?T) -> ?T;
+%IN = Fn<?T>(?T, ARRAY<?T>) -> BOOL;
+%IS = Fn<?T>(?T, NULL) -> BOOL | Fn(BOOL, BOOL) -> BOOL;
+%NOT = Fn(BOOL) -> BOOL;
+%OR = Fn(BOOL, BOOL) -> BOOL;
+
+%= = Fn<?T>(?T, ?T) -> BOOL;
+%!= = Fn<?T>(?T, ?T) -> BOOL;
+%<= = Fn<?T>(?T, ?T) -> BOOL;
+%< = Fn<?T>(?T, ?T) -> BOOL;
+%> = Fn<?T>(?T, ?T) -> BOOL;
+%>= = Fn<?T>(?T, ?T) -> BOOL;
+%+ = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
+%- = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
+%* = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
+%/ = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
+
+-- Functions.
+
 ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;
 ARRAY_LENGTH = Fn<?T>(ARRAY<?T>) -> INT64;
 ARRAY_TO_STRING = Fn<?T>(ARRAY<?T>, STRING) -> STRING;
-AVG = FnAgg(Agg<INT64>) -> FLOAT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64;
+AVG = FnAgg(Agg<INT64>) -> INT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64;
 COALESCE = Fn<?T>(?T, ..?T) -> ?T;
 CONCAT = Fn(STRING, ..STRING) -> STRING | Fn(BYTES, ..BYTES) -> BYTES;
 COUNTIF = FnAgg(Agg<BOOL>) -> INT64 | FnOver(Agg<BOOL>) -> INT64;

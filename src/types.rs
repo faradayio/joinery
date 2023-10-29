@@ -998,7 +998,7 @@ peg::parser! {
             }
 
         rule function_decl() -> (Ident, FunctionType)
-            = name:ident() _? "=" _? ty:function_type() {
+            = name:(prim() / ident()) _? "=" _? ty:function_type() {
                 (name, ty)
             }
 
@@ -1101,6 +1101,9 @@ peg::parser! {
             = name:$(['A'..='Z' | 'a'..='z' | '_']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) {
                 Ident::new(name, Span::Unknown)
             }
+
+        rule prim() -> Ident
+            = name:$("%" [^ ' ' | '\t' ]+) { Ident::new(name, Span::Unknown )}
 
         rule type_var() -> TypeVar
             = "?" name:$(['A'..='Z']['a'..='z' | 'A'..='Z' | '0'..='9' | '_']*) {

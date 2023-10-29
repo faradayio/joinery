@@ -380,12 +380,20 @@ impl InferTypes for ast::Expression {
         let arg = ArgumentType::Value;
         let arg_simple = |ty| arg(ValueType::Simple(ty));
         match self {
-            ast::Expression::BoolValue(_) => Ok((arg_simple(SimpleType::Bool), scope.clone())),
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
+            ast::Expression::BoolValue(_) => Ok((arg_simple(SimpleType::Bool), scope.clone())),
             ast::Expression::Null { .. } => Ok((arg_simple(SimpleType::Null), scope.clone())),
             ast::Expression::ColumnName(ident) => ident.infer_types(scope),
             ast::Expression::TableAndColumnName(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
+            ast::Expression::Is(is) => is.infer_types(scope),
+            ast::Expression::In(in_expr) => in_expr.infer_types(scope),
+            ast::Expression::Between(between) => between.infer_types(scope),
+            ast::Expression::KeywordBinop(binop) => binop.infer_types(scope),
+            ast::Expression::Not(not) => not.infer_types(scope),
+            ast::Expression::If(if_expr) => if_expr.infer_types(scope),
+            ast::Expression::Case(case) => case.infer_types(scope),
+            ast::Expression::Binop(binop) => binop.infer_types(scope),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             _ => Err(nyi(self, "expression")),
         }
@@ -431,8 +439,6 @@ impl InferTypes for ast::TableAndColumnName {
         let table = ident_from_table_name(table_name)?;
         let table_type = scope.get_or_err(&table)?.try_as_table_type(&table)?;
         let column_type = table_type.column_by_name_or_err(column_name)?;
-        // TODO: Actually, we ought to be able store `ArgumentType` in a
-        // column. See the test case `scoped_aggregates.sql`.
         Ok((column_type.ty.to_owned(), scope.clone()))
     }
 }
@@ -453,31 +459,159 @@ impl InferTypes for ast::Cast {
     }
 }
 
+impl InferTypes for ast::IsExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        // We need to do this manually because our second argument isn't an
+        // expression.
+        let func_name = &CaseInsensitiveIdent::new("%IS", self.is_token.span());
+        let func_ty = scope
+            .get_or_err(func_name)?
+            .try_as_function_type(func_name)?;
+        let arg_types = [
+            self.left.infer_types(scope)?.0,
+            self.predicate.infer_types(scope)?.0,
+        ];
+        let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
+        Ok((ret_ty, scope.clone()))
+    }
+}
+
+impl InferTypes for ast::IsExpressionPredicate {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        // Return either BOOL or NULL type, depending on the predicate. The
+        // types for the %IS primitive will use this to verify that the left
+        // argument and predicate are compatible.
+        match self {
+            ast::IsExpressionPredicate::Null(_) | ast::IsExpressionPredicate::Unknown(_) => Ok((
+                ArgumentType::Value(ValueType::Simple(SimpleType::Null)),
+                scope.clone(),
+            )),
+            ast::IsExpressionPredicate::True(_) | ast::IsExpressionPredicate::False(_) => Ok((
+                ArgumentType::Value(ValueType::Simple(SimpleType::Bool)),
+                scope.clone(),
+            )),
+        }
+    }
+}
+
+impl InferTypes for ast::InExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        // We need to do this manually because our second argument isn't an
+        // expression.
+        let func_name = &CaseInsensitiveIdent::new("%IN", self.in_token.span());
+        let func_ty = scope
+            .get_or_err(func_name)?
+            .try_as_function_type(func_name)?;
+        let arg_types = [
+            self.left.infer_types(scope)?.0,
+            self.value_set.infer_types(scope)?.0,
+        ];
+        let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
+        Ok((ret_ty, scope.clone()))
+    }
+}
+
+impl InferTypes for ast::InValueSet {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        match self {
+            ast::InValueSet::QueryExpression { .. } => Err(nyi(self, "IN subquery")),
+            ast::InValueSet::ExpressionList { .. } => Err(nyi(self, "IN expression list")),
+            ast::InValueSet::Unnest { .. } => Err(nyi(self, "IN unnest")),
+        }
+    }
+}
+
+impl InferTypes for ast::BetweenExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let func_name = &CaseInsensitiveIdent::new("%BETWEEN", self.between_token.span());
+        let args = [
+            self.left.as_mut(),
+            self.middle.as_mut(),
+            self.right.as_mut(),
+        ];
+        infer_call(func_name, args, scope)
+    }
+}
+
+impl InferTypes for ast::KeywordBinopExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let func_name = &CaseInsensitiveIdent::new(
+            &format!("%{}", self.op_keyword.ident.token.as_str()),
+            self.op_keyword.span(),
+        );
+        let args = [self.left.as_mut(), self.right.as_mut()];
+        infer_call(func_name, args, scope)
+    }
+}
+
+impl InferTypes for ast::NotExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let func_name = &CaseInsensitiveIdent::new("%NOT", self.not_token.span());
+        let args = [self.expression.as_mut()];
+        infer_call(func_name, args, scope)
+    }
+}
+
+impl InferTypes for ast::IfExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let args = [
+            self.condition.as_mut(),
+            self.then_expression.as_mut(),
+            self.else_expression.as_mut(),
+        ];
+        infer_call(
+            &CaseInsensitiveIdent::new("%IF", self.if_token.span()),
+            args,
+            scope,
+        )
+    }
+}
+
+impl InferTypes for ast::CaseExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        Err(nyi(self, "CASE"))
+    }
+}
+
+impl InferTypes for ast::BinopExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let prim_name = CaseInsensitiveIdent::new(
+            &format!("%{}", self.op_token.token.as_str()),
+            self.op_token.span(),
+        );
+        infer_call(&prim_name, [self.left.as_mut(), self.right.as_mut()], scope)
+    }
+}
+
 impl InferTypes for ast::FunctionCall {
     type Type = ArgumentType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let ast::FunctionCall {
-            name,
-            args,
-            over_clause,
-            ..
-        } = self;
-
-        let name = ident_from_function_name(name)?;
-        let func_ty = scope.get_or_err(&name)?.try_as_function_type(&name)?;
-
-        if over_clause.is_some() {
-            return Err(nyi(over_clause, "over clause"));
+        let name = ident_from_function_name(&self.name)?;
+        if self.over_clause.is_some() {
+            return Err(nyi(&self.over_clause, "over clause"));
         }
-
-        let mut arg_types = vec![];
-        for arg in args.node_iter_mut() {
-            let (ty, _scope) = arg.infer_types(scope)?;
-            arg_types.push(ty);
-        }
-        let ret_ty = func_ty.return_type_for(&arg_types, &name)?;
-        Ok((ret_ty, scope.clone()))
+        infer_call(&name, self.args.node_iter_mut(), scope)
     }
 }
 
@@ -528,6 +662,26 @@ fn ident_from_function_name(function_name: &ast::FunctionName) -> Result<CaseIns
         ast::FunctionName::Function { function, .. } => Ok(function.clone().into()),
         _ => Err(nyi(function_name, "dotted name")),
     }
+}
+
+/// Infer types a function-like expression (including primitives).
+fn infer_call<'args, ArgExprs>(
+    func_name: &CaseInsensitiveIdent,
+    args: ArgExprs,
+    scope: &ScopeHandle,
+) -> Result<(ArgumentType, ScopeHandle)>
+where
+    ArgExprs: IntoIterator<Item = &'args mut ast::Expression>,
+{
+    let func_ty = scope
+        .get_or_err(func_name)?
+        .try_as_function_type(func_name)?;
+    let mut arg_types = vec![];
+    for arg in args {
+        arg_types.push(arg.infer_types(scope)?.0);
+    }
+    let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
+    Ok((ret_ty, scope.clone()))
 }
 
 /// Print a pretty error message when we haven't implemented something.

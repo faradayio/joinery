@@ -2,7 +2,7 @@ use derive_visitor::{DriveMut, VisitorMut};
 use joinery_macros::sql_quote;
 
 use crate::{
-    ast::{self, Expression, InValueSet},
+    ast::{self, Expression, InExpression, InValueSet},
     errors::Result,
 };
 
@@ -15,12 +15,12 @@ pub struct InUnnestToInSelect;
 
 impl InUnnestToInSelect {
     fn enter_expression(&mut self, expr: &mut Expression) {
-        if let Expression::In {
+        if let Expression::In(InExpression {
             left,
             not_token,
             in_token,
             value_set: InValueSet::Unnest { expression, .. },
-        } = expr
+        }) = expr
         {
             let replacement = sql_quote! {
                 #left #not_token #in_token (SELECT * FROM UNNEST(#expression))

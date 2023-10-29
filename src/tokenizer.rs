@@ -1300,12 +1300,12 @@ mod test {
         let if_expr = sql_quote! { IF(TRUE, 2.0, 1.0) }
             .try_into_expression()
             .unwrap();
-        if let ast::Expression::If {
+        if let ast::Expression::If(ast::IfExpression {
             condition,
             then_expression,
             else_expression,
             ..
-        } = &if_expr
+        }) = &if_expr
         {
             let case_expr =
                 sql_quote! { CASE WHEN #condition THEN #then_expression ELSE #else_expression END }

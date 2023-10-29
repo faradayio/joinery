@@ -2,7 +2,7 @@ use derive_visitor::{DriveMut, VisitorMut};
 use joinery_macros::sql_quote;
 
 use crate::{
-    ast::{self, Expression},
+    ast::{self, Expression, IfExpression},
     errors::Result,
 };
 
@@ -16,12 +16,12 @@ pub struct IfToCase;
 
 impl IfToCase {
     fn enter_expression(&mut self, expr: &mut Expression) {
-        if let Expression::If {
+        if let Expression::If(IfExpression {
             condition,
             then_expression,
             else_expression,
             ..
-        } = expr
+        }) = expr
         {
             let replacement = sql_quote! {
                 CASE WHEN #condition THEN #then_expression ELSE #else_expression END
