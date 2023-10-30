@@ -181,7 +181,11 @@ impl InferTypes for ast::InsertIntoStatement {
                 }
                 Ok(((), scope.clone()))
             }
-            ast::InsertedData::Select { query, .. } => Err(nyi(query, "INSERT INTO .. AS")),
+            ast::InsertedData::Select { query, .. } => {
+                let (ty, _scope) = query.infer_types(scope)?;
+                ty.expect_subtype_ignoring_nullability_of(table_type, query)?;
+                Ok(((), scope.clone()))
+            }
         }
     }
 }
