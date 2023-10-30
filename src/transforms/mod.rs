@@ -15,6 +15,7 @@ pub use self::{
     in_unnest_to_in_select::InUnnestToInSelect,
     index_from_one::IndexFromOne,
     index_from_zero::IndexFromZero,
+    is_bool_to_case::IsBoolToCase,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     rename_functions::{RenameFunctions, Udf},
     standardize_current_date::StandardizeCurrentDate,
@@ -28,6 +29,7 @@ mod if_to_case;
 mod in_unnest_to_in_select;
 mod index_from_one;
 mod index_from_zero;
+mod is_bool_to_case;
 mod or_replace_to_drop_if_exists;
 mod rename_functions;
 mod standardize_current_date;

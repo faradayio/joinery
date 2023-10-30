@@ -1,14 +1,12 @@
 //! Our type inference subsystem.
 
-// This is work in progress.
-#![allow(dead_code)]
-
 use crate::{
     ast,
     errors::{Error, Result},
     scope::{CaseInsensitiveIdent, Scope, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
     types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
+    unification::{UnificationTable, Unify},
 };
 
 // TODO: Remember this rather scary example. Verify BigQuery supports it
@@ -377,12 +375,10 @@ impl InferTypes for ast::Expression {
     type Type = ArgumentType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let arg = ArgumentType::Value;
-        let arg_simple = |ty| arg(ValueType::Simple(ty));
         match self {
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
-            ast::Expression::BoolValue(_) => Ok((arg_simple(SimpleType::Bool), scope.clone())),
-            ast::Expression::Null { .. } => Ok((arg_simple(SimpleType::Null), scope.clone())),
+            ast::Expression::BoolValue(_) => Ok((ArgumentType::bool(), scope.clone())),
+            ast::Expression::Null { .. } => Ok((ArgumentType::null(), scope.clone())),
             ast::Expression::ColumnName(ident) => ident.infer_types(scope),
             ast::Expression::TableAndColumnName(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
@@ -486,14 +482,12 @@ impl InferTypes for ast::IsExpressionPredicate {
         // types for the %IS primitive will use this to verify that the left
         // argument and predicate are compatible.
         match self {
-            ast::IsExpressionPredicate::Null(_) | ast::IsExpressionPredicate::Unknown(_) => Ok((
-                ArgumentType::Value(ValueType::Simple(SimpleType::Null)),
-                scope.clone(),
-            )),
-            ast::IsExpressionPredicate::True(_) | ast::IsExpressionPredicate::False(_) => Ok((
-                ArgumentType::Value(ValueType::Simple(SimpleType::Bool)),
-                scope.clone(),
-            )),
+            ast::IsExpressionPredicate::Null(_) | ast::IsExpressionPredicate::Unknown(_) => {
+                Ok((ArgumentType::null(), scope.clone()))
+            }
+            ast::IsExpressionPredicate::True(_) | ast::IsExpressionPredicate::False(_) => {
+                Ok((ArgumentType::bool(), scope.clone()))
+            }
         }
     }
 }
@@ -520,7 +514,7 @@ impl InferTypes for ast::InExpression {
 impl InferTypes for ast::InValueSet {
     type Type = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, _scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
             ast::InValueSet::QueryExpression { .. } => Err(nyi(self, "IN subquery")),
             ast::InValueSet::ExpressionList { .. } => Err(nyi(self, "IN expression list")),
@@ -587,7 +581,42 @@ impl InferTypes for ast::CaseExpression {
     type Type = ArgumentType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        Err(nyi(self, "CASE"))
+        // CASE is basically two different constructs, depending on whether
+        // there is a CASE expression or not. We handle them separately.
+        let mut table = UnificationTable::default();
+        if let Some(case_expr) = &mut self.case_expr {
+            let match_tv = table.type_var("M", &self.case_token)?;
+            match_tv.unify(&case_expr.infer_types(scope)?.0, &mut table, case_expr)?;
+            let result_tv = table.type_var("R", &self.case_token)?;
+            for c in &mut self.when_clauses {
+                match_tv.unify(&c.condition.infer_types(scope)?.0, &mut table, &c.condition)?;
+                result_tv.unify(&c.result.infer_types(scope)?.0, &mut table, &c.result)?;
+            }
+            if let Some(else_clause) = &mut self.else_clause {
+                let else_expr = &mut else_clause.result;
+                result_tv.unify(&else_expr.infer_types(scope)?.0, &mut table, else_expr)?;
+            } else {
+                result_tv.unify(&ArgumentType::null(), &mut table, self)?;
+            }
+            Ok((match_tv.resolve(&table, self)?, scope.clone()))
+        } else {
+            let bool_ty = ArgumentType::bool();
+            let result_tv = table.type_var("R", &self.case_token)?;
+            for c in &mut self.when_clauses {
+                c.condition
+                    .infer_types(scope)?
+                    .0
+                    .expect_subtype_of(&bool_ty, c)?;
+                result_tv.unify(&c.result.infer_types(scope)?.0, &mut table, &c.result)?;
+            }
+            if let Some(else_clause) = &mut self.else_clause {
+                let else_expr = &mut else_clause.result;
+                result_tv.unify(&else_expr.infer_types(scope)?.0, &mut table, else_expr)?;
+            } else {
+                result_tv.unify(&ArgumentType::null(), &mut table, self)?;
+            }
+            Ok((result_tv.resolve(&table, self)?, scope.clone()))
+        }
     }
 }
 

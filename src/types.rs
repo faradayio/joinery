@@ -12,9 +12,6 @@
 //! does not support `ARRAY<ARRAY<T>>`, only `ARRAY<STRUCT<ARRAY<T>>>`, and that
 //! `STRUCT` fields have optional names.
 
-// Work in progress.
-#![allow(dead_code)]
-
 use std::fmt;
 
 use peg::{error::ParseError, str::LineCol};
@@ -122,6 +119,7 @@ impl<TV: TypeVarSupport> Type<TV> {
     }
 
     /// Convert this type into a [`ValueType`], if possible.
+    #[allow(dead_code)]
     pub fn try_as_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {
             Type::Argument(ArgumentType::Value(t)) => Ok(t),
@@ -178,6 +176,16 @@ pub enum ArgumentType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
 }
 
 impl<TV: TypeVarSupport> ArgumentType<TV> {
+    /// Create a NULL type.
+    pub fn null() -> Self {
+        ArgumentType::Value(ValueType::Simple(SimpleType::Null))
+    }
+
+    /// Create a BOOL type.
+    pub fn bool() -> Self {
+        ArgumentType::Value(ValueType::Simple(SimpleType::Bool))
+    }
+
     /// Expect a [`ValueType`].
     pub fn expect_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {
@@ -211,6 +219,18 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
             (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => a.is_subtype_of(b),
             _ => false,
         }
+    }
+
+    /// Return an error if we are not a subtype of `other`.
+    pub fn expect_subtype_of(&self, other: &ArgumentType<TV>, spanned: &dyn Spanned) -> Result<()> {
+        if !self.is_subtype_of(other) {
+            return Err(Error::annotated(
+                format!("expected {}, found {}", other, self),
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        Ok(())
     }
 
     /// Find a common supertype of two types. Returns `None` if the only common
@@ -319,6 +339,7 @@ impl<TV: TypeVarSupport> ValueType<TV> {
     }
 
     /// Return an error if we are not a subtype of `other`.
+    #[allow(dead_code)]
     pub fn expect_subtype_of(&self, other: &ValueType<TV>, spanned: &dyn Spanned) -> Result<()> {
         if !self.is_subtype_of(other) {
             return Err(Error::annotated(

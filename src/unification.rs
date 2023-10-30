@@ -61,6 +61,21 @@ impl UnificationTable {
         Ok(())
     }
 
+    /// Create a new type variable, declare it, and return an `ArgumentType`.
+    ///
+    /// This is handy when we're forced to implement custom unification logic.
+    pub fn type_var(
+        &mut self,
+        name: impl Into<String>,
+        spanned: &dyn Spanned,
+    ) -> Result<ArgumentType<TypeVar>> {
+        let var = TypeVar::new(name)?;
+        self.declare(var.clone(), spanned)?;
+        Ok(ArgumentType::Value(ValueType::Simple(
+            SimpleType::Parameter(var),
+        )))
+    }
+
     /// Update a type variable to a new type.
     pub fn update(
         &mut self,

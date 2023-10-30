@@ -250,6 +250,7 @@ impl Driver for SnowflakeDriver {
             Box::new(transforms::CountifToCase),
             Box::new(transforms::IfToCase),
             Box::new(transforms::IndexFromZero),
+            Box::new(transforms::IsBoolToCase),
             Box::new(transforms::RenameFunctions::new(
                 &FUNCTION_NAMES,
                 &UDFS,

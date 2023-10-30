@@ -823,41 +823,12 @@ impl Emit for CastType {
 }
 
 /// An `IS` expression.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct IsExpression {
     pub left: Box<Expression>,
     pub is_token: Keyword,
     pub not_token: Option<Keyword>,
     pub predicate: IsExpressionPredicate,
-}
-
-impl Emit for IsExpression {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match (&self.predicate, t) {
-            // BigQuery allows anything.
-            (_, Target::BigQuery) => self.emit_default(t, f),
-            // `UNKNOWN` will be translated to `NULL` everywhere else.
-            (IsExpressionPredicate::Null(_), _) | (IsExpressionPredicate::Unknown(_), _) => {
-                self.emit_default(t, f)
-            }
-            // `TRUE` and `FALSE` work on SQLite3.
-            (IsExpressionPredicate::True(_), Target::SQLite3)
-            | (IsExpressionPredicate::False(_), Target::SQLite3) => self.emit_default(t, f),
-            // For everyone else, we need to use CASE.
-            (IsExpressionPredicate::True(keyword), _)
-            | (IsExpressionPredicate::False(keyword), _) => {
-                f.write_token_start("CASE")?;
-                self.left.emit(t, f)?;
-                f.write_token_start("WHEN")?;
-                keyword.emit(t, f)?;
-                f.write_token_start("THEN")?;
-                f.write_token_start("TRUE")?;
-                f.write_token_start("ELSE")?;
-                f.write_token_start("FALSE")?;
-                f.write_token_start("END")
-            }
-        }
-    }
 }
 
 /// An `IS` predicate.
@@ -959,6 +930,7 @@ pub struct IfExpression {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct CaseExpression {
     pub case_token: Keyword,
+    pub case_expr: Option<Box<Expression>>,
     pub when_clauses: Vec<CaseWhenClause>,
     pub else_clause: Option<CaseElseClause>,
     pub end_token: Keyword,
@@ -2035,9 +2007,13 @@ peg::parser! {
                 })
             }
             --
-            case_token:k("CASE") when_clauses:(case_when_clause()*) else_clause:case_else_clause()? end_token:k("END") {
+            case_token:k("CASE")
+            case_expr:expression()?
+            when_clauses:(case_when_clause()*)
+            else_clause:case_else_clause()? end_token:k("END") {
                 Expression::Case(CaseExpression {
                     case_token,
+                    case_expr: case_expr.map(Box::new),
                     when_clauses,
                     else_clause,
                     end_token,

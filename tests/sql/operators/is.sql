@@ -6,8 +6,10 @@ SELECT
     NULL IS NULL AS null_is_null,
     NULL IS NOT NULL AS null_is_not_null,
     TRUE IS TRUE AS true_is_true,
+    FALSE IS NOT TRUE AS false_is_not_true,
     NULL IS TRUE AS null_is_true,
     FALSE IS FALSE AS false_is_false,
+    TRUE IS NOT FALSE AS true_is_not_false,
     NULL IS FALSE AS null_is_false,
     NULL IS UNKNOWN AS null_is_unknown,
     NULL IS NOT UNKNOWN AS null_is_not_unknown,
@@ -19,8 +21,10 @@ CREATE OR REPLACE TABLE __expected1 (
     null_is_null BOOL,
     null_is_not_null BOOL,
     true_is_true BOOL,
+    false_is_not_true BOOL,
     null_is_true BOOL,
     false_is_false BOOL,
+    true_is_not_false BOOL,
     null_is_false BOOL,
     null_is_unknown BOOL,
     null_is_not_unknown BOOL,
@@ -32,8 +36,10 @@ INSERT INTO __expected1 VALUES (
     TRUE, -- null_is_null
     FALSE, -- null_is_not_null
     TRUE, -- true_is_true
+    TRUE, -- false_is_not_true
     FALSE, -- null_is_true
     TRUE, -- false_is_false
+    TRUE, -- true_is_not_false
     FALSE, -- null_is_false
     TRUE, -- null_is_unknown
     FALSE, -- null_is_not_unknown

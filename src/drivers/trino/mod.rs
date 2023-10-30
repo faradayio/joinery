@@ -175,6 +175,7 @@ impl Driver for TrinoDriver {
             Box::new(transforms::CountifToCase),
             Box::new(transforms::IndexFromOne),
             Box::new(transforms::InUnnestToInSelect),
+            Box::new(transforms::IsBoolToCase),
             Box::new(transforms::OrReplaceToDropIfExists),
             Box::new(transforms::RenameFunctions::new(
                 &FUNCTION_NAMES,

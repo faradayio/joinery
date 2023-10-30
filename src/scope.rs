@@ -1,8 +1,5 @@
 //! Namespace for SQL.
 
-// This is work in progress.
-#![allow(dead_code)]
-
 use std::{collections::BTreeMap, fmt, hash, sync::Arc};
 
 use crate::{
@@ -25,11 +22,6 @@ impl CaseInsensitiveIdent {
     /// Create a new case-insensitive identifier.
     pub fn new(name: &str, span: Span) -> Self {
         Ident::new(name, span).into()
-    }
-
-    /// Get the underlying identifier.
-    pub fn ident(&self) -> &Ident {
-        &self.ident
     }
 }
 
