@@ -1375,10 +1375,8 @@ impl Emit for DataType {
                 DataType::Float64(token) => token.ident.token.with_str("DOUBLE").emit(t, f),
                 DataType::Geography(token) => token.ident.token.with_str("JSON").emit(t, f),
                 DataType::Int64(token) => token.ident.token.with_str("BIGINT").emit(t, f),
-                // TODO: This cannot be done safely in Trino, because you always
-                // need to specify the precision and where to put the decimal
-                // place.
-                DataType::Numeric(token) => token.ident.token.with_str("DECIMAL(?,?)").emit(t, f),
+                // BigQuery's precision is fixed, and we can't change it.
+                DataType::Numeric(token) => token.ident.token.with_str("DECIMAL(38,9)").emit(t, f),
                 DataType::String(token) => token.ident.token.with_str("VARCHAR").emit(t, f),
                 DataType::Time(token) => token.emit(t, f),
                 DataType::Timestamp(token) => token

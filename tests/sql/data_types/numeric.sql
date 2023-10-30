@@ -1,5 +1,3 @@
--- pending: trino BigQuery NUMERIC may lose data when converted to DECIMAL(n,m).
-
 -- Test type parsing without creating any actual rows. This allows us to
 -- verify as many types as possible without needing to worry about reading
 -- data from the database.
