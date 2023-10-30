@@ -381,6 +381,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::Binop(binop) => binop.infer_types(scope),
             ast::Expression::Array(array) => array.infer_types(scope),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
+            ast::Expression::Index(index) => index.infer_types(scope),
             _ => Err(nyi(self, "expression")),
         }
     }
@@ -699,6 +700,21 @@ impl InferTypes for ast::FunctionCall {
             return Err(nyi(&self.over_clause, "over clause"));
         }
         infer_call(&name, self.args.node_iter_mut(), scope)
+    }
+}
+
+impl InferTypes for ast::IndexExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let func_name = &CaseInsensitiveIdent::new("%[]", self.bracket1.span());
+        let index_expr = match &mut self.index {
+            ast::IndexOffset::Simple(expression)
+            | ast::IndexOffset::Offset { expression, .. }
+            | ast::IndexOffset::Ordinal { expression, .. } => expression,
+        };
+        let args = [self.expression.as_mut(), index_expr];
+        infer_call(func_name, args, scope)
     }
 }
 

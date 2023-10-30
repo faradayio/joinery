@@ -240,6 +240,7 @@ static BUILT_IN_FUNCTIONS: &str = "
 %- = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
 %* = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
 %/ = Fn(INT64, INT64) -> INT64 | Fn(FLOAT64, FLOAT64) -> FLOAT64;
+%[] = Fn<?T>(ARRAY<?T>, INT64) -> ?T;
 
 -- Functions.
 
