@@ -116,17 +116,15 @@ impl InferTypes for ast::CreateTableStatement {
                             // TODO: We don't support this in the main grammar yet.
                             not_null: false,
                         };
-                        col_ty.expect_creatable(column)?;
                         Ok(col_ty)
                     })
                     .collect::<Result<Vec<_>>>()?;
-
-                scope.add(
-                    ident_from_table_name(table_name)?,
-                    Type::Table(TableType {
-                        columns: column_decls,
-                    }),
-                )?;
+                let table_type = TableType {
+                    columns: column_decls,
+                }
+                .name_anonymous_columns(table_name.span());
+                table_type.expect_creatable(table_name)?;
+                scope.add(ident_from_table_name(table_name)?, Type::Table(table_type))?;
                 Ok(((), scope.into_handle()))
             }
             ast::CreateTableStatement {
@@ -138,9 +136,8 @@ impl InferTypes for ast::CreateTableStatement {
                 ..
             } => {
                 let (ty, _scope) = query_statement.infer_types(scope)?;
-                for col_ty in &ty.columns {
-                    col_ty.expect_creatable(query_statement)?;
-                }
+                let ty = ty.name_anonymous_columns(table_name.span());
+                ty.expect_creatable(table_name)?;
                 let mut scope = Scope::new(scope);
                 scope.add(ident_from_table_name(table_name)?, Type::Table(ty))?;
                 Ok(((), scope.into_handle()))
@@ -290,32 +287,20 @@ impl InferTypes for ast::SelectExpression {
             ((), scope) = from_clause.infer_types(&scope)?;
         }
 
-        let mut next_anon_col_id: u64 = 0;
         let mut cols = vec![];
         for item in select_list.node_iter_mut() {
             match item {
                 ast::SelectListItem::Expression { expression, alias } => {
                     // BigQuery does not allow select list items to see names
                     // bound by other select list items.
-                    //
-                    // TODO: Delay assigning anonymous names until we actually
-                    // create a table?
                     let (ty, _scope) = expression.infer_types(&scope)?;
                     // Make sure any aggregates have been turned into values.
                     let ty = ty.expect_value_type(expression)?.to_owned();
                     let name = alias
                         .infer_column_name()
-                        .or_else(|| expression.infer_column_name())
-                        .unwrap_or_else(|| {
-                            // We try to predict how BigQuery will name these.
-                            let ident =
-                                Ident::new(&format!("_f{}", next_anon_col_id), expression.span());
-                            next_anon_col_id += 1;
-                            ident
-                        });
-
+                        .or_else(|| expression.infer_column_name());
                     cols.push(ColumnType {
-                        name: Some(name),
+                        name,
                         ty: ArgumentType::Value(ty),
                         not_null: false,
                     });

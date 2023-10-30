@@ -777,6 +777,37 @@ impl TableType {
         }
         Ok(())
     }
+
+    /// Expect this table to be creatable, i.e., that it contains no aggregate
+    /// columns or uninhabited types.
+    pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
+        for column in &self.columns {
+            column.expect_creatable(spanned)?;
+        }
+        Ok(())
+    }
+
+    /// Name all anonymous columns in this table, trying to mimic BigQuery's
+    /// behavior. BigQuery names anonymous columns `_f0`, `_f1`, etc., but
+    /// only increments the counter for anonymous columns, not all columns.
+    pub fn name_anonymous_columns(&self, span: Span) -> Self {
+        let mut counter = 0;
+        let mut new_columns = Vec::new();
+        for column in &self.columns {
+            if column.name.is_none() {
+                new_columns.push(ColumnType {
+                    name: Some(Ident::new(&format!("_f{}", counter), span.clone())),
+                    ..column.clone()
+                });
+                counter += 1;
+            } else {
+                new_columns.push(column.clone());
+            }
+        }
+        TableType {
+            columns: new_columns,
+        }
+    }
 }
 
 impl fmt::Display for TableType {
@@ -807,20 +838,12 @@ pub struct ColumnType {
 }
 
 impl ColumnType {
-    /// Return an error if this column is not storable.
+    /// Return an error if this column is not storable. We do not check to see
+    /// if the column is named. You can fix that by calling
+    /// [`TableType::name_anonymous_columns`].
     pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
         match &self.ty {
-            ArgumentType::Value(ty) => {
-                ty.expect_inhabited(spanned)?;
-                if self.name.is_none() {
-                    return Err(Error::annotated(
-                        "cannot store a table with anonymous columns",
-                        spanned.span(),
-                        "type mismatch",
-                    ));
-                }
-                Ok(())
-            }
+            ArgumentType::Value(ty) => ty.expect_inhabited(spanned),
             ArgumentType::Aggregating(_) => Err(Error::annotated(
                 "Cannot store an aggregate column",
                 spanned.span(),
