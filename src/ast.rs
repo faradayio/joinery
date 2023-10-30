@@ -953,7 +953,7 @@ pub struct ArrayExpression {
     pub array_token: Option<Keyword>,
     pub element_type: Option<ArrayElementType>,
     pub delim1: Punct,
-    pub definition: Option<ArrayDefinition>,
+    pub definition: ArrayDefinition,
     pub delim2: Punct,
 }
 
@@ -2134,7 +2134,7 @@ peg::parser! {
             / expression:expression() { IndexOffset::Simple(Box::new(expression)) }
 
         rule array_expression() -> ArrayExpression
-            = delim1:p("[") definition:array_definition()? delim2:p("]") {
+            = delim1:p("[") definition:array_definition() delim2:p("]") {
                 ArrayExpression {
                     array_token: None,
                     element_type: None,
@@ -2144,7 +2144,7 @@ peg::parser! {
                 }
             }
             / array_token:k("ARRAY") element_type:array_element_type()?
-              delim1:p("[") definition:array_definition()? delim2:p("]") {
+              delim1:p("[") definition:array_definition() delim2:p("]") {
                 ArrayExpression {
                     array_token: Some(array_token),
                     element_type,
@@ -2154,7 +2154,7 @@ peg::parser! {
                 }
               }
             / array_token:k("ARRAY") element_type:array_element_type()?
-              delim1:p("(") definition:array_definition()? delim2:p(")") {
+              delim1:p("(") definition:array_definition() delim2:p(")") {
                 ArrayExpression {
                     array_token: Some(array_token),
                     element_type,
@@ -2167,6 +2167,7 @@ peg::parser! {
         rule array_definition() -> ArrayDefinition
             = query:query_expression() { ArrayDefinition::Query(Box::new(query)) }
             / expressions:sep(<expression()>, ",") { ArrayDefinition::Elements(expressions) }
+            / { ArrayDefinition::Elements(NodeVec::new(",")) }
 
         rule struct_expression() -> StructExpression
             = struct_token:k("STRUCT") paren1:p("(") fields:select_list() paren2:p(")") {

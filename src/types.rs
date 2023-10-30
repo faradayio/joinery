@@ -222,6 +222,21 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
         }
     }
 
+    /// Expect an [`ArrayType`] and return the element type.
+    pub fn expect_array_type_returning_elem_type(
+        &self,
+        spanned: &dyn Spanned,
+    ) -> Result<&SimpleType<TV>> {
+        match self {
+            ArgumentType::Value(ValueType::Array(t)) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected array type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
     /// Is this a subtype of `other`?
     pub fn is_subtype_of(&self, other: &ArgumentType<TV>) -> bool {
         // Value types can't be subtypes of aggregating types or vice versa,
@@ -720,6 +735,18 @@ impl TableType {
                 "not defined",
             )),
         }
+    }
+
+    /// Expect a table to have a single column, and return that column.
+    pub fn expect_one_column(&self, spanned: &dyn Spanned) -> Result<&ColumnType> {
+        if self.columns.len() != 1 {
+            return Err(Error::annotated(
+                format!("expected a table with one column, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        Ok(&self.columns[0])
     }
 
     /// Is this table a subtype of `other`, ignoring nullability?

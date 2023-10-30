@@ -390,6 +390,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::If(if_expr) => if_expr.infer_types(scope),
             ast::Expression::Case(case) => case.infer_types(scope),
             ast::Expression::Binop(binop) => binop.infer_types(scope),
+            ast::Expression::Array(array) => array.infer_types(scope),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             _ => Err(nyi(self, "expression")),
         }
@@ -504,17 +505,7 @@ impl InferTypes for ast::InExpression {
             .try_as_function_type(func_name)?;
         let left_ty = self.left.infer_types(scope)?.0;
         let value_set_ty = self.value_set.infer_types(scope)?.0;
-        if value_set_ty.columns.len() != 1 {
-            return Err(Error::annotated(
-                format!(
-                    "expected value set to have one column, found {}",
-                    value_set_ty.columns.len()
-                ),
-                self.value_set.span(),
-                "wrong number of columns",
-            ));
-        }
-        let elem_ty = value_set_ty.columns[0].ty.clone();
+        let elem_ty = value_set_ty.expect_one_column(&self.value_set)?.ty.clone();
         let ret_ty = func_ty.return_type_for(&[left_ty, elem_ty], func_name)?;
         Ok((ret_ty, scope.clone()))
     }
@@ -662,6 +653,51 @@ impl InferTypes for ast::BinopExpression {
             self.op_token.span(),
         );
         infer_call(&prim_name, [self.left.as_mut(), self.right.as_mut()], scope)
+    }
+}
+
+impl InferTypes for ast::ArrayExpression {
+    type Type = ArgumentType;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        let return_ty = self.definition.infer_types(scope)?.0;
+        let return_ty = if let Some(element_ty) = &self.element_type {
+            let element_ty = ArgumentType::Value(ValueType::try_from(&element_ty.elem_type)?);
+            return_ty.expect_subtype_of(&element_ty, self)?;
+            element_ty
+        } else {
+            return_ty
+        };
+        let return_ty = return_ty.expect_simple_type(self)?;
+        Ok((
+            ArgumentType::Value(ValueType::Array(return_ty.clone())),
+            scope.clone(),
+        ))
+    }
+}
+
+impl InferTypes for ast::ArrayDefinition {
+    /// The **element type** of the array.
+    type Type = ArgumentType;
+
+    /// Infer the **element type** of the array.
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+        match self {
+            ast::ArrayDefinition::Query(query) => {
+                let table_ty = query.infer_types(scope)?.0;
+                let elem_ty = table_ty.expect_one_column(query)?.ty.clone();
+                Ok((elem_ty, scope.clone()))
+            }
+            ast::ArrayDefinition::Elements(exprs) => {
+                // We can use infer_call if we're careful.
+                let span = exprs.items.span();
+                let func_name = &CaseInsensitiveIdent::new("%ARRAY", span);
+                let (elem_ty, _) = infer_call(func_name, exprs.node_iter_mut(), scope)?;
+                let elem_ty = elem_ty.expect_array_type_returning_elem_type(self)?;
+                let elem_ty = ArgumentType::Value(ValueType::Simple(elem_ty.clone()));
+                Ok((elem_ty, scope.clone()))
+            }
+        }
     }
 }
 

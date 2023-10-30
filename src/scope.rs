@@ -220,6 +220,7 @@ static BUILT_IN_FUNCTIONS: &str = "
 -- Primitives.
 
 %AND = Fn(BOOL, BOOL) -> BOOL;
+%ARRAY = Fn<?T>(..?T) -> ARRAY<?T>;
 %BETWEEN = Fn<?T>(?T, ?T, ?T) -> BOOL;
 %IF = Fn<?T>(BOOL, ?T, ?T) -> ?T;
 -- Second argument to IN is actually TABLE<?T>, but we just do the lookup using
