@@ -222,7 +222,9 @@ static BUILT_IN_FUNCTIONS: &str = "
 %AND = Fn(BOOL, BOOL) -> BOOL;
 %BETWEEN = Fn<?T>(?T, ?T, ?T) -> BOOL;
 %IF = Fn<?T>(BOOL, ?T, ?T) -> ?T;
-%IN = Fn<?T>(?T, ARRAY<?T>) -> BOOL;
+-- Second argument to IN is actually TABLE<?T>, but we just do the lookup using
+-- the column type.
+%IN = Fn<?T>(?T, ?T) -> BOOL;
 %IS = Fn<?T>(?T, NULL) -> BOOL | Fn(BOOL, BOOL) -> BOOL;
 %NOT = Fn(BOOL) -> BOOL;
 %OR = Fn(BOOL, BOOL) -> BOOL;

@@ -210,6 +210,18 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
         }
     }
 
+    /// Expect an [`ArrayType`].
+    pub fn expect_array_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
+        match self {
+            ArgumentType::Value(t @ ValueType::Array(_)) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected array type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
     /// Is this a subtype of `other`?
     pub fn is_subtype_of(&self, other: &ArgumentType<TV>) -> bool {
         // Value types can't be subtypes of aggregating types or vice versa,
@@ -376,6 +388,43 @@ impl<TV: TypeVarSupport> ValueType<TV> {
                 "no valid values",
             )),
             _ => Ok(()),
+        }
+    }
+}
+
+impl ValueType<ResolvedTypeVarsOnly> {
+    /// Unnest an array type into a table type, according to [Google's rules][unnest].
+    ///
+    /// [unnest]: https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#unnest_operator
+    pub fn unnest(&self, spanned: &dyn Spanned) -> Result<TableType> {
+        match self {
+            // Structs unnest to tables with the same columns.
+            //
+            // TODO: JSON, too, if we ever support it.
+            ValueType::Array(SimpleType::Struct(s)) => Ok(TableType {
+                columns: s
+                    .fields
+                    .iter()
+                    .map(|field| ColumnType {
+                        name: field.name.clone(),
+                        ty: ArgumentType::Value(field.ty.clone()),
+                        not_null: false,
+                    })
+                    .collect(),
+            }),
+            // Other types unnest to tables with a single anonymous column.
+            ValueType::Array(elem_ty) => Ok(TableType {
+                columns: vec![ColumnType {
+                    name: None,
+                    ty: ArgumentType::Value(ValueType::Simple(elem_ty.clone())),
+                    not_null: false,
+                }],
+            }),
+            _ => Err(Error::annotated(
+                "cannot unnest a non-array",
+                spanned.span(),
+                "type mismatch",
+            )),
         }
     }
 }

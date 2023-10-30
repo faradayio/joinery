@@ -112,12 +112,23 @@ impl UnificationTable {
     }
 }
 
-/// Interface for values supporting unification.
+/// Interface for types supporting unification.
 pub trait Unify: Sized {
-    /// The type after unification.
+    /// The type after unification. This is the concrete type (with no type
+    /// variables) corresponding to `Self`.
     type Resolved;
 
-    /// Unify two values.
+    /// Unify two types, updating any type variables in `self` to be a type
+    /// consistent with `other`. This may involve binding a pattern variable
+    /// `?T` to a concrete type, or "loosening" an existing binding like `?T:
+    /// INT64` to `?T: FLOAT64` so that it can hold all the types we've seen.
+    ///
+    /// If a type variable is already bound to a type like `?T: INT64`, and
+    /// we're asked to unify it with an incompatible type `STRING`, we'll return
+    /// an error.
+    ///
+    /// This is what allows us to deduce that `ARRAY[1, 2.0, NULL]` is an
+    /// `ARRAY<FLOAT64>`.
     fn unify(
         &self,
         other: &Self::Resolved,

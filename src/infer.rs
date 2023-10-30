@@ -502,23 +502,56 @@ impl InferTypes for ast::InExpression {
         let func_ty = scope
             .get_or_err(func_name)?
             .try_as_function_type(func_name)?;
-        let arg_types = [
-            self.left.infer_types(scope)?.0,
-            self.value_set.infer_types(scope)?.0,
-        ];
-        let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
+        let left_ty = self.left.infer_types(scope)?.0;
+        let value_set_ty = self.value_set.infer_types(scope)?.0;
+        if value_set_ty.columns.len() != 1 {
+            return Err(Error::annotated(
+                format!(
+                    "expected value set to have one column, found {}",
+                    value_set_ty.columns.len()
+                ),
+                self.value_set.span(),
+                "wrong number of columns",
+            ));
+        }
+        let elem_ty = value_set_ty.columns[0].ty.clone();
+        let ret_ty = func_ty.return_type_for(&[left_ty, elem_ty], func_name)?;
         Ok((ret_ty, scope.clone()))
     }
 }
 
 impl InferTypes for ast::InValueSet {
-    type Type = ArgumentType;
+    type Type = TableType;
 
-    fn infer_types(&mut self, _scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
-            ast::InValueSet::QueryExpression { .. } => Err(nyi(self, "IN subquery")),
-            ast::InValueSet::ExpressionList { .. } => Err(nyi(self, "IN expression list")),
-            ast::InValueSet::Unnest { .. } => Err(nyi(self, "IN unnest")),
+            ast::InValueSet::QueryExpression { query, .. } => query.infer_types(scope),
+            ast::InValueSet::ExpressionList {
+                paren1,
+                expressions,
+                ..
+            } => {
+                // Create a 1-column table type.
+                let mut table = UnificationTable::default();
+                let col_ty = table.type_var("T", paren1)?;
+                for e in expressions.node_iter_mut() {
+                    col_ty.unify(&e.infer_types(scope)?.0, &mut table, e)?;
+                }
+                let table_type = TableType {
+                    columns: vec![ColumnType {
+                        name: None,
+                        ty: col_ty.resolve(&table, self)?,
+                        not_null: false,
+                    }],
+                };
+                Ok((table_type, scope.clone()))
+            }
+            ast::InValueSet::Unnest { expression, .. } => {
+                let array_ty = expression.infer_types(scope)?.0;
+                let array_ty = array_ty.expect_array_type(expression)?;
+                let table_ty = array_ty.unnest(expression)?;
+                Ok((table_ty, scope.clone()))
+            }
         }
     }
 }
