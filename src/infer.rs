@@ -231,7 +231,22 @@ impl InferTypes for ast::QueryExpression {
                 }
                 query.infer_types(&scope)
             }
-            ast::QueryExpression::SetOperation { .. } => Err(nyi(self, "set operation")),
+            ast::QueryExpression::SetOperation {
+                left,
+                set_operator,
+                right,
+            } => {
+                let left_ty = left.infer_types(scope)?.0;
+                let right_ty = right.infer_types(scope)?.0;
+                let result_ty = left_ty.common_supertype(&right_ty).ok_or_else(|| {
+                    Error::annotated(
+                        format!("cannot combine {} and {}", left_ty, right_ty),
+                        set_operator.span(),
+                        "incompatible types",
+                    )
+                })?;
+                Ok((result_ty, scope.clone()))
+            }
         }
     }
 }

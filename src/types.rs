@@ -778,6 +778,30 @@ impl TableType {
         Ok(())
     }
 
+    /// Compute the least common supertype of two types. Returns `None` if the
+    /// only common super type would be top (⊤), which isn't part of our type
+    /// system.
+    ///
+    /// For some nice theoretical terminology, see [this
+    /// page](https://orc.csres.utexas.edu/documentation/html/refmanual/ref.types.subtyping.html).
+    pub fn common_supertype<'a>(&'a self, other: &'a Self) -> Option<Self> {
+        // Make sure we have the same number of columns.
+        if self.columns.len() != other.columns.len() {
+            return None;
+        }
+
+        // For each column, see if we can merge the column definitions.
+        let mut columns = Vec::new();
+        for (a, b) in self.columns.iter().zip(&other.columns) {
+            if let Some(column) = a.common_supertype(b) {
+                columns.push(column);
+            } else {
+                return None;
+            }
+        }
+        Some(TableType { columns })
+    }
+
     /// Expect this table to be creatable, i.e., that it contains no aggregate
     /// columns or uninhabited types.
     pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
@@ -859,6 +883,26 @@ impl ColumnType {
                 (Some(a), Some(b)) => a == b,
                 _ => true,
             }
+    }
+
+    /// Merge two column types, if possible. Returns `None` if the only common
+    /// super type would be top (⊤), which isn't part of our type system.
+    pub fn common_supertype<'a>(&'a self, other: &'a Self) -> Option<Self> {
+        // If we have two names, they must match. If we have one or zero names,
+        // do the best we can.
+        let name = match (&self.name, &other.name) {
+            (Some(a), Some(b)) if a == b => Some(a.clone()),
+            (Some(_), Some(_)) => None,
+            (Some(a), None) => Some(a.clone()),
+            (None, Some(b)) => Some(b.clone()),
+            (None, None) => None,
+        };
+        let ty = self.ty.common_supertype(&other.ty)?;
+        Some(ColumnType {
+            name,
+            ty,
+            not_null: self.not_null && other.not_null,
+        })
     }
 }
 
