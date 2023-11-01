@@ -1,13 +1,16 @@
 //! Namespace for SQL.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
     ast::Name,
     errors::{format_err, Error, Result},
     known_files::KnownFiles,
     tokenizer::Spanned,
-    types::{parse_function_decls, Type},
+    types::{parse_function_decls, ArgumentType, TableType, Type},
 };
 
 /// A value we can store in a scope. Details may change.
@@ -207,6 +210,193 @@ TO_HEX = Fn(BYTES) -> STRING;
 TRIM = Fn(STRING) -> STRING;
 UPPER = Fn(STRING) -> STRING;
 ";
+
+#[derive(Clone, Debug)]
+pub struct ColumnName {
+    table: Option<Name>,
+    column: Name,
+}
+
+impl ColumnName {
+    /// Does this column name match `name`? `name` may be either a column name
+    /// or a table name and a column name. Matches follow SQL rules, so `x`
+    /// matches `t.x`.
+    pub fn matches(&self, name: &Name) -> bool {
+        let (table, column) = name.split_table_and_column();
+        if let Some(table) = table {
+            if self.table.as_ref() != Some(&table) {
+                return false;
+            }
+        }
+        self.column == Name::from(column)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Column {
+    column_name: Option<ColumnName>,
+    ty: ArgumentType,
+}
+
+/// A set of columns and types.
+///
+/// This is output by a `FROM`, `JOIN`, `GROUP BY` or `PARTITION BY` clause.
+#[derive(Clone, Debug)]
+pub struct ColumnSet {
+    columns: Vec<Column>,
+}
+
+impl ColumnSet {
+    /// Build a column set from a table type.
+    pub fn from_table(table_name: Name, table_type: TableType) -> Self {
+        let columns = table_type
+            .columns
+            .into_iter()
+            .map(|col| {
+                let column_name = col.name.map(|col_name| ColumnName {
+                    table: Some(table_name.clone()),
+                    column: col_name.into(),
+                });
+                Column {
+                    column_name,
+                    ty: col.ty,
+                }
+            })
+            .collect();
+
+        Self { columns }
+    }
+
+    /// Join another column set, returning a new column set. This corresponds to
+    /// `JOIN` clauses that work like `ON`, which preserve all columns from both
+    /// sides.
+    pub fn join(&self, other: &Self) -> Self {
+        let mut columns = self.columns.clone();
+        columns.extend(other.columns.iter().cloned());
+        Self { columns }
+    }
+
+    /// Join another column set using the variables from a `USING` clause,
+    /// returning a new column set.
+    ///
+    /// For the variables that are in the `USING` clause, we only include one
+    /// copy of each without the table name.
+    pub fn join_using(&self, other: &Self, using: &[Name]) -> Result<Self> {
+        // Create a hash map, indicating which columns we have seen so far.
+        let mut seen_with_type = HashMap::new();
+        for name in using {
+            seen_with_type.insert(name.clone(), None);
+        }
+
+        // Iterate over all our columns, and add them to the output, being sure
+        // to handle using columns specially.
+        let columns_iter = self
+            .columns
+            .iter()
+            .cloned()
+            .chain(other.columns.iter().cloned());
+        let mut columns = vec![];
+        for col in columns_iter {
+            if let Some(name) = &col.column_name {
+                match seen_with_type.get_mut(&name.column) {
+                    Some(None) => {
+                        // We have not seen this column yet. Add it to the
+                        // output, removing the table name.
+                        seen_with_type.insert(name.column.clone(), Some(col.ty.clone()));
+                        columns.push(Column {
+                            column_name: Some(ColumnName {
+                                table: None,
+                                column: name.column.clone(),
+                            }),
+                            ty: col.ty,
+                        });
+                    }
+                    Some(Some(ty)) => {
+                        // We have already seen this column. Make sure the types
+                        // match.
+                        if col.ty.common_supertype(ty).is_none() {
+                            return Err(Error::annotated(
+                                format!(
+                                    "column {} has type {} in one table and type {} in another",
+                                    name.column.unescaped_bigquery(),
+                                    ty,
+                                    col.ty
+                                ),
+                                name.column.span(),
+                                "types do not match",
+                            ));
+                        }
+                    }
+                    None => {
+                        // This column is not in the `USING` clause. Add it to
+                        // the output.
+                        columns.push(col);
+                    }
+                }
+            } else {
+                // This column has no name. Add it to the output.
+                columns.push(col);
+            }
+        }
+        Ok(Self { columns })
+    }
+
+    /// To implement `GROUP BY`, we need to iterate over all columns, wrapping
+    /// any column not mentioned in the `GROUP BY` clause with
+    /// `ArgumentType::Aggregating`.
+    pub fn group_by(&self, group_by: &[Name]) -> Result<Self> {
+        let mut columns = vec![];
+        for col in &self.columns {
+            if let Some(name) = &col.column_name {
+                if group_by.contains(&name.column) {
+                    // This column is mentioned in the `GROUP BY` clause. Add it
+                    // to the output as is.
+                    columns.push(col.clone());
+                } else {
+                    // This column is not mentioned in the `GROUP BY` clause.
+                    // Wrap it in `ArgumentType::Aggregating` and add it to the
+                    // output.
+                    columns.push(Column {
+                        column_name: col.column_name.clone(),
+                        ty: ArgumentType::Aggregating(Box::new(col.ty.clone())),
+                    });
+                }
+            } else {
+                // Not mentioned in the `GROUP BY` clause, so aggregate it.
+                columns.push(Column {
+                    column_name: col.column_name.clone(),
+                    ty: ArgumentType::Aggregating(Box::new(col.ty.clone())),
+                });
+            }
+        }
+        Ok(Self { columns })
+    }
+
+    /// Look up a column type by name. Returns an error if ambiguous.
+    pub fn get(&self, name: &Name) -> Result<&ArgumentType> {
+        let mut matches = vec![];
+        for col in &self.columns {
+            if let Some(column_name) = &col.column_name {
+                if column_name.matches(name) {
+                    matches.push(&col.ty);
+                }
+            }
+        }
+        match matches.len() {
+            0 => Err(Error::annotated(
+                format!("unknown column: {}", name.unescaped_bigquery()),
+                name.span(),
+                "not defined",
+            )),
+            1 => Ok(matches[0]),
+            _ => Err(Error::annotated(
+                format!("ambiguous column: {}", name.unescaped_bigquery()),
+                name.span(),
+                "multiple columns match",
+            )),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
