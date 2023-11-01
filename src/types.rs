@@ -171,8 +171,8 @@ impl<TV: TypeVarSupport> fmt::Display for Type<TV> {
 pub enum ArgumentType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     /// A value type.
     Value(ValueType<TV>),
-    /// An aggregating value type.
-    Aggregating(ValueType<TV>),
+    /// An aggregating value type. Note that we can nest aggregating types.
+    Aggregating(Box<ArgumentType<TV>>),
 }
 
 impl<TV: TypeVarSupport> ArgumentType<TV> {
@@ -270,7 +270,7 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
             }
 
             (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => {
-                Some(ArgumentType::Aggregating(a.common_supertype(b)?))
+                Some(ArgumentType::Aggregating(Box::new(a.common_supertype(b)?)))
             }
             _ => None,
         }
@@ -290,9 +290,9 @@ impl Unify for ArgumentType<TypeVar> {
             (ArgumentType::Value(a), ArgumentType::Value(b)) => {
                 Ok(ArgumentType::Value(a.unify(b, table, spanned)?))
             }
-            (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => {
-                Ok(ArgumentType::Aggregating(a.unify(b, table, spanned)?))
-            }
+            (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => Ok(
+                ArgumentType::Aggregating(Box::new(a.unify(b, table, spanned)?)),
+            ),
             _ => Err(Error::annotated(
                 format!("cannot unify {} and {}", self, other),
                 spanned.span(),
@@ -304,9 +304,9 @@ impl Unify for ArgumentType<TypeVar> {
     fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
         match self {
             ArgumentType::Value(t) => Ok(ArgumentType::Value(t.resolve(table, spanned)?)),
-            ArgumentType::Aggregating(t) => {
-                Ok(ArgumentType::Aggregating(t.resolve(table, spanned)?))
-            }
+            ArgumentType::Aggregating(t) => Ok(ArgumentType::Aggregating(Box::new(
+                t.resolve(table, spanned)?,
+            ))),
         }
     }
 }
@@ -1172,7 +1172,9 @@ peg::parser! {
             / t:function_type() { Type::Function(t) }
 
         rule argument_type<TV: TypeVarSupport>() -> ArgumentType<TV>
-            = "Agg" _? "<" _? t:value_type() _? ">" { ArgumentType::Aggregating(t) }
+            = "Agg" _? "<" _? t:argument_type() _? ">" {
+                ArgumentType::Aggregating(Box::new(t))
+            }
             / t:value_type() { ArgumentType::Value(t) }
 
         rule value_type<TV: TypeVarSupport>() -> ValueType<TV>
@@ -1339,6 +1341,18 @@ pub mod tests {
         assert_eq!(
             ty("BOOL"),
             Type::Argument(ArgumentType::Value(ValueType::Simple(SimpleType::Bool)))
+        );
+    }
+
+    #[test]
+    fn parse_nested_agg() {
+        assert_eq!(
+            ty("Agg<Agg<INT64>>"),
+            Type::Argument(ArgumentType::Aggregating(Box::new(
+                ArgumentType::Aggregating(Box::new(ArgumentType::Value(ValueType::Simple(
+                    SimpleType::Int64
+                ))))
+            )))
         );
     }
 }
