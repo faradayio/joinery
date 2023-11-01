@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use derive_visitor::{DriveMut, VisitorMut};
 
 use crate::{
-    ast::{self, FunctionName},
+    ast::{self, FunctionCall, Name},
     errors::Result,
-    tokenizer::{Ident, Spanned},
+    tokenizer::Spanned,
 };
 
 use super::{Transform, TransformExtra};
@@ -19,7 +19,7 @@ pub struct Udf {
 }
 
 #[derive(VisitorMut)]
-#[visitor(FunctionName(enter))]
+#[visitor(FunctionCall(enter))]
 pub struct RenameFunctions {
     // Lookup table containing function replacements.
     function_table: &'static phf::Map<&'static str, &'static str>,
@@ -49,21 +49,17 @@ impl RenameFunctions {
         }
     }
 
-    fn enter_function_name(&mut self, function_name: &mut FunctionName) {
-        if let FunctionName::Function { function } = function_name {
-            let name = function.name.to_ascii_uppercase();
-            if let Some(snowflake_name) = self.function_table.get(&name) {
-                // Rename the function.
-                //
-                // TODO: Preserve whitespace and source location.
-                *function_name = FunctionName::Function {
-                    function: Ident::new(snowflake_name, function.span()),
-                };
-            } else if let Some(udf) = self.udf_table.get(&name) {
-                // We'll need a UDF, so add it to our list it if isn't already
-                // there.
-                self.udfs.insert(name, udf);
-            }
+    fn enter_function_call(&mut self, function_call: &mut FunctionCall) {
+        let name = function_call.name.unescaped_bigquery().to_ascii_uppercase();
+        if let Some(&new_name) = self.function_table.get(&name) {
+            // Rename the function.
+            //
+            // TODO: Preserve whitespace and source location.
+            function_call.name = Name::new(new_name, function_call.name.span());
+        } else if let Some(udf) = self.udf_table.get(&name) {
+            // We'll need a UDF, so add it to our list it if isn't already
+            // there.
+            self.udfs.insert(name, udf);
         }
     }
 }

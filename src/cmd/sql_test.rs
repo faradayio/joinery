@@ -223,14 +223,14 @@ impl PendingTestInfo {
 /// Tables output by a test suite. This normally stores `ast::TableName`s, but
 /// we use `Option<TableName>` while extracting the table names from the AST.
 #[derive(Clone, Debug, Default)]
-struct OutputTablePair<Name: Clone + fmt::Debug = ast::TableName> {
+struct OutputTablePair<Name: Clone + fmt::Debug = ast::Name> {
     result: Name,
     expected: Name,
 }
 
 /// Find the names of all tables that are output by this query.
 fn find_output_tables(ast: &ast::SqlProgram) -> Result<Vec<OutputTablePair>> {
-    let mut tables = Vec::<OutputTablePair<Option<ast::TableName>>>::default();
+    let mut tables = Vec::<OutputTablePair<Option<ast::Name>>>::default();
 
     for s in ast.statements.node_iter() {
         let name = match s {

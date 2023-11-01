@@ -19,6 +19,7 @@
 
 use std::{
     fmt::{self},
+    hash,
     io::{self, Write as _},
     mem::take,
 };
@@ -37,7 +38,7 @@ use crate::{
     known_files::{FileId, KnownFiles},
     tokenizer::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
-        RawToken, Spanned, ToTokens, Token, TokenStream, TokenWriter,
+        RawToken, Span, Spanned, ToTokens, Token, TokenStream, TokenWriter,
     },
     util::{is_c_ident, AnsiIdent, AnsiString},
 };
@@ -378,20 +379,6 @@ impl<T: Node> NodeVec<T> {
             NodeOrSep::Sep(_) => None,
         })
     }
-
-    /// Iterate over nodes and separators separately. Used internally for
-    /// parsing dotted names.
-    fn into_node_and_sep_iters(self) -> (impl Iterator<Item = T>, impl Iterator<Item = Punct>) {
-        let mut nodes = vec![];
-        let mut seps = vec![];
-        for item in self.items {
-            match item {
-                NodeOrSep::Node(node) => nodes.push(node),
-                NodeOrSep::Sep(token) => seps.push(token),
-            }
-        }
-        (nodes.into_iter(), seps.into_iter())
-    }
 }
 
 impl<T: Node> Clone for NodeVec<T> {
@@ -447,69 +434,138 @@ impl<T: Node> Emit for NodeVec<T> {
     }
 }
 
-/// A table name.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
-pub enum TableName {
-    ProjectDatasetTable {
-        project: Ident,
-        dot1: Punct,
-        dataset: Ident,
-        dot2: Punct,
-        table: Ident,
-    },
-    DatasetTable {
-        dataset: Ident,
-        dot: Punct,
-        table: Ident,
-    },
-    Table {
-        table: Ident,
-    },
+/// A name, consisting of one or more identifiers separated by dots.
+///
+/// This may represent a number of things in different contexts, including:
+///
+/// - A table.
+/// - A column.
+/// - A function.
+///
+/// All of these are ASCII case insensitive in BigQuery, but with [certain
+/// complications][case]:
+///
+/// - The BigQuery docs claim that user-defined functions are case-sensitive,
+///   but testing reveals this is not the case.
+/// - Datasets may supposedly be configured to enable case-sensitivite table
+///   names, but we do not currently attempt to support this.
+///
+/// [case]:
+///     https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#case_sensitivity
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, ToTokens)]
+pub struct Name {
+    /// Our name, as it appeared in the source code.
+    items: NodeVec<Ident>,
+
+    /// A version of our name that we can use as a key in a map.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    key: Vec<String>,
 }
 
-impl TableName {
-    /// Get the unescaped table name, in the original BigQuery form.
+impl Name {
+    /// Create a new [`Name`] from a string and a span.
+    pub fn new(s: &str, span: Span) -> Name {
+        let ident = Ident::new(s, span);
+        ident.into()
+    }
+
+    /// Split this name into a table name and a column name.
+    pub fn split_table_and_column(&self) -> (Option<Name>, Ident) {
+        // No table part.
+        if self.items.items.len() == 1 {
+            return (
+                None,
+                self.items
+                    .node_iter()
+                    .next()
+                    .expect("Name should start with ident")
+                    .clone(),
+            );
+        }
+
+        // Split off table part.
+        let mut items = self.items.clone();
+        match (items.items.pop(), items.items.pop()) {
+            (Some(NodeOrSep::Node(ident)), Some(NodeOrSep::Sep(_))) => (Some(items.into()), ident),
+            _ => panic!("Invalid name (impossible number of parts): {:?}", self),
+        }
+    }
+
+    /// Get an unquoted BigQuery version of this name.
     pub fn unescaped_bigquery(&self) -> String {
-        match self {
-            TableName::ProjectDatasetTable {
-                project,
-                dataset,
-                table,
-                ..
-            } => format!("{}.{}.{}", project.name, dataset.name, table.name,),
-            TableName::DatasetTable { dataset, table, .. } => {
-                format!("{}.{}", dataset.name, table.name,)
-            }
-            TableName::Table { table } => table.name.clone(),
-        }
+        self.items
+            .iter()
+            .map(|item| match item {
+                NodeOrSep::Node(ident) => ident.name.clone(),
+                NodeOrSep::Sep(_) => ".".to_string(),
+            })
+            .collect()
     }
 }
 
-impl Emit for TableName {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match t {
-            Target::SQLite3 => {
-                let name = self.unescaped_bigquery();
-                let (first, last) = match self {
-                    TableName::ProjectDatasetTable { project, table, .. } => (project, table),
-                    TableName::DatasetTable { dataset, table, .. } => (dataset, table),
-                    TableName::Table { table } => (table, table),
-                };
-                emit_whitespace(first.token.leading_whitespace(), t, f)?;
-                write!(f, "{}", AnsiIdent(&name))?;
-                emit_whitespace(last.token.trailing_whitespace(), t, f)
-            }
-            _ => self.emit_default(t, f),
-        }
+impl Spanned for Name {
+    fn span(&self) -> Span {
+        // Write a reasonably efficient implementation of `Spanned::span`,
+        // because we'll use it a lot.
+        let items = &self.items.items;
+        let start = items
+            .first()
+            .expect("Names must contain at least one element");
+        let end = items
+            .last()
+            .expect("Names must contain at least one element");
+        start.span().combined_with(&end.span())
     }
 }
 
-/// A table and a column name.
-#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
-pub struct TableAndColumnName {
-    pub table_name: TableName,
-    pub dot: Punct,
-    pub column_name: Ident,
+impl From<Ident> for Name {
+    fn from(ident: Ident) -> Self {
+        let mut node_vec = NodeVec::new(".");
+        node_vec.push(ident);
+        node_vec.into()
+    }
+}
+
+impl From<NodeVec<Ident>> for Name {
+    fn from(value: NodeVec<Ident>) -> Self {
+        assert!(
+            !value.items.is_empty(),
+            "Names must contain at least one element"
+        );
+        let key = value
+            .node_iter()
+            .map(|ident| ident.name.to_ascii_uppercase())
+            .collect();
+        Name { items: value, key }
+    }
+}
+
+impl PartialEq for Name {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for Name {}
+
+impl PartialOrd for Name {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.key.cmp(&other.key))
+    }
+}
+
+impl Ord for Name {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key.cmp(&other.key)
+    }
+}
+
+impl hash::Hash for Name {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.key.hash(state);
+    }
 }
 
 /// An entire SQL program.
@@ -685,7 +741,7 @@ pub enum SelectListItem {
     Wildcard { star: Punct, except: Option<Except> },
     /// A `table.*` wildcard.
     TableNameWildcard {
-        table_name: TableName,
+        table_name: Name,
         dot: Punct,
         star: Punct,
         except: Option<Except>,
@@ -726,8 +782,7 @@ pub enum Expression {
     BoolValue(Keyword),
     Null(Keyword),
     Interval(IntervalExpression),
-    ColumnName(Ident),
-    TableAndColumnName(TableAndColumnName),
+    ColumnName(Name),
     Cast(Cast),
     Is(IsExpression),
     In(InExpression),
@@ -1124,74 +1179,11 @@ impl Emit for ArrayAggExpression {
 /// A function call.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct FunctionCall {
-    pub name: FunctionName,
+    pub name: Name,
     pub paren1: Punct,
     pub args: NodeVec<Expression>,
     pub paren2: Punct,
     pub over_clause: Option<OverClause>,
-}
-
-/// A function name.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
-pub enum FunctionName {
-    ProjectDatasetFunction {
-        project: Ident,
-        dot1: Punct,
-        dataset: Ident,
-        dot2: Punct,
-        function: Ident,
-    },
-    DatasetFunction {
-        dataset: Ident,
-        dot: Punct,
-        function: Ident,
-    },
-    Function {
-        function: Ident,
-    },
-}
-
-impl FunctionName {
-    /// Get the unescaped function name, in the original BigQuery form.
-    pub fn unescaped_bigquery(&self) -> String {
-        match self {
-            FunctionName::ProjectDatasetFunction {
-                project,
-                dataset,
-                function,
-                ..
-            } => format!("{}.{}.{}", project.name, dataset.name, function.name),
-            FunctionName::DatasetFunction {
-                dataset, function, ..
-            } => {
-                format!("{}.{}", dataset.name, function.name)
-            }
-            FunctionName::Function { function } => function.name.clone(),
-        }
-    }
-}
-
-impl Emit for FunctionName {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match t {
-            Target::SQLite3 => {
-                let name = self.unescaped_bigquery();
-                let (first, last) = match self {
-                    FunctionName::ProjectDatasetFunction {
-                        project, function, ..
-                    } => (project, function),
-                    FunctionName::DatasetFunction {
-                        dataset, function, ..
-                    } => (dataset, function),
-                    FunctionName::Function { function } => (function, function),
-                };
-                emit_whitespace(first.token.leading_whitespace(), t, f)?;
-                write!(f, "{}", AnsiIdent(&name))?;
-                emit_whitespace(last.token.trailing_whitespace(), t, f)
-            }
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// An `OVER` clause for a window function.
@@ -1467,7 +1459,7 @@ pub struct FromClause {
 pub enum FromItem {
     /// A table name, optionally with an alias.
     TableName {
-        table_name: TableName,
+        table_name: Name,
         alias: Option<Alias>,
     },
     /// A subquery, optionally with an alias. These parens belong here in the
@@ -1538,6 +1530,7 @@ pub enum JoinOperation {
 
 impl JoinOperation {
     /// The FROM item on the right-hand side of this join.
+    #[allow(clippy::wrong_self_convention)]
     pub fn from_item(&self) -> &FromItem {
         match self {
             JoinOperation::ConditionJoin { from_item, .. } => from_item,
@@ -1642,7 +1635,7 @@ pub struct DeleteFromStatement {
     // DDL "keywords" are not actually treated as such by BigQuery.
     pub delete_token: PseudoKeyword,
     pub from_token: Keyword,
-    pub table_name: TableName,
+    pub table_name: Name,
     pub alias: Option<Alias>,
     pub where_clause: Option<WhereClause>,
 }
@@ -1652,7 +1645,7 @@ pub struct DeleteFromStatement {
 pub struct InsertIntoStatement {
     pub insert_token: PseudoKeyword,
     pub into_token: Keyword,
-    pub table_name: TableName,
+    pub table_name: Name,
     pub inserted_data: InsertedData,
 }
 
@@ -1683,7 +1676,7 @@ pub struct CreateTableStatement {
     pub or_replace: Option<OrReplace>,
     pub temporary: Option<Temporary>,
     pub table_token: PseudoKeyword,
-    pub table_name: TableName,
+    pub table_name: Name,
     pub definition: CreateTableDefinition,
 }
 
@@ -1693,7 +1686,7 @@ pub struct CreateViewStatement {
     pub create_token: Keyword,
     pub or_replace: Option<OrReplace>,
     pub view_token: PseudoKeyword,
-    pub view_name: TableName,
+    pub view_name: Name,
     pub as_token: Keyword,
     pub query: QueryStatement,
 }
@@ -1740,7 +1733,7 @@ pub struct DropTableStatement {
     pub drop_token: PseudoKeyword,
     pub table_token: PseudoKeyword,
     pub if_exists: Option<IfExists>,
-    pub table_name: TableName,
+    pub table_name: Name,
 }
 
 /// A `DROP VIEW` statement.
@@ -1749,7 +1742,7 @@ pub struct DropViewStatement {
     pub drop_token: PseudoKeyword,
     pub view_token: PseudoKeyword,
     pub if_exists: Option<IfExists>,
-    pub view_name: TableName,
+    pub view_name: Name,
 }
 
 /// An `IF EXISTS` modifier.
@@ -1832,7 +1825,7 @@ peg::parser! {
             = query_expression:query_expression() { QueryStatement { query_expression } }
 
         rule insert_into_statement() -> InsertIntoStatement
-            = insert_token:pk("INSERT") into_token:k("INTO") table_name:table_name() inserted_data:inserted_data() {
+            = insert_token:pk("INSERT") into_token:k("INTO") table_name:name() inserted_data:inserted_data() {
                 InsertIntoStatement {
                     insert_token,
                     into_token,
@@ -1860,7 +1853,7 @@ peg::parser! {
             }
 
         rule delete_from_statement() -> DeleteFromStatement
-            = delete_token:pk("DELETE") from_token:k("FROM") table_name:table_name() alias:alias()? where_clause:where_clause()? {
+            = delete_token:pk("DELETE") from_token:k("FROM") table_name:name() alias:alias()? where_clause:where_clause()? {
                 DeleteFromStatement {
                     delete_token,
                     from_token,
@@ -1961,7 +1954,7 @@ peg::parser! {
             = star:p("*") except:except()? {
                 SelectListItem::Wildcard { star, except }
             }
-            / table_name:table_name() dot:p(".") star:p("*") except:except()? {
+            / table_name:name() dot:p(".") star:p("*") except:except()? {
                 SelectListItem::TableNameWildcard { table_name, dot, star, except }
             }
             / s:position!() expression:expression() alias:alias()? e:position!() {
@@ -2080,10 +2073,7 @@ peg::parser! {
             // Things from here down might start with arbitrary identifiers, so
             // we need to be careful about the order.
             function_call:function_call() { Expression::FunctionCall(function_call) }
-            table_and_column_name:table_and_column_name() {
-                Expression::TableAndColumnName(table_and_column_name)
-            }
-            column_name:ident() { Expression::ColumnName(column_name) }
+            column_name:name() { Expression::ColumnName(column_name) }
         }
 
         rule interval_expression() -> IntervalExpression
@@ -2285,7 +2275,7 @@ peg::parser! {
             / expression:expression() { ExpressionOrDatePart::Expression(expression) }
 
         pub rule function_call() -> FunctionCall
-            = name:function_name() paren1:p("(")
+            = name:name() paren1:p("(")
               args:sep_opt_trailing(<expression()>, ",")? paren2:p(")")
               over_clause:over_clause()?
             {
@@ -2297,9 +2287,6 @@ peg::parser! {
                     over_clause,
                 }
             }
-
-        rule function_name() -> FunctionName
-            = dotted:dotted_function_name()
 
         rule over_clause() -> OverClause
             = over_token:k("OVER") paren1:p("(")
@@ -2477,7 +2464,7 @@ peg::parser! {
             }
 
         rule from_item() -> FromItem
-            = table_name:table_name() alias:alias()? {
+            = table_name:name() alias:alias()? {
                 FromItem::TableName { table_name, alias }
             }
             / paren1:p("(") query:query_statement() paren2:p(")") alias:alias()? {
@@ -2585,7 +2572,7 @@ peg::parser! {
             = create_token:k("CREATE")
               or_replace:or_replace()?
               temporary:temporary()?
-              table_token:pk("TABLE") table_name:table_name()
+              table_token:pk("TABLE") table_name:name()
               definition:create_table_definition()
               e:position!()
             {
@@ -2601,7 +2588,7 @@ peg::parser! {
 
         rule create_view_statement() -> CreateViewStatement
             = create_token:k("CREATE") or_replace:or_replace()?
-              view_token:pk("VIEW") view_name:table_name()
+              view_token:pk("VIEW") view_name:name()
               as_token:k("AS") query:query_statement()
             {
                 CreateViewStatement {
@@ -2648,7 +2635,7 @@ peg::parser! {
             }
 
         rule drop_table_statement() -> DropTableStatement
-            = drop_token:pk("DROP") table_token:pk("TABLE") if_exists:if_exists()? table_name:table_name() {
+            = drop_token:pk("DROP") table_token:pk("TABLE") if_exists:if_exists()? table_name:name() {
                 DropTableStatement {
                     drop_token,
                     table_token,
@@ -2658,7 +2645,7 @@ peg::parser! {
             }
 
         rule drop_view_statement() -> DropViewStatement
-            = drop_token:pk("DROP") view_token:pk("VIEW") if_exists:if_exists()? view_name:table_name() {
+            = drop_token:pk("DROP") view_token:pk("VIEW") if_exists:if_exists()? view_name:name() {
                 DropViewStatement {
                     drop_token,
                     view_token,
@@ -2675,104 +2662,11 @@ peg::parser! {
                 }
             }
 
-        /// A table name, such as `t1` or `project-123.dataset1.table2`.
-        rule table_name() -> TableName
-            // We handle this manually because of PEG backtracking limitations.
-            = dotted:dotted_name() {?
-                let len = dotted.items.len();
-                let (mut nodes, mut dots) = dotted.into_node_and_sep_iters();
-                if len == 1 {
-                    Ok(TableName::Table { table: nodes.next().unwrap() })
-                } else if len == 3 {
-                    Ok(TableName::DatasetTable {
-                        dataset: nodes.next().unwrap(),
-                        dot: dots.next().unwrap(),
-                        table: nodes.next().unwrap(),
-                    })
-                } else if len == 5 {
-                    Ok(TableName::ProjectDatasetTable {
-                        project: nodes.next().unwrap(),
-                        dot1: dots.next().unwrap(),
-                        dataset: nodes.next().unwrap(),
-                        dot2: dots.next().unwrap(),
-                        table: nodes.next().unwrap(),
-                    })
-                } else {
-                    Err("table name")
-                }
-            }
 
-        /// A table name and a column name.
-        rule table_and_column_name() -> TableAndColumnName
-            // We handle this manually because of PEG backtracking limitations.
-            = dotted:dotted_name() {?
-                let len = dotted.items.len();
-                let (mut nodes, mut dots) = dotted.into_node_and_sep_iters();
-                if len == 3 {
-                    Ok(TableAndColumnName {
-                        table_name: TableName::Table { table: nodes.next().unwrap() },
-                        dot: dots.next().unwrap(),
-                        column_name: nodes.next().unwrap(),
-                    })
-                } else if len == 5 {
-                    Ok(TableAndColumnName {
-                        table_name: TableName::DatasetTable {
-                            dataset: nodes.next().unwrap(),
-                            dot: dots.next().unwrap(),
-                            table: nodes.next().unwrap(),
-                        },
-                        dot: dots.next().unwrap(),
-                        column_name: nodes.next().unwrap(),
-                    })
-                } else if len == 7 {
-                    Ok(TableAndColumnName {
-                        table_name: TableName::ProjectDatasetTable {
-                            project: nodes.next().unwrap(),
-                            dot1: dots.next().unwrap(),
-                            dataset: nodes.next().unwrap(),
-                            dot2: dots.next().unwrap(),
-                            table: nodes.next().unwrap(),
-                        },
-                        dot: dots.next().unwrap(),
-                        column_name: nodes.next().unwrap(),
-                    })
-                } else {
-                    Err("table and column name")
-                }
-            }
-
-        rule dotted_function_name() -> FunctionName
-            // We handle this manually because of PEG backtracking limitations.
-            = dotted:dotted_name() {?
-                let len = dotted.items.len();
-                let (mut nodes, mut dots) = dotted.into_node_and_sep_iters();
-                if len == 1 {
-                    Ok(FunctionName::Function {
-                        function: nodes.next().unwrap()
-                    })
-                } else if len == 3 {
-                    Ok(FunctionName::DatasetFunction {
-                        dataset: nodes.next().unwrap(),
-                        dot: dots.next().unwrap(),
-                        function: nodes.next().unwrap(),
-                    })
-                } else if len == 5 {
-                    Ok(FunctionName::ProjectDatasetFunction {
-                        project: nodes.next().unwrap(),
-                        dot1: dots.next().unwrap(),
-                        dataset: nodes.next().unwrap(),
-                        dot2: dots.next().unwrap(),
-                        function: nodes.next().unwrap(),
-                    })
-                } else {
-                    Err("function name")
-                }
-            }
-
-        /// A table or column name with internal dots. This requires special
-        /// handling with a PEG parser, because PEG parsers are greedy
-        /// and backtracking to try alternatives can sometimes be strange.
-        rule dotted_name() -> NodeVec<Ident> = sep(<ident()>, ".")
+        /// A table or column name with internal dots.
+        rule name() -> Name = items:sep(<ident()>, ".") {
+            items.into()
+        }
 
         /// Punctuation separated list. Does not allow a trailing separator.
         rule sep<T: Node>(node: rule<T>, separator: &'static str) -> NodeVec<T>

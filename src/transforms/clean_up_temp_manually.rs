@@ -5,7 +5,7 @@ use super::{Transform, TransformExtra};
 /// Transform `OR REPLACE` to the equivalent `DROP IF EXISTS`.
 pub struct CleanUpTempManually {
     /// Format a table or view name.
-    pub format_name: &'static dyn Fn(&ast::TableName) -> String,
+    pub format_name: &'static dyn Fn(&ast::Name) -> String,
 }
 
 impl Transform for CleanUpTempManually {

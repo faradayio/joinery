@@ -1,93 +1,14 @@
 //! Namespace for SQL.
 
-use std::{collections::BTreeMap, fmt, hash, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    drivers::bigquery::BigQueryName,
+    ast::Name,
     errors::{format_err, Error, Result},
     known_files::KnownFiles,
-    tokenizer::{Ident, Span, Spanned, ToTokens, Token},
+    tokenizer::Spanned,
     types::{parse_function_decls, Type},
-    util::is_c_ident,
 };
-
-/// A case-insensitive identifier.
-#[derive(Clone, Eq)]
-pub struct CaseInsensitiveIdent {
-    ident: Ident,
-    cmp_key: String,
-}
-
-impl CaseInsensitiveIdent {
-    /// Create a new case-insensitive identifier.
-    pub fn new(name: &str, span: Span) -> Self {
-        Ident::new(name, span).into()
-    }
-}
-
-impl From<Ident> for CaseInsensitiveIdent {
-    fn from(ident: Ident) -> Self {
-        Self {
-            // We actually want ASCII lowercase, not Unicode lowercase, because
-            // BigQuery appears to consider `é` and `É` to be different
-            // characters. I checked using the UI.
-            cmp_key: ident.name.to_ascii_lowercase(),
-            ident,
-        }
-    }
-}
-
-impl PartialEq for CaseInsensitiveIdent {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp_key == other.cmp_key
-    }
-}
-
-impl Ord for CaseInsensitiveIdent {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.cmp_key.cmp(&other.cmp_key)
-    }
-}
-
-impl PartialOrd for CaseInsensitiveIdent {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl hash::Hash for CaseInsensitiveIdent {
-    fn hash<H: hash::Hasher>(&self, state: &mut H) {
-        self.cmp_key.hash(state);
-    }
-}
-
-impl fmt::Debug for CaseInsensitiveIdent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.ident)
-    }
-}
-
-impl fmt::Display for CaseInsensitiveIdent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if is_c_ident(&self.ident.name) {
-            write!(f, "{}", self.ident.name)
-        } else {
-            write!(f, "{}", BigQueryName(&self.ident.name))
-        }
-    }
-}
-
-impl ToTokens for CaseInsensitiveIdent {
-    fn to_tokens(&self, tokens: &mut Vec<Token>) {
-        self.ident.to_tokens(tokens)
-    }
-}
-
-impl Spanned for CaseInsensitiveIdent {
-    fn span(&self) -> Span {
-        self.ident.span()
-    }
-}
 
 /// A value we can store in a scope. Details may change.
 pub type ScopeValue = Type;
@@ -112,7 +33,7 @@ pub struct Scope {
     parent: Option<ScopeHandle>,
 
     /// The names in this scope.
-    names: BTreeMap<CaseInsensitiveIdent, ScopeEntry>,
+    names: BTreeMap<Name, ScopeEntry>,
 }
 
 impl Scope {
@@ -137,7 +58,7 @@ impl Scope {
         };
         for (name, ty) in built_ins {
             scope
-                .add(CaseInsensitiveIdent::from(name), Type::Function(ty))
+                .add(Name::from(name), Type::Function(ty))
                 .expect("duplicate built-in function");
         }
 
@@ -160,11 +81,11 @@ impl Scope {
     }
 
     /// Add a new value to the scope.
-    pub fn add(&mut self, name: CaseInsensitiveIdent, value: ScopeValue) -> Result<()> {
+    pub fn add(&mut self, name: Name, value: ScopeValue) -> Result<()> {
         if self.names.contains_key(&name) {
             // We don't try to do anything fancy like replacing a hidden name
             // with a defined name, because we probably don't need that.
-            return Err(format_err!("duplicate name: {}", name));
+            return Err(format_err!("duplicate name: {}", name.unescaped_bigquery()));
         }
         self.names.insert(name, ScopeEntry::Defined(value));
         Ok(())
@@ -174,13 +95,13 @@ impl Scope {
     /// `DROP TABLE`, etc.
     ///
     /// You cannot do this once you have called [`Self::into_handle()`].
-    pub fn hide(&mut self, name: &CaseInsensitiveIdent) -> Result<()> {
+    pub fn hide(&mut self, name: &Name) -> Result<()> {
         if self.names.contains_key(name) {
             // We do not allow hiding a name that was defined in this scope.
             // Make a new scope for that.
             return Err(format_err!(
                 "cannot hide name {} because it was defined in this scope",
-                name
+                name.unescaped_bigquery()
             ));
         }
         self.names.insert(name.clone(), ScopeEntry::Hidden);
@@ -188,7 +109,7 @@ impl Scope {
     }
 
     /// Get a value from the scope.
-    pub fn get<'scope>(&'scope self, name: &CaseInsensitiveIdent) -> Option<&'scope ScopeValue> {
+    pub fn get<'scope>(&'scope self, name: &Name) -> Option<&'scope ScopeValue> {
         match self.names.get(name) {
             Some(ScopeEntry::Defined(value)) => Some(value),
             Some(ScopeEntry::Hidden) => None,
@@ -203,11 +124,11 @@ impl Scope {
     }
 
     /// Get a value, or return an error if it is not defined.
-    pub fn get_or_err(&self, name: &CaseInsensitiveIdent) -> Result<&ScopeValue> {
+    pub fn get_or_err(&self, name: &Name) -> Result<&ScopeValue> {
         self.get(name).ok_or_else(|| {
             Error::annotated(
-                format!("unknown name: {}", name),
-                name.ident.span(),
+                format!("unknown name: {}", name.unescaped_bigquery()),
+                name.span(),
                 "not defined",
             )
         })

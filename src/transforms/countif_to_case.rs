@@ -2,8 +2,9 @@ use derive_visitor::{DriveMut, VisitorMut};
 use joinery_macros::sql_quote;
 
 use crate::{
-    ast::{self, Expression, FunctionCall, FunctionName},
+    ast::{self, Expression, FunctionCall, Name},
     errors::Result,
+    tokenizer::Span,
 };
 
 use super::{Transform, TransformExtra};
@@ -16,13 +17,13 @@ pub struct CountifToCase;
 impl CountifToCase {
     fn enter_expression(&mut self, expr: &mut Expression) {
         if let Expression::FunctionCall(FunctionCall {
-            name: FunctionName::Function { function },
+            name,
             args,
             over_clause: None,
             ..
         }) = expr
         {
-            if function.name.eq_ignore_ascii_case("COUNTIF") && args.node_iter().count() == 1 {
+            if name == &Name::new("COUNTIF", Span::Unknown) && args.node_iter().count() == 1 {
                 let condition = args.node_iter().next().expect("has 1 arg");
                 let replacement = sql_quote! {
                     COUNT(CASE WHEN #condition THEN 1 END)

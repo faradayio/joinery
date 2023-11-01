@@ -436,7 +436,7 @@ pub struct PseudoKeyword {
 }
 
 impl PseudoKeyword {
-    /// Create a new `CaseInsensitiveIdent` with no source location.
+    /// Create a new `PseudoKeyword` with no source location.
     pub fn new(name: &str, span: Span) -> Self {
         Self {
             ident: Ident::new(name, span),
