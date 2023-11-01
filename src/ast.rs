@@ -1536,6 +1536,42 @@ pub enum JoinOperation {
     },
 }
 
+impl JoinOperation {
+    /// The FROM item on the right-hand side of this join.
+    pub fn from_item(&self) -> &FromItem {
+        match self {
+            JoinOperation::ConditionJoin { from_item, .. } => from_item,
+            JoinOperation::CrossJoin { from_item, .. } => from_item,
+        }
+    }
+
+    /// Will all columns on the left side of this join become nullable?
+    pub fn left_nullable(&self) -> bool {
+        match self {
+            JoinOperation::ConditionJoin { join_type, .. } => match join_type {
+                JoinType::Inner { .. } => false,
+                JoinType::Left { .. } => true,
+                JoinType::Right { .. } => false,
+                JoinType::Full { .. } => true,
+            },
+            JoinOperation::CrossJoin { .. } => false,
+        }
+    }
+
+    /// Will all columns on the right side of this join become nullable?
+    pub fn right_nullable(&self) -> bool {
+        match self {
+            JoinOperation::ConditionJoin { join_type, .. } => match join_type {
+                JoinType::Inner { .. } => false,
+                JoinType::Left { .. } => false,
+                JoinType::Right { .. } => true,
+                JoinType::Full { .. } => true,
+            },
+            JoinOperation::CrossJoin { .. } => false,
+        }
+    }
+}
+
 /// The type of a join.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub enum JoinType {
