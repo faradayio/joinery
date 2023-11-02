@@ -34,7 +34,7 @@ use crate::{
         sqlite3::KEYWORDS as SQLITE3_KEYWORDS,
         trino::{TrinoString, KEYWORDS as TRINO_KEYWORDS},
     },
-    errors::{Error, Result},
+    errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
     tokenizer::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
@@ -479,6 +479,14 @@ impl Name {
         node_vec.into()
     }
 
+    /// Combine this name with another name, using a dot as a separator.
+    pub fn combine(&self, other: &Name) -> Name {
+        let mut node_vec = self.items.clone();
+        node_vec.push_node_or_sep(NodeOrSep::Sep(Punct::new(".", other.span())));
+        node_vec.items.extend(other.items.iter().cloned());
+        node_vec.into()
+    }
+
     /// Split this name into a table name and a column name.
     pub fn split_table_and_column(&self) -> (Option<Name>, Ident) {
         // No table part.
@@ -533,6 +541,23 @@ impl From<Ident> for Name {
         let mut node_vec = NodeVec::new(".");
         node_vec.push(ident);
         node_vec.into()
+    }
+}
+
+impl TryFrom<Name> for Ident {
+    type Error = Error;
+
+    fn try_from(value: Name) -> std::result::Result<Self, Self::Error> {
+        if value.items.items.len() != 1 {
+            return Err(format_err!(
+                "Expected name to contain exactly one ident: {:?}",
+                value
+            ));
+        }
+        match &value.items.items[0] {
+            NodeOrSep::Node(ident) => Ok(ident.clone()),
+            _ => panic!("Names should always begin with an ident"),
+        }
     }
 }
 
@@ -1665,13 +1690,13 @@ pub enum InsertedData {
     /// A `VALUES` clause.
     Values {
         values_token: PseudoKeyword,
-        rows: NodeVec<Row>,
+        rows: NodeVec<ValuesRow>,
     },
 }
 
 /// A row in a `VALUES` clause.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
-pub struct Row {
+pub struct ValuesRow {
     pub paren1: Punct,
     pub expressions: NodeVec<Expression>,
     pub paren2: Punct,
@@ -1851,9 +1876,9 @@ peg::parser! {
                 }
             }
 
-        rule row() -> Row
+        rule row() -> ValuesRow
             = paren1:p("(") expressions:sep_opt_trailing(<expression()>, ",") paren2:p(")") {
-                Row {
+                ValuesRow {
                     paren1,
                     expressions,
                     paren2,

@@ -12,12 +12,12 @@
 //! does not support `ARRAY<ARRAY<T>>`, only `ARRAY<STRUCT<ARRAY<T>>>`, and that
 //! `STRUCT` fields have optional names.
 
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use peg::{error::ParseError, str::LineCol};
 
 use crate::{
-    ast,
+    ast::{self, Name},
     drivers::bigquery::BigQueryName,
     errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
@@ -790,9 +790,34 @@ impl TableType {
         Some(TableType { columns })
     }
 
-    /// Expect this table to be creatable, i.e., that it contains no aggregate
-    /// columns or uninhabited types.
+    /// Expect this table to be creatable.
+    ///
+    /// It must:
+    ///
+    /// - Contain at least one column.
+    /// - Contain no duplicate column names.
+    /// - Contain no aggregate columns.
+    /// - Contain no uninhabited types.
     pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
+        if self.columns.is_empty() {
+            return Err(Error::annotated(
+                "Cannot create a table with no columns",
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        let mut names = HashSet::new();
+        for column in &self.columns {
+            if let Some(name) = &column.name {
+                if !names.insert(Name::from(name.clone())) {
+                    return Err(Error::annotated(
+                        format!("Duplicate column name: {}", name.name),
+                        name.span(),
+                        "duplicate column name",
+                    ));
+                }
+            }
+        }
         for column in &self.columns {
             column.expect_creatable(spanned)?;
         }

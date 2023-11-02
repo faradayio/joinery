@@ -50,27 +50,11 @@ impl Error {
         span: Span,
         annotation: impl Into<String>,
     ) -> Self {
-        Self::annotated_helper(summary.into(), span, annotation.into())
-    }
-
-    /// Helper function for [`annotated`]. The [`annotated`] function has type
-    /// parameters, and it will be compiled once for each combination of types.
-    /// But that's fine, because it's just a wrapper. This function does the
-    /// real work, and we only need to compile it once.
-    fn annotated_helper(summary: String, span: Span, annotation: String) -> Self {
-        if let Some((file_id, range)) = span.for_diagnostic() {
-            let alternate_summary = format!("{}: {}", summary, annotation);
-            let diagnostic = Diagnostic::error().with_message(summary).with_labels(vec![
-                codespan_reporting::diagnostic::Label::primary(file_id, range)
-                    .with_message(annotation),
-            ]);
-            Error::Source(Box::new(SourceError {
-                alternate_summary,
-                diagnostic,
-            }))
-        } else {
-            Error::Other(format!("{} (at unknown location): {}", summary, annotation).into())
-        }
+        Error::Source(Box::new(SourceError::simple(
+            summary.into(),
+            span,
+            annotation.into(),
+        )))
     }
 
     /// Create a new `Error::TablesNotEqual`.
@@ -202,13 +186,44 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct SourceError {
     pub alternate_summary: String,
     pub diagnostic: Diagnostic<FileId>,
 }
 
 impl SourceError {
+    /// Construct a simple [`SourceError`] with a single label.
+    pub fn simple(summary: impl Into<String>, span: Span, annotation: impl Into<String>) -> Self {
+        Self::simple_helper(summary.into(), span, annotation.into())
+    }
+
+    /// Helper function for [`simple`]. The [`simple`] function has type
+    /// parameters, and it will be compiled once for each combination of types.
+    /// But that's fine, because it's just a wrapper. This function does the
+    /// real work, and we only need to compile it once.
+    fn simple_helper(summary: String, span: Span, annotation: String) -> Self {
+        if let Some((file_id, range)) = span.for_diagnostic() {
+            let alternate_summary = format!("{}: {}", summary, annotation);
+            let diagnostic = Diagnostic::error().with_message(summary).with_labels(vec![
+                codespan_reporting::diagnostic::Label::primary(file_id, range)
+                    .with_message(annotation),
+            ]);
+            SourceError {
+                alternate_summary,
+                diagnostic,
+            }
+        } else {
+            let alternate_summary = format!("{} (at unknown location): {}", summary, annotation);
+            let diagnostic = Diagnostic::error().with_message(alternate_summary.clone());
+            SourceError {
+                alternate_summary,
+                diagnostic,
+            }
+        }
+    }
+
+    /// Display this error to stderr, with colors and source code snippets.
     pub fn emit(&self, files: &KnownFiles) {
         let writer = StandardStream::stderr(ColorChoice::Auto);
         let config = term::Config::default();

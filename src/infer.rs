@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::{
     ast::{self, Name},
     errors::{Error, Result},
-    scope::{Scope, ScopeGet, ScopeHandle},
+    scope::{ColumnSet, ColumnSetScope, Scope, ScopeGet, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
     types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
     unification::{UnificationTable, Unify},
@@ -33,18 +33,22 @@ use crate::{
 
 /// Types which support inference.
 pub trait InferTypes {
-    /// The type of AST node itself, if it has one.
-    type Type;
+    type Scope: ScopeGet;
+
+    /// The result of type inference. For expressions, this will be a type.
+    /// For top-level statements, this will be a new scope.
+    type Output;
 
     /// Infer types for this value. Returns the scope after inference in case
     /// the caller needs to use it for a later sibling node.
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)>;
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output>;
 }
 
 impl InferTypes for ast::SqlProgram {
-    type Type = Option<TableType>;
+    type Scope = ScopeHandle;
+    type Output = (Option<TableType>, ScopeHandle);
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         let mut ty = None;
         let mut scope = scope.clone();
 
@@ -70,37 +74,30 @@ impl InferTypes for ast::SqlProgram {
 }
 
 impl InferTypes for ast::Statement {
-    type Type = Option<TableType>;
+    type Scope = ScopeHandle;
+    type Output = (Option<TableType>, ScopeHandle);
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         match self {
-            ast::Statement::Query(stmt) => {
-                let (ty, scope) = stmt.infer_types(scope)?;
-                Ok((Some(ty), scope))
-            }
+            ast::Statement::Query(stmt) => Ok((Some(stmt.infer_types(scope)?), scope.clone())),
             ast::Statement::DeleteFrom(_) => Err(nyi(self, "DELETE FROM")),
             ast::Statement::InsertInto(stmt) => {
-                let ((), scope) = stmt.infer_types(scope)?;
-                Ok((None, scope))
+                stmt.infer_types(scope)?;
+                Ok((None, scope.clone()))
             }
-            ast::Statement::CreateTable(stmt) => {
-                let ((), scope) = stmt.infer_types(scope)?;
-                Ok((None, scope))
-            }
+            ast::Statement::CreateTable(stmt) => Ok((None, stmt.infer_types(scope)?)),
             ast::Statement::CreateView(_) => Err(nyi(self, "CREATE VIEW")),
-            ast::Statement::DropTable(stmt) => {
-                let ((), scope) = stmt.infer_types(scope)?;
-                Ok((None, scope))
-            }
+            ast::Statement::DropTable(stmt) => Ok((None, stmt.infer_types(scope)?)),
             ast::Statement::DropView(_) => Err(nyi(self, "DROP VIEW")),
         }
     }
 }
 
 impl InferTypes for ast::CreateTableStatement {
-    type Type = ();
+    type Scope = ScopeHandle;
+    type Output = ScopeHandle;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         match self {
             ast::CreateTableStatement {
                 table_name,
@@ -127,7 +124,7 @@ impl InferTypes for ast::CreateTableStatement {
                 .name_anonymous_columns(table_name.span());
                 table_type.expect_creatable(table_name)?;
                 scope.add(table_name.clone(), Type::Table(table_type))?;
-                Ok(((), scope.into_handle()))
+                Ok(scope.into_handle())
             }
             ast::CreateTableStatement {
                 table_name,
@@ -137,58 +134,64 @@ impl InferTypes for ast::CreateTableStatement {
                     },
                 ..
             } => {
-                let (ty, _scope) = query_statement.infer_types(scope)?;
+                let ty = query_statement.infer_types(scope)?;
                 let ty = ty.name_anonymous_columns(table_name.span());
                 ty.expect_creatable(table_name)?;
                 let mut scope = Scope::new(scope);
                 scope.add(table_name.clone(), Type::Table(ty))?;
-                Ok(((), scope.into_handle()))
+                Ok(scope.into_handle())
             }
         }
     }
 }
 
 impl InferTypes for ast::DropTableStatement {
-    type Type = ();
+    type Scope = ScopeHandle;
+    type Output = ScopeHandle;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         let mut scope = Scope::new(scope);
         scope.hide(&self.table_name)?;
-        Ok(((), scope.into_handle()))
+        Ok(scope.into_handle())
     }
 }
 
 impl InferTypes for ast::InsertIntoStatement {
-    type Type = ();
+    type Scope = ScopeHandle;
+    type Output = ();
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         let table_type = scope.get_table_type(&self.table_name)?;
 
         match &mut self.inserted_data {
             ast::InsertedData::Values { rows, .. } => {
                 for row in rows.node_iter_mut() {
-                    let (ty, _scope) = row.infer_types(scope)?;
+                    let ty = row.infer_types(scope)?;
                     ty.expect_subtype_ignoring_nullability_of(&table_type, row)?;
                 }
-                Ok(((), scope.clone()))
+                Ok(())
             }
             ast::InsertedData::Select { query, .. } => {
-                let (ty, _scope) = query.infer_types(scope)?;
+                let ty = query.infer_types(scope)?;
                 ty.expect_subtype_ignoring_nullability_of(&table_type, query)?;
-                Ok(((), scope.clone()))
+                Ok(())
             }
         }
     }
 }
 
-impl InferTypes for ast::Row {
-    type Type = TableType;
+impl InferTypes for ast::ValuesRow {
+    type Scope = ScopeHandle;
+    type Output = TableType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let ast::Row { expressions, .. } = self;
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         let mut cols = vec![];
-        for expr in expressions.node_iter_mut() {
-            let (ty, _scope) = expr.infer_types(scope)?;
+        for expr in self.expressions.node_iter_mut() {
+            // We have an expression outside of a SELECT, so we need a
+            // ColumnSetScope but without any columns. So aggregates and window
+            // functions can't be used here.
+            let scope = ColumnSetScope::new_empty(scope);
+            let ty = expr.infer_types(&scope)?;
             let ty = ty.expect_value_type(expr)?.to_owned();
             cols.push(ColumnType {
                 name: None,
@@ -196,23 +199,24 @@ impl InferTypes for ast::Row {
                 not_null: false,
             });
         }
-        Ok((TableType { columns: cols }, scope.clone()))
+        Ok(TableType { columns: cols })
     }
 }
 
 impl InferTypes for ast::QueryStatement {
-    type Type = TableType;
+    type Scope = ScopeHandle;
+    type Output = TableType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let ast::QueryStatement { query_expression } = self;
-        query_expression.infer_types(scope)
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
+        self.query_expression.infer_types(scope)
     }
 }
 
 impl InferTypes for ast::QueryExpression {
-    type Type = TableType;
+    type Scope = ScopeHandle;
+    type Output = TableType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         match self {
             ast::QueryExpression::SelectExpression(expr) => expr.infer_types(scope),
             ast::QueryExpression::Nested { query, .. } => query.infer_types(scope),
@@ -220,8 +224,7 @@ impl InferTypes for ast::QueryExpression {
                 // Non-recursive CTEs, so each will create a new namespace.
                 let mut scope = scope.to_owned();
                 for cte in ctes.node_iter_mut() {
-                    let ((), new_scope) = cte.infer_types(&scope)?;
-                    scope = new_scope;
+                    scope = cte.infer_types(&scope)?;
                 }
                 query.infer_types(&scope)
             }
@@ -230,8 +233,8 @@ impl InferTypes for ast::QueryExpression {
                 set_operator,
                 right,
             } => {
-                let left_ty = left.infer_types(scope)?.0;
-                let right_ty = right.infer_types(scope)?.0;
+                let left_ty = left.infer_types(scope)?;
+                let right_ty = right.infer_types(scope)?;
                 let result_ty = left_ty.common_supertype(&right_ty).ok_or_else(|| {
                     Error::annotated(
                         format!("cannot combine {} and {}", left_ty, right_ty),
@@ -239,28 +242,29 @@ impl InferTypes for ast::QueryExpression {
                         "incompatible types",
                     )
                 })?;
-                Ok((result_ty, scope.clone()))
+                Ok(result_ty)
             }
         }
     }
 }
 
 impl InferTypes for ast::CommonTableExpression {
-    type Type = ();
+    type Scope = ScopeHandle;
+    type Output = ScopeHandle;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let ast::CommonTableExpression { name, query, .. } = self;
-        let (ty, scope) = query.infer_types(scope)?;
-        let mut scope = Scope::new(&scope);
-        scope.add(name.to_owned().into(), Type::Table(ty))?;
-        Ok(((), scope.into_handle()))
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
+        let table_ty = self.query.infer_types(scope)?;
+        let mut scope = Scope::new(scope);
+        scope.add(self.name.to_owned().into(), Type::Table(table_ty))?;
+        Ok(scope.into_handle())
     }
 }
 
 impl InferTypes for ast::SelectExpression {
-    type Type = TableType;
+    type Scope = ScopeHandle;
+    type Output = TableType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         // In order of type inference:
         //
         // - FROM clause (including JOIN). Introduces both tables and columns.
@@ -292,13 +296,11 @@ impl InferTypes for ast::SelectExpression {
         } = self;
 
         // See if we have a FROM clause.
-        let mut from_type = None;
-        let mut scope = scope.to_owned();
-        if let Some(from_clause) = from_clause {
-            let (new_from_type, new_scope) = from_clause.infer_types(&scope)?;
-            from_type = Some(new_from_type);
-            scope = new_scope;
-        }
+        let column_set_scope = if let Some(from_clause) = from_clause {
+            from_clause.infer_types(scope)
+        } else {
+            Ok(ColumnSetScope::new_empty(scope))
+        }?;
 
         // Helper function to add columns from a table type to a list of columns.
         let add_table_cols =
@@ -325,7 +327,7 @@ impl InferTypes for ast::SelectExpression {
                 ast::SelectListItem::Expression { expression, alias } => {
                     // BigQuery does not allow select list items to see names
                     // bound by other select list items.
-                    let (ty, _scope) = expression.infer_types(&scope)?;
+                    let ty = expression.infer_types(&column_set_scope)?;
                     // Make sure any aggregates have been turned into values.
                     let ty = ty.expect_value_type(expression)?.to_owned();
                     let name = alias
@@ -338,51 +340,47 @@ impl InferTypes for ast::SelectExpression {
                     });
                 }
                 ast::SelectListItem::Wildcard { star, except } => {
-                    if let Some(from_type) = &from_type {
-                        add_table_cols(&mut cols, from_type, except);
-                    } else {
-                        return Err(Error::annotated(
-                            "cannot use * in SELECT without a FROM clause",
-                            star.span(),
-                            "no FROM clause",
-                        ));
-                    }
+                    let table_type = column_set_scope.column_set().star(star)?;
+                    add_table_cols(&mut cols, &table_type, except);
                 }
                 ast::SelectListItem::TableNameWildcard {
-                    table_name, except, ..
+                    table_name,
+                    star,
+                    except,
+                    ..
                 } => {
-                    let table_type = scope.get_table_type(table_name)?;
+                    let table_type = column_set_scope.column_set().star_for(table_name, star)?;
                     add_table_cols(&mut cols, &table_type, except);
                 }
             }
         }
-        let table_type = TableType { columns: cols };
-        Ok((table_type, scope.clone()))
+        Ok(TableType { columns: cols })
     }
 }
 
 impl InferTypes for ast::FromClause {
-    type Type = TableType;
+    type Scope = ScopeHandle;
+    type Output = ColumnSetScope;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let ast::FromClause {
             from_item,
             join_operations,
             ..
         } = self;
-        let (table_type, scope) = from_item.infer_types(scope)?;
+        let scope = from_item.infer_types(scope)?;
         if !join_operations.is_empty() {
             return Err(nyi(self, "join operations"));
         }
-        Ok((table_type, scope))
+        Ok(scope)
     }
 }
 
 impl InferTypes for ast::FromItem {
-    /// We return a table type for use by `SELECT *`.
-    type Type = TableType;
+    type Scope = ScopeHandle;
+    type Output = ColumnSetScope;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
             ast::FromItem::TableName { table_name, alias } => {
                 let table_type = scope.get_table_type(table_name)?;
@@ -391,17 +389,8 @@ impl InferTypes for ast::FromItem {
                     None => table_name.clone(),
                 };
 
-                let mut scope = Scope::new(scope);
-                scope.add(name, Type::Table(table_type.clone()))?;
-                for column in &table_type.columns {
-                    if let Some(column_name) = &column.name {
-                        scope.add(
-                            column_name.clone().into(),
-                            Type::Argument(column.ty.clone()),
-                        )?;
-                    }
-                }
-                Ok((table_type, scope.into_handle()))
+                let column_set = ColumnSet::from_table(Some(name), table_type);
+                Ok(ColumnSetScope::new(scope, column_set))
             }
             ast::FromItem::Subquery { .. } => Err(nyi(self, "from subquery")),
             ast::FromItem::Unnest { .. } => Err(nyi(self, "from unnest")),
@@ -410,13 +399,14 @@ impl InferTypes for ast::FromItem {
 }
 
 impl InferTypes for ast::Expression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
-            ast::Expression::BoolValue(_) => Ok((ArgumentType::bool(), scope.clone())),
-            ast::Expression::Null { .. } => Ok((ArgumentType::null(), scope.clone())),
+            ast::Expression::BoolValue(_) => Ok(ArgumentType::bool()),
+            ast::Expression::Null { .. } => Ok(ArgumentType::null()),
             ast::Expression::ColumnName(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
             ast::Expression::Is(is) => is.infer_types(scope),
@@ -436,51 +426,50 @@ impl InferTypes for ast::Expression {
 }
 
 impl InferTypes for LiteralValue {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, _scope: &Self::Scope) -> Result<Self::Output> {
         let simple_ty = match self {
             LiteralValue::Int64(_) => SimpleType::Int64,
             LiteralValue::Float64(_) => SimpleType::Float64,
             LiteralValue::String(_) => SimpleType::String,
         };
-        Ok((
-            ArgumentType::Value(ValueType::Simple(simple_ty)),
-            scope.clone(),
-        ))
+        Ok(ArgumentType::Value(ValueType::Simple(simple_ty)))
     }
 }
 
 impl InferTypes for Ident {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let ident = self.to_owned().into();
-        let ty = scope.get_argument_type(&ident)?;
-        Ok((ty, scope.clone()))
+        scope.get_argument_type(&ident)
     }
 }
 
 impl InferTypes for ast::Name {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let (table_name, column_name) = self.split_table_and_column();
         if let Some(table_name) = table_name {
             let table_type = scope.get_table_type(&table_name)?;
             let column_type = table_type.column_by_name_or_err(&column_name)?;
-            Ok((column_type.ty.to_owned(), scope.clone()))
+            Ok(column_type.ty.to_owned())
         } else {
-            let ty = scope.get_argument_type(self)?;
-            Ok((ty, scope.clone()))
+            scope.get_argument_type(self)
         }
     }
 }
 
 impl InferTypes for ast::Cast {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let ast::Cast {
             expression,
             data_type,
@@ -489,67 +478,71 @@ impl InferTypes for ast::Cast {
         // TODO: Pass through aggregate status.
         expression.infer_types(scope)?;
         let ty = ValueType::try_from(&*data_type)?;
-        Ok((ArgumentType::Value(ty), scope.clone()))
+        Ok(ArgumentType::Value(ty))
     }
 }
 
 impl InferTypes for ast::IsExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         // We need to do this manually because our second argument isn't an
         // expression.
         let func_name = &Name::new("%IS", self.is_token.span());
         let func_ty = scope.get_function_type(func_name)?;
         let arg_types = [
-            self.left.infer_types(scope)?.0,
-            self.predicate.infer_types(scope)?.0,
+            self.left.infer_types(scope)?,
+            self.predicate.infer_types(scope)?,
         ];
-        let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
-        Ok((ret_ty, scope.clone()))
+        func_ty.return_type_for(&arg_types, func_name)
     }
 }
 
 impl InferTypes for ast::IsExpressionPredicate {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, _scope: &Self::Scope) -> Result<Self::Output> {
         // Return either BOOL or NULL type, depending on the predicate. The
         // types for the %IS primitive will use this to verify that the left
         // argument and predicate are compatible.
         match self {
             ast::IsExpressionPredicate::Null(_) | ast::IsExpressionPredicate::Unknown(_) => {
-                Ok((ArgumentType::null(), scope.clone()))
+                Ok(ArgumentType::null())
             }
             ast::IsExpressionPredicate::True(_) | ast::IsExpressionPredicate::False(_) => {
-                Ok((ArgumentType::bool(), scope.clone()))
+                Ok(ArgumentType::bool())
             }
         }
     }
 }
 
 impl InferTypes for ast::InExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         // We need to do this manually because our second argument isn't an
         // expression.
         let func_name = &Name::new("%IN", self.in_token.span());
         let func_ty = scope.get_function_type(func_name)?;
-        let left_ty = self.left.infer_types(scope)?.0;
-        let value_set_ty = self.value_set.infer_types(scope)?.0;
+        let left_ty = self.left.infer_types(scope)?;
+        let value_set_ty = self.value_set.infer_types(scope)?;
         let elem_ty = value_set_ty.expect_one_column(&self.value_set)?.ty.clone();
-        let ret_ty = func_ty.return_type_for(&[left_ty, elem_ty], func_name)?;
-        Ok((ret_ty, scope.clone()))
+        func_ty.return_type_for(&[left_ty, elem_ty], func_name)
     }
 }
 
 impl InferTypes for ast::InValueSet {
-    type Type = TableType;
+    type Scope = ColumnSetScope;
+    type Output = TableType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
-            ast::InValueSet::QueryExpression { query, .. } => query.infer_types(scope),
+            ast::InValueSet::QueryExpression { query, .. } => {
+                query.infer_types(&scope.clone().try_into_handle_for_subquery()?)
+            }
             ast::InValueSet::ExpressionList {
                 paren1,
                 expressions,
@@ -559,7 +552,7 @@ impl InferTypes for ast::InValueSet {
                 let mut table = UnificationTable::default();
                 let col_ty = table.type_var("T", paren1)?;
                 for e in expressions.node_iter_mut() {
-                    col_ty.unify(&e.infer_types(scope)?.0, &mut table, e)?;
+                    col_ty.unify(&e.infer_types(scope)?, &mut table, e)?;
                 }
                 let table_type = TableType {
                     columns: vec![ColumnType {
@@ -568,22 +561,23 @@ impl InferTypes for ast::InValueSet {
                         not_null: false,
                     }],
                 };
-                Ok((table_type, scope.clone()))
+                Ok(table_type)
             }
             ast::InValueSet::Unnest { expression, .. } => {
-                let array_ty = expression.infer_types(scope)?.0;
+                let array_ty = expression.infer_types(scope)?;
                 let array_ty = array_ty.expect_array_type(expression)?;
                 let table_ty = array_ty.unnest(expression)?;
-                Ok((table_ty, scope.clone()))
+                Ok(table_ty)
             }
         }
     }
 }
 
 impl InferTypes for ast::BetweenExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let func_name = &Name::new("%BETWEEN", self.between_token.span());
         let args = [
             self.left.as_mut(),
@@ -595,9 +589,10 @@ impl InferTypes for ast::BetweenExpression {
 }
 
 impl InferTypes for ast::KeywordBinopExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let func_name = &Name::new(
             &format!("%{}", self.op_keyword.ident.token.as_str()),
             self.op_keyword.span(),
@@ -608,9 +603,10 @@ impl InferTypes for ast::KeywordBinopExpression {
 }
 
 impl InferTypes for ast::NotExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let func_name = &Name::new("%NOT", self.not_token.span());
         let args = [self.expression.as_mut()];
         infer_call(func_name, args, scope)
@@ -618,9 +614,10 @@ impl InferTypes for ast::NotExpression {
 }
 
 impl InferTypes for ast::IfExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let args = [
             self.condition.as_mut(),
             self.then_expression.as_mut(),
@@ -631,52 +628,53 @@ impl InferTypes for ast::IfExpression {
 }
 
 impl InferTypes for ast::CaseExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         // CASE is basically two different constructs, depending on whether
         // there is a CASE expression or not. We handle them separately.
         let mut table = UnificationTable::default();
         if let Some(case_expr) = &mut self.case_expr {
             let match_tv = table.type_var("M", &self.case_token)?;
-            match_tv.unify(&case_expr.infer_types(scope)?.0, &mut table, case_expr)?;
+            match_tv.unify(&case_expr.infer_types(scope)?, &mut table, case_expr)?;
             let result_tv = table.type_var("R", &self.case_token)?;
             for c in &mut self.when_clauses {
-                match_tv.unify(&c.condition.infer_types(scope)?.0, &mut table, &c.condition)?;
-                result_tv.unify(&c.result.infer_types(scope)?.0, &mut table, &c.result)?;
+                match_tv.unify(&c.condition.infer_types(scope)?, &mut table, &c.condition)?;
+                result_tv.unify(&c.result.infer_types(scope)?, &mut table, &c.result)?;
             }
             if let Some(else_clause) = &mut self.else_clause {
                 let else_expr = &mut else_clause.result;
-                result_tv.unify(&else_expr.infer_types(scope)?.0, &mut table, else_expr)?;
+                result_tv.unify(&else_expr.infer_types(scope)?, &mut table, else_expr)?;
             } else {
                 result_tv.unify(&ArgumentType::null(), &mut table, self)?;
             }
-            Ok((match_tv.resolve(&table, self)?, scope.clone()))
+            Ok(match_tv.resolve(&table, self)?)
         } else {
             let bool_ty = ArgumentType::bool();
             let result_tv = table.type_var("R", &self.case_token)?;
             for c in &mut self.when_clauses {
                 c.condition
                     .infer_types(scope)?
-                    .0
                     .expect_subtype_of(&bool_ty, c)?;
-                result_tv.unify(&c.result.infer_types(scope)?.0, &mut table, &c.result)?;
+                result_tv.unify(&c.result.infer_types(scope)?, &mut table, &c.result)?;
             }
             if let Some(else_clause) = &mut self.else_clause {
                 let else_expr = &mut else_clause.result;
-                result_tv.unify(&else_expr.infer_types(scope)?.0, &mut table, else_expr)?;
+                result_tv.unify(&else_expr.infer_types(scope)?, &mut table, else_expr)?;
             } else {
                 result_tv.unify(&ArgumentType::null(), &mut table, self)?;
             }
-            Ok((result_tv.resolve(&table, self)?, scope.clone()))
+            Ok(result_tv.resolve(&table, self)?)
         }
     }
 }
 
 impl InferTypes for ast::BinopExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let prim_name = Name::new(
             &format!("%{}", self.op_token.token.as_str()),
             self.op_token.span(),
@@ -686,10 +684,11 @@ impl InferTypes for ast::BinopExpression {
 }
 
 impl InferTypes for ast::ArrayExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let return_ty = self.definition.infer_types(scope)?.0;
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let return_ty = self.definition.infer_types(scope)?;
         let return_ty = if let Some(element_ty) = &self.element_type {
             let element_ty = ArgumentType::Value(ValueType::try_from(&element_ty.elem_type)?);
             return_ty.expect_subtype_of(&element_ty, self)?;
@@ -698,42 +697,41 @@ impl InferTypes for ast::ArrayExpression {
             return_ty
         };
         let return_ty = return_ty.expect_simple_type(self)?;
-        Ok((
-            ArgumentType::Value(ValueType::Array(return_ty.clone())),
-            scope.clone(),
-        ))
+        Ok(ArgumentType::Value(ValueType::Array(return_ty.clone())))
     }
 }
 
 impl InferTypes for ast::ArrayDefinition {
+    type Scope = ColumnSetScope;
     /// The **element type** of the array.
-    type Type = ArgumentType;
+    type Output = ArgumentType;
 
     /// Infer the **element type** of the array.
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
             ast::ArrayDefinition::Query(query) => {
-                let table_ty = query.infer_types(scope)?.0;
+                let table_ty = query.infer_types(&scope.clone().try_into_handle_for_subquery()?)?;
                 let elem_ty = table_ty.expect_one_column(query)?.ty.clone();
-                Ok((elem_ty, scope.clone()))
+                Ok(elem_ty)
             }
             ast::ArrayDefinition::Elements(exprs) => {
                 // We can use infer_call if we're careful.
                 let span = exprs.items.span();
                 let func_name = &Name::new("%ARRAY", span);
-                let (elem_ty, _) = infer_call(func_name, exprs.node_iter_mut(), scope)?;
+                let elem_ty = infer_call(func_name, exprs.node_iter_mut(), scope)?;
                 let elem_ty = elem_ty.expect_array_type_returning_elem_type(self)?;
                 let elem_ty = ArgumentType::Value(ValueType::Simple(elem_ty.clone()));
-                Ok((elem_ty, scope.clone()))
+                Ok(elem_ty)
             }
         }
     }
 }
 
 impl InferTypes for ast::FunctionCall {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         if self.over_clause.is_some() {
             return Err(nyi(&self.over_clause, "over clause"));
         }
@@ -742,9 +740,10 @@ impl InferTypes for ast::FunctionCall {
 }
 
 impl InferTypes for ast::IndexExpression {
-    type Type = ArgumentType;
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
 
-    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let func_name = &Name::new("%[]", self.bracket1.span());
         let index_expr = match &mut self.index {
             ast::IndexOffset::Simple(expression)
@@ -804,18 +803,18 @@ fn except_set(except: &Option<ast::Except>) -> HashSet<Name> {
 fn infer_call<'args, ArgExprs>(
     func_name: &Name,
     args: ArgExprs,
-    scope: &ScopeHandle,
-) -> Result<(ArgumentType, ScopeHandle)>
+    scope: &ColumnSetScope,
+) -> Result<ArgumentType>
 where
     ArgExprs: IntoIterator<Item = &'args mut ast::Expression>,
 {
     let func_ty = scope.get_function_type(func_name)?;
     let mut arg_types = vec![];
     for arg in args {
-        arg_types.push(arg.infer_types(scope)?.0);
+        arg_types.push(arg.infer_types(scope)?);
     }
     let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
-    Ok((ret_ty, scope.clone()))
+    Ok(ret_ty)
 }
 
 /// Print a pretty error message when we haven't implemented something.

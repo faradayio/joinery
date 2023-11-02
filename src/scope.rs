@@ -21,10 +21,10 @@ use std::{
 
 use crate::{
     ast::Name,
-    errors::{format_err, Error, Result},
+    errors::{format_err, Error, Result, SourceError},
     known_files::KnownFiles,
     tokenizer::Spanned,
-    types::{parse_function_decls, ArgumentType, FunctionType, TableType, Type},
+    types::{parse_function_decls, ArgumentType, ColumnType, FunctionType, TableType, Type},
 };
 
 /// A value we can store in a scope. Details may change.
@@ -70,6 +70,12 @@ pub trait ScopeGet {
 /// A handle to a scope.
 pub type ScopeHandle = Arc<Scope>;
 
+impl ScopeGet for ScopeHandle {
+    fn get(&self, name: &Name) -> Result<Option<ScopeValue>> {
+        (**self).get(name)
+    }
+}
+
 /// We need to both define and hide names in a scope.
 #[derive(Clone, Debug)]
 enum ScopeEntry {
@@ -77,6 +83,8 @@ enum ScopeEntry {
     Defined(ScopeValue),
     /// A name that is hidden in this scope.
     Hidden,
+    /// A name that returns an error when looked up.
+    Error(SourceError),
 }
 
 /// A scope is a namespace for SQL code. We use it to look up names,
@@ -134,7 +142,9 @@ impl Scope {
         Arc::new(self)
     }
 
-    /// Add a new value to the scope.
+    /// Add a new value to the scope. Returns an error if the name is already
+    /// defined in the local scope. If the name is in a parent scope, it will
+    /// be shadowed.
     pub fn add(&mut self, name: Name, value: ScopeValue) -> Result<()> {
         if self.names.contains_key(&name) {
             // We don't try to do anything fancy like replacing a hidden name
@@ -146,7 +156,8 @@ impl Scope {
     }
 
     /// "Drop" a value from the scope by hiding it. This is used to implement
-    /// `DROP TABLE`, etc.
+    /// `DROP TABLE`, etc. You cannot hide a name that was defined in this
+    /// scope.
     ///
     /// You cannot do this once you have called [`Self::into_handle()`].
     pub fn hide(&mut self, name: &Name) -> Result<()> {
@@ -161,6 +172,13 @@ impl Scope {
         self.names.insert(name.clone(), ScopeEntry::Hidden);
         Ok(())
     }
+
+    /// Mark a name as returning an error. This will overwrite an existing
+    /// definition of that name, because this is normally used for ambiguous
+    /// names.
+    pub fn add_error(&mut self, name: Name, err: SourceError) {
+        self.names.insert(name, ScopeEntry::Error(err));
+    }
 }
 
 impl ScopeGet for Scope {
@@ -168,6 +186,7 @@ impl ScopeGet for Scope {
         match self.names.get(name) {
             Some(ScopeEntry::Defined(value)) => Ok(Some(value.clone())),
             Some(ScopeEntry::Hidden) => Ok(None),
+            Some(ScopeEntry::Error(err)) => Err(Error::Source(Box::new(err.clone()))),
             None => {
                 if let Some(parent) = self.parent.as_ref() {
                     parent.get(name)
@@ -262,6 +281,14 @@ impl ColumnSetColumnName {
     /// Create a new column name.
     pub fn new(table: Option<Name>, column: Name) -> Self {
         Self { table, column }
+    }
+
+    /// Convert to a single [`Name`].
+    pub fn to_name(&self) -> Name {
+        match &self.table {
+            Some(table) => Name::combine(table, &self.column),
+            None => self.column.clone(),
+        }
     }
 
     /// Does this column name match `name`? `name` may be either a column name
@@ -447,6 +474,48 @@ impl ColumnSet {
         }
         Ok(Self { columns })
     }
+
+    /// Implement `*` in `SELECT * FROM t` by constructing a table type. Returns
+    /// an error if the resulting table would contain no columns, or duplicate
+    /// column names.
+    pub fn star(&self, spanned: &dyn Spanned) -> Result<TableType> {
+        let mut columns = vec![];
+        for col in &self.columns {
+            columns.push(ColumnType {
+                name: col
+                    .column_name
+                    .as_ref()
+                    .map(|n| n.column.clone().try_into())
+                    .transpose()?,
+                ty: col.ty.clone(),
+                not_null: false,
+            });
+        }
+        let table_type = TableType { columns };
+        table_type.expect_creatable(spanned)?;
+        Ok(table_type)
+    }
+
+    /// Implement `table.*` in `SELECT table.* FROM table` by constructing a
+    /// table type. Returns an error if the resulting table would contain no
+    /// columns, or duplicate column names.
+    pub fn star_for(&self, table: &Name, spanned: &dyn Spanned) -> Result<TableType> {
+        let mut columns = vec![];
+        for col in &self.columns {
+            if let Some(name) = &col.column_name {
+                if name.table.as_ref() == Some(table) {
+                    columns.push(ColumnType {
+                        name: Some(name.column.clone().try_into()?),
+                        ty: col.ty.clone(),
+                        not_null: false,
+                    });
+                }
+            }
+        }
+        let table_type = TableType { columns };
+        table_type.expect_creatable(spanned)?;
+        Ok(table_type)
+    }
 }
 
 impl ScopeGet for ColumnSet {
@@ -473,7 +542,7 @@ impl ScopeGet for ColumnSet {
 
 /// Wraps a [`ColumnSet`] and allows it to have a [`Scope`] as a parent.
 #[derive(Clone, Debug)]
-struct ColumnSetScope {
+pub struct ColumnSetScope {
     parent: ScopeHandle,
     column_set: ColumnSet,
 }
@@ -487,6 +556,19 @@ impl ColumnSetScope {
         }
     }
 
+    /// Create a new column set scope with no columns.
+    pub fn new_empty(parent: &ScopeHandle) -> Self {
+        Self {
+            parent: parent.clone(),
+            column_set: ColumnSet::new(vec![]),
+        }
+    }
+
+    /// Get our [`ColumnSet`].
+    pub fn column_set(&self) -> &ColumnSet {
+        &self.column_set
+    }
+
     /// Try to transform the underlying [`ColumnSet`] using `f`.
     pub fn try_transform<F>(self, f: F) -> Result<Self>
     where
@@ -496,6 +578,69 @@ impl ColumnSetScope {
             parent: self.parent.clone(),
             column_set: f(self.column_set)?,
         })
+    }
+
+    /// Generate a new scope which can be passed to a sub-`SELECT` statement,
+    /// which will require a `ScopeHandle` instead of a `ColumnSetScope`.
+    ///
+    /// This raises a bunch of questions about how BigQuery and standard SQL
+    /// handle things:
+    ///
+    /// 1. Can you reference an aggregate column in a subquery? Let's assume no,
+    ///    because it's a weird thing to do and it might not be easy to
+    ///    transpile.
+    /// 2. Ambiguous column names still need to return errors.
+    /// 3. Both scoped and unscoped names should be allowed.
+    ///
+    /// We could make very different choices about how to implement this, but
+    /// this version has the advantage of walking through the entire
+    /// [`ColumnSet`] and making decisions.
+    pub fn try_into_handle_for_subquery(self) -> Result<ScopeHandle> {
+        let mut scope = Scope::new(&self.parent);
+        for col in self.column_set.columns {
+            // Columns with a table name should be added as both the table name
+            // and the bare table name. Both aggregate columns and ambiguous
+            // columns should be added as errors using `add_error`.
+            if let Some(name) = col.column_name {
+                if let ArgumentType::Aggregating(_) = &col.ty {
+                    // This is an aggregate type, so add an error instead.
+                    scope.add_error(
+                        name.to_name(),
+                        SourceError::simple(
+                            format!(
+                                "cannot use aggregate column {} in subquery",
+                                name.column.unescaped_bigquery()
+                            ),
+                            name.column.span(),
+                            "aggregate columns cannot be used in subqueries",
+                        ),
+                    );
+                    continue;
+                }
+
+                // We have a table name, so add the full `table.column` name.
+                if name.table.is_some() {
+                    scope.add(name.to_name(), Type::Argument(col.ty.clone()))?;
+                }
+
+                // Try to add just the column name. If this fails, then add an
+                // ambiguous column error.
+                if scope
+                    .add(name.column.clone(), Type::Argument(col.ty.clone()))
+                    .is_err()
+                {
+                    scope.add_error(
+                        name.column.clone(), // Just the column, without the table.
+                        SourceError::simple(
+                            format!("ambiguous column: {}", name.column.unescaped_bigquery()),
+                            name.column.span(),
+                            "multiple columns match",
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(scope.into_handle())
     }
 }
 
