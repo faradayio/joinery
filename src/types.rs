@@ -396,6 +396,17 @@ impl<TV: TypeVarSupport> ValueType<TV> {
 }
 
 impl ValueType<ResolvedTypeVarsOnly> {
+    /// Does this type unnest to a single anonymous column?
+    ///
+    /// This should match the behavior of [`Self::unnest`].
+    pub fn unnests_to_anonymous_column(&self) -> bool {
+        match self {
+            ValueType::Array(SimpleType::Struct(_)) => false,
+            ValueType::Array(_) => true,
+            _ => false,
+        }
+    }
+
     /// Unnest an array type into a table type, according to [Google's rules][unnest].
     ///
     /// [unnest]: https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#unnest_operator

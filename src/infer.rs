@@ -387,8 +387,30 @@ impl InferTypes for ast::FromItem {
                 let column_set = ColumnSet::from_table(Some(name), table_type);
                 Ok(ColumnSetScope::new(scope, column_set))
             }
-            ast::FromItem::Subquery { .. } => Err(nyi(self, "from subquery")),
-            ast::FromItem::Unnest { .. } => Err(nyi(self, "from unnest")),
+            ast::FromItem::Subquery { query, alias, .. } => {
+                let table_type = query.infer_types(scope)?;
+                let name = alias.clone().map(|alias| alias.ident.into());
+                let column_set = ColumnSet::from_table(name, table_type);
+                Ok(ColumnSetScope::new(scope, column_set))
+            }
+            ast::FromItem::Unnest {
+                expression, alias, ..
+            } => {
+                let array_ty = expression.infer_types(&ColumnSetScope::new_empty(scope))?;
+                let array_ty = array_ty.expect_array_type(expression)?;
+                let mut table_ty = array_ty.unnest(expression)?;
+                if array_ty.unnests_to_anonymous_column() {
+                    // If we have an alias, use it as our single column's name. Leave the table anonymous.
+                    table_ty.columns[0].name = alias.as_ref().map(|alias| alias.ident.clone());
+                    let column_set = ColumnSet::from_table(None, table_ty);
+                    Ok(ColumnSetScope::new(scope, column_set))
+                } else {
+                    // We have a multi-column output table. Use the alias as the table name.
+                    let name = alias.clone().map(|alias| alias.ident.into());
+                    let column_set = ColumnSet::from_table(name, table_ty);
+                    Ok(ColumnSetScope::new(scope, column_set))
+                }
+            }
         }
     }
 }
