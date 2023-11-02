@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::{
     ast::{self, Name},
     errors::{Error, Result},
-    scope::{Scope, ScopeHandle},
+    scope::{Scope, ScopeGet, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
     types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
     unification::{UnificationTable, Unify},
@@ -162,21 +162,19 @@ impl InferTypes for ast::InsertIntoStatement {
     type Type = ();
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
-        let table_type = scope
-            .get_or_err(&self.table_name)?
-            .try_as_table_type(&self.table_name)?;
+        let table_type = scope.get_table_type(&self.table_name)?;
 
         match &mut self.inserted_data {
             ast::InsertedData::Values { rows, .. } => {
                 for row in rows.node_iter_mut() {
                     let (ty, _scope) = row.infer_types(scope)?;
-                    ty.expect_subtype_ignoring_nullability_of(table_type, row)?;
+                    ty.expect_subtype_ignoring_nullability_of(&table_type, row)?;
                 }
                 Ok(((), scope.clone()))
             }
             ast::InsertedData::Select { query, .. } => {
                 let (ty, _scope) = query.infer_types(scope)?;
-                ty.expect_subtype_ignoring_nullability_of(table_type, query)?;
+                ty.expect_subtype_ignoring_nullability_of(&table_type, query)?;
                 Ok(((), scope.clone()))
             }
         }
@@ -353,10 +351,8 @@ impl InferTypes for ast::SelectExpression {
                 ast::SelectListItem::TableNameWildcard {
                     table_name, except, ..
                 } => {
-                    let table_type = scope
-                        .get_or_err(table_name)?
-                        .try_as_table_type(table_name)?;
-                    add_table_cols(&mut cols, table_type, except);
+                    let table_type = scope.get_table_type(table_name)?;
+                    add_table_cols(&mut cols, &table_type, except);
                 }
             }
         }
@@ -389,9 +385,7 @@ impl InferTypes for ast::FromItem {
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         match self {
             ast::FromItem::TableName { table_name, alias } => {
-                let table_type = scope
-                    .get_or_err(table_name)?
-                    .try_as_table_type(table_name)?;
+                let table_type = scope.get_table_type(table_name)?;
                 let name = match alias {
                     Some(alias) => alias.ident.clone().into(),
                     None => table_name.clone(),
@@ -407,7 +401,7 @@ impl InferTypes for ast::FromItem {
                         )?;
                     }
                 }
-                Ok((table_type.clone(), scope.into_handle()))
+                Ok((table_type, scope.into_handle()))
             }
             ast::FromItem::Subquery { .. } => Err(nyi(self, "from subquery")),
             ast::FromItem::Unnest { .. } => Err(nyi(self, "from unnest")),
@@ -462,8 +456,8 @@ impl InferTypes for Ident {
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let ident = self.to_owned().into();
-        let ty = scope.get_or_err(&ident)?.try_as_argument_type(&ident)?;
-        Ok((ty.to_owned(), scope.clone()))
+        let ty = scope.get_argument_type(&ident)?;
+        Ok((ty, scope.clone()))
     }
 }
 
@@ -473,14 +467,12 @@ impl InferTypes for ast::Name {
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<(Self::Type, ScopeHandle)> {
         let (table_name, column_name) = self.split_table_and_column();
         if let Some(table_name) = table_name {
-            let table_type = scope
-                .get_or_err(&table_name)?
-                .try_as_table_type(&table_name)?;
+            let table_type = scope.get_table_type(&table_name)?;
             let column_type = table_type.column_by_name_or_err(&column_name)?;
             Ok((column_type.ty.to_owned(), scope.clone()))
         } else {
-            let ty = scope.get_or_err(self)?.try_as_argument_type(self)?;
-            Ok((ty.to_owned(), scope.clone()))
+            let ty = scope.get_argument_type(self)?;
+            Ok((ty, scope.clone()))
         }
     }
 }
@@ -508,9 +500,7 @@ impl InferTypes for ast::IsExpression {
         // We need to do this manually because our second argument isn't an
         // expression.
         let func_name = &Name::new("%IS", self.is_token.span());
-        let func_ty = scope
-            .get_or_err(func_name)?
-            .try_as_function_type(func_name)?;
+        let func_ty = scope.get_function_type(func_name)?;
         let arg_types = [
             self.left.infer_types(scope)?.0,
             self.predicate.infer_types(scope)?.0,
@@ -545,9 +535,7 @@ impl InferTypes for ast::InExpression {
         // We need to do this manually because our second argument isn't an
         // expression.
         let func_name = &Name::new("%IN", self.in_token.span());
-        let func_ty = scope
-            .get_or_err(func_name)?
-            .try_as_function_type(func_name)?;
+        let func_ty = scope.get_function_type(func_name)?;
         let left_ty = self.left.infer_types(scope)?.0;
         let value_set_ty = self.value_set.infer_types(scope)?.0;
         let elem_ty = value_set_ty.expect_one_column(&self.value_set)?.ty.clone();
@@ -821,9 +809,7 @@ fn infer_call<'args, ArgExprs>(
 where
     ArgExprs: IntoIterator<Item = &'args mut ast::Expression>,
 {
-    let func_ty = scope
-        .get_or_err(func_name)?
-        .try_as_function_type(func_name)?;
+    let func_ty = scope.get_function_type(func_name)?;
     let mut arg_types = vec![];
     for arg in args {
         arg_types.push(arg.infer_types(scope)?.0);
@@ -876,7 +862,7 @@ mod tests {
     }
 
     fn lookup(scope: &ScopeHandle, name: &str) -> Option<ScopeValue> {
-        scope.get(&Name::new(name, Span::Unknown)).cloned()
+        scope.get(&Name::new(name, Span::Unknown)).unwrap()
     }
 
     macro_rules! assert_defines {

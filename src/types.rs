@@ -21,6 +21,7 @@ use crate::{
     drivers::bigquery::BigQueryName,
     errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
+    scope::{ColumnSet, ColumnSetColumn, ColumnSetColumnName},
     tokenizer::{Ident, Span, Spanned},
     unification::{UnificationTable, Unify},
     util::is_c_ident,
@@ -118,21 +119,8 @@ impl<TV: TypeVarSupport> Type<TV> {
         }
     }
 
-    /// Convert this type into a [`ValueType`], if possible.
-    #[allow(dead_code)]
-    pub fn try_as_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
-        match self {
-            Type::Argument(ArgumentType::Value(t)) => Ok(t),
-            _ => Err(Error::annotated(
-                format!("expected value type, found {}", self),
-                spanned.span(),
-                "type mismatch",
-            )),
-        }
-    }
-
     /// Convert this type into a [`TableType`], if possible.
-    pub fn try_as_table_type(&self, spanned: &dyn Spanned) -> Result<&TableType> {
+    pub fn try_as_table_type<'ty>(&'ty self, spanned: &dyn Spanned) -> Result<&'ty TableType> {
         match self {
             Type::Table(t) => Ok(t),
             _ => Err(Error::annotated(
@@ -1156,6 +1144,29 @@ pub fn parse_function_decls(
 peg::parser! {
     grammar type_grammar() for str {
 
+        /// Used by [`tests::column_set`] as a test helper for working with
+        /// [`ColumnSet`].
+        pub rule column_set() -> ColumnSet
+            = _? columns:(column_set_column() ** (_? "," _?)) _? {
+                ColumnSet::new(columns)
+            }
+
+        rule column_set_column() -> ColumnSetColumn
+            = column_name:column_set_column_name() _? ty:argument_type() {
+                ColumnSetColumn::new(Some(column_name), ty)
+            }
+            / ty:argument_type() {
+                ColumnSetColumn::new(None, ty)
+            }
+
+        rule column_set_column_name() -> ColumnSetColumnName
+            = table_name:ident() _? "." _? column:ident() {
+                ColumnSetColumnName::new(Some(table_name.into()), column.into())
+            }
+            / column:ident() {
+                ColumnSetColumnName::new(None, column.into())
+            }
+
         pub rule function_decls() -> Vec<(Ident, FunctionType)>
             = _? decls:(function_decl() ** (_? ";" _?)) _? (";" _?)? {
                 decls
@@ -1292,6 +1303,21 @@ pub mod tests {
         let file_id = files.add_string("type", s);
         match parse_helper(&files, file_id, type_grammar::ty) {
             Ok(ty) => ty,
+            Err(e) => {
+                e.emit(&files);
+                panic!("parse error");
+            }
+        }
+    }
+
+    /// Parse a column set declaration.
+    pub fn column_set(s: &str) -> ColumnSet {
+        // We use local `KnownFiles` here, because we panic on parse errors, and
+        // our caller doesn't need to know we parse at all.
+        let mut files = KnownFiles::new();
+        let file_id = files.add_string("column set declaration", s);
+        match parse_helper(&files, file_id, type_grammar::column_set) {
+            Ok(column_set) => column_set,
             Err(e) => {
                 e.emit(&files);
                 panic!("parse error");

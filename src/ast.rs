@@ -471,6 +471,14 @@ impl Name {
         ident.into()
     }
 
+    /// Create a new name of the form `table.column`.
+    pub fn new_table_column(table: &str, column: &str, span: Span) -> Name {
+        let mut node_vec = NodeVec::new(".");
+        node_vec.push(Ident::new(table, span.clone()));
+        node_vec.push(Ident::new(column, span));
+        node_vec.into()
+    }
+
     /// Split this name into a table name and a column name.
     pub fn split_table_and_column(&self) -> (Option<Name>, Ident) {
         // No table part.

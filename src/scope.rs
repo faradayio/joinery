@@ -1,7 +1,21 @@
-//! Namespace for SQL.
+//! Scope (aka namespace) support for SQL.
+//!
+//! This is surprisingly complicated. We need to support:
+//!
+//! - Built-in functions.
+//! - `CREATE` and `DROP` statements that add or remove items from the
+//!   top-level scope.
+//! - CTEs, which add items to a query's scope.
+//! - `FROM` and `JOIN` clauses, which create special scopes containing column
+//!   names.
+//!   - `USING` clauses, which remove the table name from some columns.
+//! - `GROUP BY` and `PARTITION BY` clauses, which aggregate all columns not
+//!   mentioned in the clause.
+//!   - There are also implicit aggregations, like `SELECT COUNT(*) FROM t`
+//!     and `SUM(x) OVER ()`, but we leave those to our callers.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     sync::Arc,
 };
 
@@ -10,11 +24,51 @@ use crate::{
     errors::{format_err, Error, Result},
     known_files::KnownFiles,
     tokenizer::Spanned,
-    types::{parse_function_decls, ArgumentType, TableType, Type},
+    types::{parse_function_decls, ArgumentType, FunctionType, TableType, Type},
 };
 
 /// A value we can store in a scope. Details may change.
 pub type ScopeValue = Type;
+
+/// Common interface to all things that support a scope-like `get` function.
+pub trait ScopeGet {
+    /// Get the [`ScopeValue`] associated with `name`.
+    ///
+    /// Returns `Ok(None)` if `name` is not defined. Returns an error if `name`
+    /// is ambiguous. Returns an owned because some implementations may need to
+    /// modify types before returning them, and because trying to use
+    /// [`std::borrow::Cow`] pays too high a "Rust tax".
+    fn get(&self, name: &Name) -> Result<Option<ScopeValue>>;
+
+    /// Get a value, or return an error if it is not defined.
+    fn get_or_err(&self, name: &Name) -> Result<ScopeValue> {
+        self.get(name)?.ok_or_else(|| {
+            Error::annotated(
+                format!("unknown name: {}", name.unescaped_bigquery()),
+                name.span(),
+                "not defined",
+            )
+        })
+    }
+
+    /// Look up `name` as an [`ArgumentType`], if possible.
+    fn get_argument_type(&self, name: &Name) -> Result<ArgumentType> {
+        self.get_or_err(name)?.try_as_argument_type(name).cloned()
+    }
+
+    /// Look up `name` as a [`TableType`], if possible.
+    fn get_table_type(&self, name: &Name) -> Result<TableType> {
+        self.get_or_err(name)?.try_as_table_type(name).cloned()
+    }
+
+    /// Look up `name` as a [`FunctionType`], if possible.
+    fn get_function_type(&self, name: &Name) -> Result<FunctionType> {
+        self.get_or_err(name)?.try_as_function_type(name).cloned()
+    }
+}
+
+/// A handle to a scope.
+pub type ScopeHandle = Arc<Scope>;
 
 /// We need to both define and hide names in a scope.
 #[derive(Clone, Debug)]
@@ -24,9 +78,6 @@ enum ScopeEntry {
     /// A name that is hidden in this scope.
     Hidden,
 }
-
-/// A handle to a scope.
-pub type ScopeHandle = Arc<Scope>;
 
 /// A scope is a namespace for SQL code. We use it to look up names,
 /// and associate them with types and other information.
@@ -110,31 +161,21 @@ impl Scope {
         self.names.insert(name.clone(), ScopeEntry::Hidden);
         Ok(())
     }
+}
 
-    /// Get a value from the scope.
-    pub fn get<'scope>(&'scope self, name: &Name) -> Option<&'scope ScopeValue> {
+impl ScopeGet for Scope {
+    fn get(&self, name: &Name) -> Result<Option<ScopeValue>> {
         match self.names.get(name) {
-            Some(ScopeEntry::Defined(value)) => Some(value),
-            Some(ScopeEntry::Hidden) => None,
+            Some(ScopeEntry::Defined(value)) => Ok(Some(value.clone())),
+            Some(ScopeEntry::Hidden) => Ok(None),
             None => {
                 if let Some(parent) = self.parent.as_ref() {
                     parent.get(name)
                 } else {
-                    None
+                    Ok(None)
                 }
             }
         }
-    }
-
-    /// Get a value, or return an error if it is not defined.
-    pub fn get_or_err(&self, name: &Name) -> Result<&ScopeValue> {
-        self.get(name).ok_or_else(|| {
-            Error::annotated(
-                format!("unknown name: {}", name.unescaped_bigquery()),
-                name.span(),
-                "not defined",
-            )
-        })
     }
 }
 
@@ -211,13 +252,18 @@ TRIM = Fn(STRING) -> STRING;
 UPPER = Fn(STRING) -> STRING;
 ";
 
-#[derive(Clone, Debug)]
-pub struct ColumnName {
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnSetColumnName {
     table: Option<Name>,
     column: Name,
 }
 
-impl ColumnName {
+impl ColumnSetColumnName {
+    /// Create a new column name.
+    pub fn new(table: Option<Name>, column: Name) -> Self {
+        Self { table, column }
+    }
+
     /// Does this column name match `name`? `name` may be either a column name
     /// or a table name and a column name. Matches follow SQL rules, so `x`
     /// matches `t.x`.
@@ -232,32 +278,47 @@ impl ColumnName {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Column {
-    column_name: Option<ColumnName>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColumnSetColumn {
+    column_name: Option<ColumnSetColumnName>,
     ty: ArgumentType,
+}
+
+impl ColumnSetColumn {
+    /// Create a new column.
+    pub fn new(column_name: Option<ColumnSetColumnName>, ty: ArgumentType) -> Self {
+        Self { column_name, ty }
+    }
 }
 
 /// A set of columns and types.
 ///
 /// This is output by a `FROM`, `JOIN`, `GROUP BY` or `PARTITION BY` clause.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ColumnSet {
-    columns: Vec<Column>,
+    columns: Vec<ColumnSetColumn>,
 }
 
 impl ColumnSet {
+    /// Create a new column set.
+    pub fn new(columns: Vec<ColumnSetColumn>) -> Self {
+        Self { columns }
+    }
+
     /// Build a column set from a table type.
-    pub fn from_table(table_name: Name, table_type: TableType) -> Self {
+    ///
+    /// The `table_name` may be missing if the the table type was defined by
+    /// something like `FROM (SELECT 1 AS a)` without an `AS` alias.
+    pub fn from_table(table_name: Option<Name>, table_type: TableType) -> Self {
         let columns = table_type
             .columns
             .into_iter()
             .map(|col| {
-                let column_name = col.name.map(|col_name| ColumnName {
-                    table: Some(table_name.clone()),
+                let column_name = col.name.map(|col_name| ColumnSetColumnName {
+                    table: table_name.clone(),
                     column: col_name.into(),
                 });
-                Column {
+                ColumnSetColumn {
                     column_name,
                     ty: col.ty,
                 }
@@ -283,9 +344,9 @@ impl ColumnSet {
     /// copy of each without the table name.
     pub fn join_using(&self, other: &Self, using: &[Name]) -> Result<Self> {
         // Create a hash map, indicating which columns we have seen so far.
-        let mut seen_with_type = HashMap::new();
+        let mut seen_at_output_index: HashMap<Name, Option<usize>> = HashMap::new();
         for name in using {
-            seen_with_type.insert(name.clone(), None);
+            seen_at_output_index.insert(name.clone(), None);
         }
 
         // Iterate over all our columns, and add them to the output, being sure
@@ -298,23 +359,26 @@ impl ColumnSet {
         let mut columns = vec![];
         for col in columns_iter {
             if let Some(name) = &col.column_name {
-                match seen_with_type.get_mut(&name.column) {
+                match seen_at_output_index.get_mut(&name.column) {
                     Some(None) => {
                         // We have not seen this column yet. Add it to the
                         // output, removing the table name.
-                        seen_with_type.insert(name.column.clone(), Some(col.ty.clone()));
-                        columns.push(Column {
-                            column_name: Some(ColumnName {
+                        seen_at_output_index.insert(name.column.clone(), Some(columns.len()));
+                        columns.push(ColumnSetColumn {
+                            column_name: Some(ColumnSetColumnName {
                                 table: None,
                                 column: name.column.clone(),
                             }),
                             ty: col.ty,
                         });
                     }
-                    Some(Some(ty)) => {
+                    Some(Some(idx)) => {
                         // We have already seen this column. Make sure the types
-                        // match.
-                        if col.ty.common_supertype(ty).is_none() {
+                        // are compatible, and update the type if necessary.
+                        let ty = &mut columns[*idx].ty;
+                        if let Some(supertype) = col.ty.common_supertype(ty) {
+                            *ty = supertype;
+                        } else {
                             return Err(Error::annotated(
                                 format!(
                                     "column {} has type {} in one table and type {} in another",
@@ -338,6 +402,18 @@ impl ColumnSet {
                 columns.push(col);
             }
         }
+
+        // Make sure we saw all the columns in the `USING` clause.
+        for name in using {
+            if let Some(None) = seen_at_output_index.get(name) {
+                return Err(Error::annotated(
+                    format!("column {} not found", name.unescaped_bigquery()),
+                    name.span(),
+                    "not found",
+                ));
+            }
+        }
+
         Ok(Self { columns })
     }
 
@@ -356,14 +432,14 @@ impl ColumnSet {
                     // This column is not mentioned in the `GROUP BY` clause.
                     // Wrap it in `ArgumentType::Aggregating` and add it to the
                     // output.
-                    columns.push(Column {
+                    columns.push(ColumnSetColumn {
                         column_name: col.column_name.clone(),
                         ty: ArgumentType::Aggregating(Box::new(col.ty.clone())),
                     });
                 }
             } else {
                 // Not mentioned in the `GROUP BY` clause, so aggregate it.
-                columns.push(Column {
+                columns.push(ColumnSetColumn {
                     column_name: col.column_name.clone(),
                     ty: ArgumentType::Aggregating(Box::new(col.ty.clone())),
                 });
@@ -371,9 +447,10 @@ impl ColumnSet {
         }
         Ok(Self { columns })
     }
+}
 
-    /// Look up a column type by name. Returns an error if ambiguous.
-    pub fn get(&self, name: &Name) -> Result<&ArgumentType> {
+impl ScopeGet for ColumnSet {
+    fn get(&self, name: &Name) -> Result<Option<ScopeValue>> {
         let mut matches = vec![];
         for col in &self.columns {
             if let Some(column_name) = &col.column_name {
@@ -383,12 +460,8 @@ impl ColumnSet {
             }
         }
         match matches.len() {
-            0 => Err(Error::annotated(
-                format!("unknown column: {}", name.unescaped_bigquery()),
-                name.span(),
-                "not defined",
-            )),
-            1 => Ok(matches[0]),
+            0 => Ok(None),
+            1 => Ok(Some(Type::Argument(matches[0].clone()))),
             _ => Err(Error::annotated(
                 format!("ambiguous column: {}", name.unescaped_bigquery()),
                 name.span(),
@@ -398,12 +471,135 @@ impl ColumnSet {
     }
 }
 
+/// Wraps a [`ColumnSet`] and allows it to have a [`Scope`] as a parent.
+#[derive(Clone, Debug)]
+struct ColumnSetScope {
+    parent: ScopeHandle,
+    column_set: ColumnSet,
+}
+
+impl ColumnSetScope {
+    /// Create a new column set scope.
+    pub fn new(parent: &ScopeHandle, column_set: ColumnSet) -> Self {
+        Self {
+            parent: parent.clone(),
+            column_set,
+        }
+    }
+
+    /// Try to transform the underlying [`ColumnSet`] using `f`.
+    pub fn try_transform<F>(self, f: F) -> Result<Self>
+    where
+        F: FnOnce(ColumnSet) -> Result<ColumnSet>,
+    {
+        Ok(Self {
+            parent: self.parent.clone(),
+            column_set: f(self.column_set)?,
+        })
+    }
+}
+
+impl ScopeGet for ColumnSetScope {
+    fn get(&self, name: &Name) -> Result<Option<ScopeValue>> {
+        match self.column_set.get(name) {
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) => self.parent.get(name),
+            Err(err) => Err(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use crate::{
+        tokenizer::Span,
+        types::tests::{column_set, ty},
+    };
+
     #[test]
     fn parse_built_in_functions() {
         Scope::root();
+    }
+
+    /// Make a column set for a test.
+    fn column_set_from(name: &str, table_ty: &str) -> ColumnSet {
+        let t1_name = Name::new("t1", Span::Unknown);
+        let table_type = ty(table_ty).try_as_table_type(&t1_name).unwrap().clone();
+        ColumnSet::from_table(Some(Name::new(name, Span::Unknown)), table_type)
+    }
+
+    #[test]
+    fn join_column_sets() {
+        let left = column_set_from("t1", "TABLE<a INT64, b STRING>");
+        let right = column_set_from("t2", "TABLE<a INT64, c STRING>");
+        let joined = left.join(&right);
+        let expected = column_set("t1.a INT64, t1.b STRING, t2.a INT64, t2.c STRING");
+        assert_eq!(joined, expected);
+    }
+
+    #[test]
+    fn join_using_column_sets() {
+        let left = column_set_from("t1", "TABLE<a INT64, b STRING>");
+        let right = column_set_from("t2", "TABLE<a FLOAT64, c STRING>");
+        let joined = left
+            .join_using(&right, &[Name::new("a", Span::Unknown)])
+            .unwrap();
+        let expected = column_set("a FLOAT64, t1.b STRING, t2.c STRING");
+        assert_eq!(joined, expected);
+    }
+
+    #[test]
+    fn join_with_overlapping_columns_includes_both() {
+        let left = column_set_from("t1", "TABLE<a INT64, b STRING>");
+        let right = column_set_from("t2", "TABLE<a INT64, b STRING>");
+        let joined = left.join(&right);
+        let expected = column_set("t1.a INT64, t1.b STRING, t2.a INT64, t2.b STRING");
+        assert_eq!(joined, expected);
+    }
+
+    #[test]
+    fn group_by() {
+        let input = column_set("a INT64, b STRING, c INT64");
+        let group_by = vec![Name::new("a", Span::Unknown)];
+        let output = input.group_by(&group_by).unwrap();
+        let expected = column_set("a INT64, b Agg<STRING>, c Agg<INT64>");
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn group_by_empty() {
+        let input = column_set("a INT64, b STRING, c INT64");
+        let output = input.group_by(&[]).unwrap();
+        let expected = column_set("a Agg<INT64>, b Agg<STRING>, c Agg<INT64>");
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn column_set_get() {
+        // Check absent, present, and ambiguous columns.
+        let column_set = column_set("t1.a INT64, t1.b STRING, t2.b FLOAT64");
+        assert_eq!(
+            column_set.get(&Name::new("a", Span::Unknown)).unwrap(),
+            Some(ty("INT64"))
+        );
+        assert!(column_set.get(&Name::new("b", Span::Unknown)).is_err());
+        assert_eq!(
+            column_set
+                .get(&Name::new_table_column("t1", "b", Span::Unknown))
+                .unwrap(),
+            Some(ty("STRING"))
+        );
+        assert_eq!(
+            column_set
+                .get(&Name::new_table_column("t2", "b", Span::Unknown))
+                .unwrap(),
+            Some(ty("FLOAT64"))
+        );
+        assert_eq!(
+            column_set.get(&Name::new("c", Span::Unknown)).unwrap(),
+            None
+        );
     }
 }
