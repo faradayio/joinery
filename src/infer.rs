@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    ast::{self, Name},
+    ast::{self, ConditionJoinOperator, Name},
     errors::{Error, Result},
     scope::{ColumnSet, ColumnSetScope, Scope, ScopeGet, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
@@ -33,7 +33,7 @@ use crate::{
 
 /// Types which support inference.
 pub trait InferTypes {
-    type Scope: ScopeGet;
+    type Scope;
 
     /// The result of type inference. For expressions, this will be a type.
     /// For top-level statements, this will be a new scope.
@@ -362,15 +362,10 @@ impl InferTypes for ast::FromClause {
     type Scope = ScopeHandle;
     type Output = ColumnSetScope;
 
-    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        let ast::FromClause {
-            from_item,
-            join_operations,
-            ..
-        } = self;
-        let scope = from_item.infer_types(scope)?;
-        if !join_operations.is_empty() {
-            return Err(nyi(self, "join operations"));
+    fn infer_types(&mut self, outer_scope: &Self::Scope) -> Result<Self::Output> {
+        let mut scope = self.from_item.infer_types(outer_scope)?;
+        for op in &mut self.join_operations {
+            scope = op.infer_types(&(outer_scope.clone(), scope))?;
         }
         Ok(scope)
     }
@@ -395,6 +390,36 @@ impl InferTypes for ast::FromItem {
             ast::FromItem::Subquery { .. } => Err(nyi(self, "from subquery")),
             ast::FromItem::Unnest { .. } => Err(nyi(self, "from unnest")),
         }
+    }
+}
+
+impl InferTypes for ast::JoinOperation {
+    type Scope = (ScopeHandle, ColumnSetScope);
+    type Output = ColumnSetScope;
+
+    fn infer_types(&mut self, (outer_scope, scope): &Self::Scope) -> Result<Self::Output> {
+        let from_type = self.from_item_mut().infer_types(outer_scope)?;
+        scope.clone().try_transform(|column_set| match self {
+            ast::JoinOperation::ConditionJoin {
+                operator: Some(ConditionJoinOperator::Using { column_names, .. }, ..),
+                ..
+            } => {
+                let column_names = column_names
+                    .node_iter()
+                    .map(|ident| ident.clone().into())
+                    .collect::<Vec<_>>();
+                column_set.join_using(from_type.column_set(), &column_names)
+            }
+            ast::JoinOperation::ConditionJoin {
+                operator: Some(ConditionJoinOperator::On { expression, .. }, ..),
+                ..
+            } => {
+                let expr_ty = expression.infer_types(scope)?;
+                expr_ty.expect_subtype_of(&ArgumentType::bool(), expression)?;
+                Ok(column_set.join(from_type.column_set()))
+            }
+            _ => Ok(column_set.join(from_type.column_set())),
+        })
     }
 }
 

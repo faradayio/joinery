@@ -1564,7 +1564,7 @@ pub enum JoinOperation {
 impl JoinOperation {
     /// The FROM item on the right-hand side of this join.
     #[allow(clippy::wrong_self_convention)]
-    pub fn from_item(&self) -> &FromItem {
+    pub fn from_item_mut(&mut self) -> &mut FromItem {
         match self {
             JoinOperation::ConditionJoin { from_item, .. } => from_item,
             JoinOperation::CrossJoin { from_item, .. } => from_item,
