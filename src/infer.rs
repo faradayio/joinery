@@ -363,7 +363,8 @@ impl InferTypes for ast::FromClause {
     type Output = ColumnSetScope;
 
     fn infer_types(&mut self, outer_scope: &Self::Scope) -> Result<Self::Output> {
-        let mut scope = self.from_item.infer_types(outer_scope)?;
+        let mut scope = ColumnSetScope::new_empty(outer_scope);
+        scope = self.from_item.infer_types(&(outer_scope.clone(), scope))?;
         for op in &mut self.join_operations {
             scope = op.infer_types(&(outer_scope.clone(), scope))?;
         }
@@ -372,43 +373,43 @@ impl InferTypes for ast::FromClause {
 }
 
 impl InferTypes for ast::FromItem {
-    type Scope = ScopeHandle;
+    type Scope = (ScopeHandle, ColumnSetScope);
     type Output = ColumnSetScope;
 
-    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+    fn infer_types(&mut self, (outer_scope, scope): &Self::Scope) -> Result<Self::Output> {
         match self {
             ast::FromItem::TableName { table_name, alias } => {
-                let table_type = scope.get_table_type(table_name)?;
+                let table_type = outer_scope.get_table_type(table_name)?;
                 let name = match alias {
                     Some(alias) => alias.ident.clone().into(),
                     None => table_name.clone(),
                 };
 
                 let column_set = ColumnSet::from_table(Some(name), table_type);
-                Ok(ColumnSetScope::new(scope, column_set))
+                Ok(ColumnSetScope::new(outer_scope, column_set))
             }
             ast::FromItem::Subquery { query, alias, .. } => {
-                let table_type = query.infer_types(scope)?;
+                let table_type = query.infer_types(outer_scope)?;
                 let name = alias.clone().map(|alias| alias.ident.into());
                 let column_set = ColumnSet::from_table(name, table_type);
-                Ok(ColumnSetScope::new(scope, column_set))
+                Ok(ColumnSetScope::new(outer_scope, column_set))
             }
             ast::FromItem::Unnest {
                 expression, alias, ..
             } => {
-                let array_ty = expression.infer_types(&ColumnSetScope::new_empty(scope))?;
+                let array_ty = expression.infer_types(scope)?;
                 let array_ty = array_ty.expect_array_type(expression)?;
                 let mut table_ty = array_ty.unnest(expression)?;
                 if array_ty.unnests_to_anonymous_column() {
                     // If we have an alias, use it as our single column's name. Leave the table anonymous.
                     table_ty.columns[0].name = alias.as_ref().map(|alias| alias.ident.clone());
                     let column_set = ColumnSet::from_table(None, table_ty);
-                    Ok(ColumnSetScope::new(scope, column_set))
+                    Ok(ColumnSetScope::new(outer_scope, column_set))
                 } else {
                     // We have a multi-column output table. Use the alias as the table name.
                     let name = alias.clone().map(|alias| alias.ident.into());
                     let column_set = ColumnSet::from_table(name, table_ty);
-                    Ok(ColumnSetScope::new(scope, column_set))
+                    Ok(ColumnSetScope::new(outer_scope, column_set))
                 }
             }
         }
@@ -419,8 +420,8 @@ impl InferTypes for ast::JoinOperation {
     type Scope = (ScopeHandle, ColumnSetScope);
     type Output = ColumnSetScope;
 
-    fn infer_types(&mut self, (outer_scope, scope): &Self::Scope) -> Result<Self::Output> {
-        let from_type = self.from_item_mut().infer_types(outer_scope)?;
+    fn infer_types(&mut self, scopes @ (_, scope): &Self::Scope) -> Result<Self::Output> {
+        let from_type = self.from_item_mut().infer_types(scopes)?;
         scope.clone().try_transform(|column_set| match self {
             ast::JoinOperation::ConditionJoin {
                 operator: Some(ConditionJoinOperator::Using { column_names, .. }, ..),
