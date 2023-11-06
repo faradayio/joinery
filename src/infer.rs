@@ -531,6 +531,10 @@ impl InferTypes for ast::Expression {
             ast::Expression::If(if_expr) => if_expr.infer_types(scope),
             ast::Expression::Case(case) => case.infer_types(scope),
             ast::Expression::Binop(binop) => binop.infer_types(scope),
+            ast::Expression::Query { query, .. } => {
+                let table_ty = query.infer_types(&scope.clone().try_into_handle_for_subquery()?)?;
+                Ok(table_ty.expect_one_column(query)?.ty.clone())
+            }
             ast::Expression::Parens { expression, .. } => expression.infer_types(scope),
             ast::Expression::Array(array) => array.infer_types(scope),
             ast::Expression::Count(count) => count.infer_types(scope),
@@ -824,9 +828,19 @@ impl InferTypes for ast::ArrayDefinition {
     /// Infer the **element type** of the array.
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
-            ast::ArrayDefinition::Query(query) => {
+            ast::ArrayDefinition::Query { ty, query } => {
                 let table_ty = query.infer_types(&scope.clone().try_into_handle_for_subquery()?)?;
+                *ty = Some(table_ty.clone());
                 let elem_ty = table_ty.expect_one_column(query)?.ty.clone();
+                if table_ty.columns[0].name.is_none() {
+                    // If we have an anonymous column, we can't rewrite
+                    // ARRAY(SELECT ..) into something more portable.
+                    return Err(Error::annotated(
+                        "column in ARRAY(SELECT ..) must be named",
+                        query.span(),
+                        "anonymous column",
+                    ));
+                }
                 Ok(elem_ty)
             }
             ast::ArrayDefinition::Elements(exprs) => {

@@ -8,6 +8,7 @@
 use crate::{ast, errors::Result};
 
 pub use self::{
+    array_select_to_subquery::ArraySelectToSubquery,
     bool_to_int::BoolToInt,
     clean_up_temp_manually::CleanUpTempManually,
     countif_to_case::CountifToCase,
@@ -23,6 +24,7 @@ pub use self::{
     wrap_nested_queries::WrapNestedQueries,
 };
 
+mod array_select_to_subquery;
 mod bool_to_int;
 mod clean_up_temp_manually;
 mod countif_to_case;

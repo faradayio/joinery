@@ -1,0 +1,10 @@
+-- Subqueries.
+
+CREATE OR REPLACE TABLE __result1 AS
+SELECT (SELECT 1) AS x;
+
+CREATE OR REPLACE TABLE __expected1 (
+    x INT64
+);
+INSERT INTO __expected1
+SELECT 1;

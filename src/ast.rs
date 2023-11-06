@@ -841,6 +841,11 @@ pub enum Expression {
     If(IfExpression),
     Case(CaseExpression),
     Binop(BinopExpression),
+    Query {
+        paren1: Punct,
+        query: Box<QueryExpression>,
+        paren2: Punct,
+    },
     Parens {
         paren1: Punct,
         expression: Box<Expression>,
@@ -1099,7 +1104,14 @@ impl Emit for ArrayExpression {
 /// expressions.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub enum ArrayDefinition {
-    Query(Box<QueryExpression>),
+    Query {
+        /// Type information added later by inference.
+        #[emit(skip)]
+        #[to_tokens(skip)]
+        #[drive(skip)]
+        ty: Option<TableType>,
+        query: Box<QueryExpression>,
+    },
     Elements(NodeVec<Expression>),
 }
 
@@ -2111,6 +2123,7 @@ peg::parser! {
             struct_expression:struct_expression() { Expression::Struct(struct_expression) }
             count_expression:count_expression() { Expression::Count(count_expression) }
             current_date:current_date() { Expression::CurrentDate(current_date) }
+            paren1:p("(") query:query_expression() paren2:p(")") { Expression::Query { paren1, query: Box::new(query), paren2 } }
             paren1:p("(") expression:expression() paren2:p(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { Expression::Literal(literal) }
             bool_token:(k("TRUE") / k("FALSE")) { Expression::BoolValue(bool_token) }
@@ -2238,7 +2251,7 @@ peg::parser! {
               }
 
         rule array_definition() -> ArrayDefinition
-            = query:query_expression() { ArrayDefinition::Query(Box::new(query)) }
+            = query:query_expression() { ArrayDefinition::Query { ty: None, query: Box::new(query) } }
             / expressions:sep(<expression()>, ",") { ArrayDefinition::Elements(expressions) }
             / { ArrayDefinition::Elements(NodeVec::new(",")) }
 
