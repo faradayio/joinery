@@ -940,10 +940,11 @@ impl FunctionType {
     pub fn return_type_for(
         &self,
         arg_types: &[ArgumentType],
+        is_window: bool,
         spanned: &dyn Spanned,
     ) -> Result<ArgumentType> {
         for sig in &self.signatures {
-            if let Some(return_type) = sig.return_type_for(arg_types, spanned)? {
+            if let Some(return_type) = sig.return_type_for(arg_types, is_window, spanned)? {
                 return Ok(return_type);
             }
         }
@@ -1025,11 +1026,18 @@ impl FunctionSignature {
     pub fn return_type_for(
         &self,
         arg_types: &[ArgumentType],
+        is_window: bool,
         spanned: &dyn Spanned,
     ) -> Result<Option<ArgumentType>> {
         if self.params.len() > arg_types.len() {
             return Ok(None);
         }
+
+        // Window functions can only be matched in a window context.
+        if is_window != (self.sig_type == FunctionSignatureType::Window) {
+            return Ok(None);
+        }
+
         let mut table = UnificationTable::default();
         for tv in &self.type_vars {
             table.declare(tv.clone(), spanned)?;
