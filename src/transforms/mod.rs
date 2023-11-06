@@ -11,6 +11,7 @@ pub use self::{
     bool_to_int::BoolToInt,
     clean_up_temp_manually::CleanUpTempManually,
     countif_to_case::CountifToCase,
+    expand_except::ExpandExcept,
     if_to_case::IfToCase,
     in_unnest_to_in_select::InUnnestToInSelect,
     index_from_one::IndexFromOne,
@@ -25,6 +26,7 @@ pub use self::{
 mod bool_to_int;
 mod clean_up_temp_manually;
 mod countif_to_case;
+mod expand_except;
 mod if_to_case;
 mod in_unnest_to_in_select;
 mod index_from_one;

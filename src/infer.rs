@@ -358,11 +358,16 @@ impl InferTypes for ast::SelectExpression {
                         not_null: false,
                     });
                 }
-                ast::SelectListItem::Wildcard { star, except } => {
+                ast::SelectListItem::Wildcard { ty, star, except } => {
                     let table_type = column_set_scope.column_set().star(star)?;
+                    // TODO: Should we pass the `column_set` here instead of a
+                    // table type? I need to think about this.
                     add_table_cols(&mut cols, &table_type, except);
+                    // Table type built from `column_set_scope`.
+                    *ty = Some(table_type);
                 }
                 ast::SelectListItem::TableNameWildcard {
+                    ty,
                     table_name,
                     star,
                     except,
@@ -370,6 +375,9 @@ impl InferTypes for ast::SelectExpression {
                 } => {
                     let table_type = column_set_scope.column_set().star_for(table_name, star)?;
                     add_table_cols(&mut cols, &table_type, except);
+                    // Modified version of `table_name`'s type, built from
+                    // `column_set_scope`.
+                    *ty = Some(table_type);
                 }
             }
         }

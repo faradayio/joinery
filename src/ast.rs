@@ -40,6 +40,7 @@ use crate::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
         RawToken, Span, Spanned, ToTokens, Token, TokenStream, TokenWriter,
     },
+    types::TableType,
     util::{is_c_ident, AnsiIdent, AnsiString},
 };
 
@@ -771,9 +772,24 @@ pub enum SelectListItem {
         alias: Option<Alias>,
     },
     /// A `*` wildcard.
-    Wildcard { star: Punct, except: Option<Except> },
+    Wildcard {
+        /// Type information added later by inference.
+        #[emit(skip)]
+        #[to_tokens(skip)]
+        #[drive(skip)]
+        ty: Option<TableType>,
+        star: Punct,
+        except: Option<Except>,
+    },
     /// A `table.*` wildcard.
     TableNameWildcard {
+        /// Type information added later by inference. Note that this does
+        /// not necessarily match the original type of `table_name`, because
+        /// `USING` may remove columns.
+        #[emit(skip)]
+        #[to_tokens(skip)]
+        #[drive(skip)]
+        ty: Option<TableType>,
         table_name: Name,
         dot: Punct,
         star: Punct,
@@ -1985,10 +2001,10 @@ peg::parser! {
 
         rule select_list_item() -> SelectListItem
             = star:p("*") except:except()? {
-                SelectListItem::Wildcard { star, except }
+                SelectListItem::Wildcard { ty: None, star, except }
             }
             / table_name:name() dot:p(".") star:p("*") except:except()? {
-                SelectListItem::TableNameWildcard { table_name, dot, star, except }
+                SelectListItem::TableNameWildcard { ty: None, table_name, dot, star, except }
             }
             / s:position!() expression:expression() alias:alias()? e:position!() {
                 SelectListItem::Expression { expression, alias }
