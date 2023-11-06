@@ -712,30 +712,6 @@ pub struct TableType {
 }
 
 impl TableType {
-    /// Look up a column by name.
-    pub fn column_by_name(&self, name: &Ident) -> Option<&ColumnType> {
-        for column in &self.columns {
-            if let Some(column_name) = &column.name {
-                if column_name == name {
-                    return Some(column);
-                }
-            }
-        }
-        None
-    }
-
-    /// Look up a column by name, and return an error if it doesn't exist.
-    pub fn column_by_name_or_err(&self, name: &Ident) -> Result<&ColumnType> {
-        match self.column_by_name(name) {
-            Some(column) => Ok(column),
-            None => Err(Error::annotated(
-                format!("no such column: {}", name.name),
-                name.span(),
-                "not defined",
-            )),
-        }
-    }
-
     /// Expect a table to have a single column, and return that column.
     pub fn expect_one_column(&self, spanned: &dyn Spanned) -> Result<&ColumnType> {
         if self.columns.len() != 1 {

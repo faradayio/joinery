@@ -294,10 +294,10 @@ impl ColumnSetColumnName {
         }
     }
 
-    /// Does this column name match `name`? `name` may be either a column name
+    /// Does `name` match this column name? `name` may be either a column name
     /// or a table name and a column name. Matches follow SQL rules, so `x`
     /// matches `t.x`.
-    pub fn matches(&self, name: &Name) -> bool {
+    pub fn matched_by(&self, name: &Name) -> bool {
         let (table, column) = name.split_table_and_column();
         if let Some(table) = table {
             if self.table.as_ref() != Some(&table) {
@@ -472,7 +472,7 @@ impl ColumnSet {
         let mut columns = vec![];
         for col in &self.columns {
             if let Some(name) = &col.column_name {
-                if group_by.contains(&name.column) {
+                if group_by.iter().any(|n| name.matched_by(n)) {
                     // This column is mentioned in the `GROUP BY` clause. Add it
                     // to the output as is.
                     columns.push(col.clone());
@@ -544,7 +544,7 @@ impl ScopeGet for ColumnSet {
         let mut matches = vec![];
         for col in &self.columns {
             if let Some(column_name) = &col.column_name {
-                if column_name.matches(name) {
+                if column_name.matched_by(name) {
                     matches.push(&col.ty);
                 }
             }
@@ -702,6 +702,22 @@ mod tests {
     #[test]
     fn parse_built_in_functions() {
         Scope::root();
+    }
+
+    #[test]
+    fn matched_by() {
+        let column_name = ColumnSetColumnName::new(None, Name::new("a", Span::Unknown));
+        assert!(column_name.matched_by(&Name::new("a", Span::Unknown)));
+        assert!(!column_name.matched_by(&Name::new("b", Span::Unknown)));
+        assert!(!column_name.matched_by(&Name::new_table_column("t", "a", Span::Unknown)));
+
+        let column_name = ColumnSetColumnName::new(
+            Some(Name::new("t", Span::Unknown)),
+            Name::new("a", Span::Unknown),
+        );
+        assert!(column_name.matched_by(&Name::new_table_column("t", "a", Span::Unknown)));
+        assert!(column_name.matched_by(&Name::new("a", Span::Unknown)));
+        assert!(!column_name.matched_by(&Name::new_table_column("t", "b", Span::Unknown)));
     }
 
     /// Make a column set for a test.

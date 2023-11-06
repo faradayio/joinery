@@ -443,7 +443,7 @@ impl InferTypes for ast::JoinOperation {
 
     fn infer_types(&mut self, scopes @ (_, scope): &Self::Scope) -> Result<Self::Output> {
         let from_type = self.from_item_mut().infer_types(scopes)?;
-        scope.clone().try_transform(|column_set| match self {
+        let new_scope = scope.clone().try_transform(|column_set| match self {
             ast::JoinOperation::ConditionJoin {
                 operator: Some(ConditionJoinOperator::Using { column_names, .. }, ..),
                 ..
@@ -454,16 +454,19 @@ impl InferTypes for ast::JoinOperation {
                     .collect::<Vec<_>>();
                 column_set.join_using(from_type.column_set(), &column_names)
             }
-            ast::JoinOperation::ConditionJoin {
-                operator: Some(ConditionJoinOperator::On { expression, .. }, ..),
-                ..
-            } => {
-                let expr_ty = expression.infer_types(scope)?;
-                expr_ty.expect_subtype_of(&ArgumentType::bool(), expression)?;
-                Ok(column_set.join(from_type.column_set()))
-            }
             _ => Ok(column_set.join(from_type.column_set())),
-        })
+        })?;
+
+        // Check `ON` clause, which needs the JOINed scope.
+        if let ast::JoinOperation::ConditionJoin {
+            operator: Some(ConditionJoinOperator::On { expression, .. }),
+            ..
+        } = self
+        {
+            let expr_ty = expression.infer_types(&new_scope)?;
+            expr_ty.expect_subtype_of(&ArgumentType::bool(), expression)?;
+        }
+        Ok(new_scope)
     }
 }
 
@@ -559,14 +562,7 @@ impl InferTypes for ast::Name {
     type Output = ArgumentType;
 
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        let (table_name, column_name) = self.split_table_and_column();
-        if let Some(table_name) = table_name {
-            let table_type = scope.get_table_type(&table_name)?;
-            let column_type = table_type.column_by_name_or_err(&column_name)?;
-            Ok(column_type.ty.to_owned())
-        } else {
-            scope.get_argument_type(self)
-        }
+        scope.get_argument_type(self)
     }
 }
 
@@ -962,11 +958,13 @@ fn infer_call<'args, ArgExprs>(
 where
     ArgExprs: IntoIterator<Item = &'args mut ast::Expression>,
 {
+    trace!(scope = %scope.column_set(), "inferring function call");
     let func_ty = scope.get_function_type(func_name)?;
     let mut arg_types = vec![];
     for arg in args {
         arg_types.push(arg.infer_types(scope)?);
     }
+    trace!(name = &func_name.unescaped_bigquery(), args = ?arg_types, "inferring function call");
     let ret_ty = func_ty.return_type_for(&arg_types, func_name)?;
     Ok(ret_ty)
 }
