@@ -18,6 +18,7 @@ mod util;
 
 use cmd::{
     parse::{cmd_parse, ParseOpt},
+    run::{cmd_run, RunOpt},
     sql_test::{cmd_sql_test, SqlTestOpt},
     transpile::{cmd_transpile, TranspileOpt},
 };
@@ -28,6 +29,8 @@ use tracing::info_span;
 enum Opt {
     /// Parse SQL from a CSV file containing `id` and `query` columns.
     Parse(ParseOpt),
+    /// Run an SQL file.
+    Run(RunOpt),
     /// Run SQL tests from a directory.
     SqlTest(SqlTestOpt),
     /// Transpile BigQuery SQL to another dialect.
@@ -44,6 +47,7 @@ async fn main() {
     let mut files = KnownFiles::new();
     let result = match opt {
         Opt::Parse(parse_opt) => cmd_parse(&mut files, &parse_opt),
+        Opt::Run(run_opt) => cmd_run(&mut files, &run_opt).await,
         Opt::SqlTest(sql_test_opt) => cmd_sql_test(&mut files, &sql_test_opt).await,
         Opt::Transpile(transpile_opt) => cmd_transpile(&mut files, &transpile_opt).await,
     };
