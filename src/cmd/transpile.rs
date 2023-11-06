@@ -9,7 +9,9 @@ use crate::{
     ast::{parse_sql, Emit},
     drivers,
     errors::Result,
+    infer::InferTypes,
     known_files::KnownFiles,
+    scope::Scope,
 };
 
 /// Run SQL tests from a directory.
@@ -33,7 +35,16 @@ pub async fn cmd_transpile(files: &mut KnownFiles, opt: &TranspileOpt) -> Result
 
     // Parse our SQL.
     let file_id = files.add(&opt.sql_path)?;
-    let ast = parse_sql(files, file_id)?;
+    let mut ast = parse_sql(files, file_id)?;
+
+    // Run the type checker, but do not fail on errors.
+    let scope = Scope::root();
+    if let Err(err) = ast.infer_types(&scope) {
+        err.emit(files);
+        eprintln!("\nType checking failed. Manual fixes will probably be required!");
+    }
+
+    // Rewrite our AST.
     let rewritten_ast = driver.rewrite_ast(&ast)?;
 
     // Print our rewritten AST.

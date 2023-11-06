@@ -35,11 +35,6 @@ pub struct SqlTestOpt {
     /// Run pending tests.
     #[clap(long)]
     pending: bool,
-
-    /// Run the type checker on each test (this will eventually become
-    /// automatic).
-    #[clap(long)]
-    type_check: bool,
 }
 
 /// Run our SQL test suite.
@@ -93,7 +88,7 @@ pub async fn cmd_sql_test(files: &mut KnownFiles, opt: &SqlTestOpt) -> Result<()
 
         // Test query.
         let mut driver = locator.driver().await?;
-        match run_test(&mut *driver, files, file_id, opt.type_check).await {
+        match run_test(&mut *driver, files, file_id).await {
             Ok(_) => {
                 progress('.');
                 test_ok_count += 1;
@@ -149,15 +144,12 @@ async fn run_test(
     driver: &mut dyn Driver,
     files: &mut KnownFiles,
     file_id: FileId,
-    type_check: bool,
 ) -> std::result::Result<(), Error> {
     let mut ast = parse_sql(files, file_id)?;
 
-    // Optionally type check the AST.
-    if type_check {
-        let scope = Scope::root();
-        ast.infer_types(&scope)?;
-    }
+    // Type check the AST.
+    let scope = Scope::root();
+    ast.infer_types(&scope)?;
 
     //eprintln!("SQLite3: {}", ast.emit_to_string(Target::SQLite3));
     let output_tables = find_output_tables(&ast)?;
