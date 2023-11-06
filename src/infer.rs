@@ -531,6 +531,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::If(if_expr) => if_expr.infer_types(scope),
             ast::Expression::Case(case) => case.infer_types(scope),
             ast::Expression::Binop(binop) => binop.infer_types(scope),
+            ast::Expression::Parens { expression, .. } => expression.infer_types(scope),
             ast::Expression::Array(array) => array.infer_types(scope),
             ast::Expression::Count(count) => count.infer_types(scope),
             ast::Expression::ArrayAgg(array_agg) => array_agg.infer_types(scope),

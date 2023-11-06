@@ -453,7 +453,13 @@ impl Unify for ValueType<TypeVar> {
         spanned: &dyn Spanned,
     ) -> Result<Self::Resolved> {
         match (self, other) {
-            // TODO: Unify an array with with a TypeVar.
+            // Unify an array with with a TypeVar.
+            (ValueType::Simple(SimpleType::Parameter(var)), array_ty @ ValueType::Array(_)) => {
+                table
+                    .update(var.clone(), ArgumentType::Value(array_ty.clone()), spanned)?
+                    .expect_value_type(spanned)
+                    .cloned()
+            }
             (ValueType::Simple(a), ValueType::Simple(b)) => {
                 Ok(ValueType::Simple(a.unify(b, table, spanned)?))
             }
@@ -479,6 +485,19 @@ impl Unify for ValueType<TypeVar> {
 
     fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
         match self {
+            // TODO: This is duplicated from SimpleType, because we may have
+            // bound a type variable to an array type.
+            ValueType::Simple(SimpleType::Parameter(var)) => table
+                .get(var.clone())
+                .ok_or_else(|| {
+                    Error::annotated(
+                        format!("cannot resolve type variable: {}", var),
+                        spanned.span(),
+                        "unbound type variable",
+                    )
+                })?
+                .expect_value_type(spanned)
+                .cloned(),
             ValueType::Simple(t) => Ok(ValueType::Simple(t.resolve(table, spanned)?)),
             ValueType::Array(t) => Ok(ValueType::Array(t.resolve(table, spanned)?)),
         }
