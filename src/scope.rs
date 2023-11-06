@@ -14,6 +14,7 @@
 //!   - There are also implicit aggregations, like `SELECT COUNT(*) FROM t`
 //!     and `SUM(x) OVER ()`, but we leave those to our callers.
 
+use core::fmt;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -229,11 +230,13 @@ static BUILT_IN_FUNCTIONS: &str = "
 -- Functions.
 
 ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;
+ARRAY_AGG = FnAgg<?T>(Agg<?T>) -> ARRAY<?T>;
 ARRAY_LENGTH = Fn<?T>(ARRAY<?T>) -> INT64;
 ARRAY_TO_STRING = Fn<?T>(ARRAY<?T>, STRING) -> STRING;
 AVG = FnAgg(Agg<INT64>) -> FLOAT64 | FnAgg(Agg<FLOAT64>) -> FLOAT64;
 COALESCE = Fn<?T>(?T, ..?T) -> ?T;
 CONCAT = Fn(STRING, ..STRING) -> STRING | Fn(BYTES, ..BYTES) -> BYTES;
+COUNT = FnAgg<?T>(Agg<?T>) -> INT64;
 COUNTIF = FnAgg(Agg<BOOL>) -> INT64 | FnOver(Agg<BOOL>) -> INT64;
 CURRENT_DATETIME = Fn() -> DATETIME;
 DATE = Fn(STRING) -> DATE;
@@ -305,6 +308,15 @@ impl ColumnSetColumnName {
     }
 }
 
+impl fmt::Display for ColumnSetColumnName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(table) = &self.table {
+            write!(f, "{}.", table.unescaped_bigquery())?;
+        }
+        write!(f, "{}", self.column.unescaped_bigquery())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnSetColumn {
     column_name: Option<ColumnSetColumnName>,
@@ -315,6 +327,15 @@ impl ColumnSetColumn {
     /// Create a new column.
     pub fn new(column_name: Option<ColumnSetColumnName>, ty: ArgumentType) -> Self {
         Self { column_name, ty }
+    }
+}
+
+impl fmt::Display for ColumnSetColumn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(column_name) = &self.column_name {
+            write!(f, "{} ", column_name)?;
+        }
+        write!(f, "{}", self.ty)
     }
 }
 
@@ -537,6 +558,21 @@ impl ScopeGet for ColumnSet {
                 "multiple columns match",
             )),
         }
+    }
+}
+
+impl fmt::Display for ColumnSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for col in &self.columns {
+            if first {
+                first = false;
+            } else {
+                write!(f, ", ")?;
+            }
+            write!(f, "{}", col)?;
+        }
+        Ok(())
     }
 }
 

@@ -950,6 +950,16 @@ pub struct FunctionType {
 }
 
 impl FunctionType {
+    /// Is this an aggregate function?
+    ///
+    /// This is used to detect an implicit `GROUP BY` clause, like in `SELECT
+    /// SUM(x) FROM t`.
+    pub fn is_aggregate(&self) -> bool {
+        self.signatures
+            .iter()
+            .any(|sig| sig.sig_type == FunctionSignatureType::Aggregate)
+    }
+
     /// Find the best (first matching) signature for a set of arguments.
     pub fn return_type_for(
         &self,

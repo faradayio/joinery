@@ -5,8 +5,7 @@ INSERT INTO ints VALUES (1), (2), (2), (3);
 
 CREATE OR REPLACE TABLE __result1 AS
 SELECT
-    -- Our Snowflake driver has trouble comparing FLOAT64s right now.
-    CAST(AVG(i) AS INT64) AS avg,
+    AVG(i) AS avg,
     COUNT(i) AS count_all,
     COUNT(DISTINCT i) AS count_distinct,
     MAX(i) AS max,
@@ -15,7 +14,7 @@ SELECT
 FROM ints;
 
 CREATE OR REPLACE TABLE __expected1 (
-    avg INT64,
+    avg FLOAT64,
     count_all INT64,
     count_distinct INT64,
     max INT64,

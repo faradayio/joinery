@@ -2,8 +2,11 @@
 
 use std::collections::HashSet;
 
+use derive_visitor::{Drive, Visitor};
+use tracing::trace;
+
 use crate::{
-    ast::{self, ConditionJoinOperator, Name},
+    ast::{self, ConditionJoinOperator, Emit, Expression, Name},
     errors::{Error, Result},
     scope::{ColumnSet, ColumnSetScope, Scope, ScopeGet, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
@@ -280,6 +283,7 @@ impl InferTypes for ast::SelectExpression {
         // - ORDER BY. Only uses types.
         // - LIMIT. Only uses types.
 
+        trace!(sql = %self.emit_to_string(ast::Target::BigQuery), "inferring types");
         let ast::SelectExpression {
             //select_options,
             select_list: ast::SelectList {
@@ -287,7 +291,7 @@ impl InferTypes for ast::SelectExpression {
             },
             from_clause,
             //where_clause,
-            //group_by,
+            group_by,
             //having,
             //qualify,
             //order_by,
@@ -296,11 +300,26 @@ impl InferTypes for ast::SelectExpression {
         } = self;
 
         // See if we have a FROM clause.
-        let column_set_scope = if let Some(from_clause) = from_clause {
+        let mut column_set_scope = if let Some(from_clause) = from_clause {
             from_clause.infer_types(scope)
         } else {
             Ok(ColumnSetScope::new_empty(scope))
         }?;
+        trace!(columns = %column_set_scope.column_set(), "columns after FROM clause");
+
+        // See if we have a GROUP BY clause.
+        if let Some(group_by) = group_by {
+            let group_by_names = group_by.infer_types(&column_set_scope)?;
+            column_set_scope = column_set_scope
+                .try_transform(|column_set| column_set.group_by(&group_by_names))?;
+            trace!(columns = %column_set_scope.column_set(), "columns after GROUP BY");
+        } else if contains_aggregate(&column_set_scope, &*select_list) {
+            // If we have aggregates but no GROUP BY, we need to add a synthetic
+            // GROUP BY of the empty set of columns.
+            column_set_scope =
+                column_set_scope.try_transform(|column_set| column_set.group_by(&[]))?;
+            trace!(columns = %column_set_scope.column_set(), "columns after implicit GROUP BY");
+        }
 
         // Helper function to add columns from a table type to a list of columns.
         let add_table_cols =
@@ -354,7 +373,9 @@ impl InferTypes for ast::SelectExpression {
                 }
             }
         }
-        Ok(TableType { columns: cols })
+        let table_type = TableType { columns: cols };
+        trace!(table_type = %table_type, "select list type");
+        Ok(table_type)
     }
 }
 
@@ -446,6 +467,40 @@ impl InferTypes for ast::JoinOperation {
     }
 }
 
+impl InferTypes for ast::GroupBy {
+    type Scope = ColumnSetScope;
+    /// We output a list of names that can be used normally in the SELECT list.
+    ///
+    /// TODO: This is actually insufficient, given the weirdness of how GROUP
+    /// BY, HAVING and SELECT interact. See
+    /// https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#group_by_grouping_item
+    /// for details. But we'll keep this simple for now.
+    type Output = Vec<Name>;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        // Simplified GROUP BY rules:
+        //   1. We type check everything.
+        //   2. We group by simple identifiers seen in the FROM and JOIN
+        //      clauses, which are all in our namespace.
+        //   3. We don't try to handle names from the SELECT list, or integer
+        //      ordinals, because those will require a third type of special
+        //      namespace.
+        let mut group_by_names = vec![];
+        for expr in self.expressions.node_iter_mut() {
+            let _ty = expr.infer_types(scope)?;
+            match expr {
+                Expression::ColumnName(name) => {
+                    group_by_names.push(name.clone());
+                }
+                _ => {
+                    return Err(nyi(expr, "group by expression"));
+                }
+            }
+        }
+        Ok(group_by_names)
+    }
+}
+
 impl InferTypes for ast::Expression {
     type Scope = ColumnSetScope;
     type Output = ArgumentType;
@@ -466,6 +521,8 @@ impl InferTypes for ast::Expression {
             ast::Expression::Case(case) => case.infer_types(scope),
             ast::Expression::Binop(binop) => binop.infer_types(scope),
             ast::Expression::Array(array) => array.infer_types(scope),
+            ast::Expression::Count(count) => count.infer_types(scope),
+            ast::Expression::ArrayAgg(array_agg) => array_agg.infer_types(scope),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::Index(index) => index.infer_types(scope),
             _ => Err(nyi(self, "expression")),
@@ -775,6 +832,55 @@ impl InferTypes for ast::ArrayDefinition {
     }
 }
 
+impl InferTypes for ast::CountExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        match self {
+            ast::CountExpression::CountStar { .. } => {
+                Ok(ArgumentType::Value(ValueType::Simple(SimpleType::Int64)))
+            }
+            ast::CountExpression::CountExpression {
+                count_token,
+                expression,
+                ..
+            } => {
+                let func_name = &Name::new("COUNT", count_token.span());
+                let args = [expression.as_mut()];
+                infer_call(func_name, args, scope)
+            }
+        }
+    }
+}
+
+impl InferTypes for ast::ArrayAggExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        if let Some(order_by) = &mut self.order_by {
+            // TODO: Should this always return an aggregate type?
+            order_by.infer_types(scope)?;
+        }
+        let func_name = &Name::new("ARRAY_AGG", self.array_agg_token.span());
+        let args = [self.expression.as_mut()];
+        infer_call(func_name, args, scope)
+    }
+}
+
+impl InferTypes for ast::OrderBy {
+    type Scope = ColumnSetScope;
+    type Output = ();
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        for item in self.items.node_iter_mut() {
+            item.expression.infer_types(scope)?;
+        }
+        Ok(())
+    }
+}
+
 impl InferTypes for ast::FunctionCall {
     type Scope = ColumnSetScope;
     type Output = ArgumentType;
@@ -872,6 +978,53 @@ fn nyi(spanned: &dyn Spanned, name: &str) -> Error {
         spanned.span(),
         format!("not yet implemented: {}", name),
     )
+}
+
+/// Check an [`ast::Expression`] for aggregate functions.
+///
+/// This is used to detect implicit `GROUP BY` clauses, as in `SELECT SUM(x)
+/// FROM t`.
+fn contains_aggregate(scope: &ColumnSetScope, node: &ast::NodeVec<ast::SelectListItem>) -> bool {
+    let mut visitor = ContainsAggregate::new(scope);
+    node.drive(&mut visitor);
+    visitor.contains_aggregate
+}
+
+/// A struct that we use to walk an AST looking for aggregate functions.
+#[derive(Debug, Visitor)]
+#[visitor(ast::FunctionCall(enter))]
+struct ContainsAggregate<'scope> {
+    scope: &'scope ColumnSetScope,
+    contains_aggregate: bool,
+}
+
+impl<'scope> ContainsAggregate<'scope> {
+    fn new(scope: &'scope ColumnSetScope) -> Self {
+        Self {
+            scope,
+            contains_aggregate: false,
+        }
+    }
+
+    fn enter_function_call(&mut self, fcall: &ast::FunctionCall) {
+        if self.contains_aggregate {
+            return;
+        }
+        if fcall.over_clause.is_some() {
+            // OVER clauses may contain aggregate functions, but they don't
+            // normally trigger an implicit GROUP BY.
+            return;
+        }
+        match self.scope.get_function_type(&fcall.name) {
+            Ok(func_ty) if func_ty.is_aggregate() => {
+                self.contains_aggregate = true;
+            }
+            _ => {
+                // If we're not sure what this function is, assume it's not an
+                // aggregate. We'll call `infer_types` later to check.
+            }
+        }
+    }
 }
 
 #[cfg(test)]
