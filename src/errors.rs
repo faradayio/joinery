@@ -3,6 +3,7 @@
 use std::{
     error::{self, Error as _},
     fmt, result,
+    sync::Arc,
 };
 
 use anstream::eprintln;
@@ -190,6 +191,10 @@ where
 pub struct SourceError {
     pub alternate_summary: String,
     pub diagnostic: Diagnostic<FileId>,
+    /// If you're not using the standard set of known files, perhaps because
+    /// you're in a database driver, you can override the [`KnownFiles`] used to
+    /// display this error.
+    pub files_override: Option<Arc<KnownFiles>>,
 }
 
 impl SourceError {
@@ -212,6 +217,7 @@ impl SourceError {
             SourceError {
                 alternate_summary,
                 diagnostic,
+                files_override: None,
             }
         } else {
             let alternate_summary = format!("{} (at unknown location): {}", summary, annotation);
@@ -219,6 +225,7 @@ impl SourceError {
             SourceError {
                 alternate_summary,
                 diagnostic,
+                files_override: None,
             }
         }
     }
@@ -227,6 +234,7 @@ impl SourceError {
     pub fn emit(&self, files: &KnownFiles) {
         let writer = StandardStream::stderr(ColorChoice::Auto);
         let config = term::Config::default();
+        let files = self.files_override.as_deref().unwrap_or(files);
         term::emit(&mut writer.lock(), &config, files, &self.diagnostic)
             .expect("could not write to stderr");
     }
