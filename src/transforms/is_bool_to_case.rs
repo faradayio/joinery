@@ -34,6 +34,10 @@ impl IsBoolToCase {
 }
 
 impl Transform for IsBoolToCase {
+    fn name(&self) -> &'static str {
+        "IsBoolToCase"
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         sql_program.drive_mut(self.as_mut());
         Ok(TransformExtra::default())

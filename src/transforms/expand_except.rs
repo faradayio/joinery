@@ -98,6 +98,14 @@ impl ExpandExcept {
 }
 
 impl Transform for ExpandExcept {
+    fn name(&self) -> &'static str {
+        "ExpandExcept"
+    }
+
+    fn requires_types(&self) -> bool {
+        true
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         sql_program.drive_mut(self.as_mut());
         if let Some(error) = self.error {

@@ -173,12 +173,12 @@ impl Driver for TrinoDriver {
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
         vec![
             Box::new(transforms::ArraySelectToSubquery),
-            Box::new(transforms::CountifToCase),
-            Box::new(transforms::IndexFromOne),
-            Box::new(transforms::InUnnestToInSelect),
-            Box::new(transforms::IsBoolToCase),
             Box::new(transforms::QualifyToSubquery),
             Box::<transforms::ExpandExcept>::default(),
+            Box::new(transforms::InUnnestToInSelect),
+            Box::new(transforms::CountifToCase),
+            Box::new(transforms::IndexFromOne),
+            Box::new(transforms::IsBoolToCase),
             Box::new(transforms::OrReplaceToDropIfExists),
             Box::new(transforms::RenameFunctions::new(
                 &FUNCTION_NAMES,

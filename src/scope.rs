@@ -102,6 +102,14 @@ pub struct Scope {
 impl Scope {
     /// Create a new scope with no parent.
     pub fn root() -> ScopeHandle {
+        // Only build the root scope once, because it's moderately expensive.
+        static ROOT: once_cell::sync::Lazy<ScopeHandle> =
+            once_cell::sync::Lazy::new(Scope::build_root);
+        ROOT.clone()
+    }
+
+    /// Helper function for `root`.
+    fn build_root() -> ScopeHandle {
         let mut scope = Self {
             parent: None,
             names: BTreeMap::new(),

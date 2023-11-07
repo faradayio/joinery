@@ -1149,8 +1149,16 @@ fn contains_aggregate(scope: &ColumnSetScope, node: &ast::NodeVec<ast::SelectLis
 }
 
 /// A struct that we use to walk an AST looking for aggregate functions.
+///
+/// TODO: We probably need to be a lot more careful about sub-queries here.
+///
+/// TODO: We may want to have `trait ContainsAggregate` at some point.
 #[derive(Debug, Visitor)]
-#[visitor(ast::FunctionCall(enter))]
+#[visitor(
+    ast::ArrayAggExpression(enter),
+    ast::CountExpression(enter),
+    ast::FunctionCall(enter)
+)]
 struct ContainsAggregate<'scope> {
     scope: &'scope ColumnSetScope,
     contains_aggregate: bool,
@@ -1162,6 +1170,14 @@ impl<'scope> ContainsAggregate<'scope> {
             scope,
             contains_aggregate: false,
         }
+    }
+
+    fn enter_array_agg_expression(&mut self, _array_agg: &ast::ArrayAggExpression) {
+        self.contains_aggregate = true;
+    }
+
+    fn enter_count_expression(&mut self, _count: &ast::CountExpression) {
+        self.contains_aggregate = true;
     }
 
     fn enter_function_call(&mut self, fcall: &ast::FunctionCall) {

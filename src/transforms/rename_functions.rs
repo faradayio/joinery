@@ -65,6 +65,10 @@ impl RenameFunctions {
 }
 
 impl Transform for RenameFunctions {
+    fn name(&self) -> &'static str {
+        "RenameFunctions"
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         // Walk the AST, renaming functions and collecting UDFs.
         sql_program.drive_mut(self.as_mut());

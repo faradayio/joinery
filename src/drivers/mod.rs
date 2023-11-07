@@ -3,11 +3,13 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, str::FromStr};
 
 use async_trait::async_trait;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::{
     ast::{self, Emit, Target},
     errors::{format_err, Error, Result},
+    infer::InferTypes,
+    scope::Scope,
     transforms::{Transform, TransformExtra},
 };
 
@@ -146,6 +148,8 @@ pub trait Driver: Send + Sync + 'static {
     /// us to do less database-specific work in [`Emit::emit`], and more in the
     /// database drivers themselves. This can't change lexical syntax, but it
     /// can change the structure of the AST.
+    ///
+    /// Before calling this, we assume that you have already run type inference.
     fn rewrite_ast<'ast>(&self, ast: &'ast ast::SqlProgram) -> Result<RewrittenAst<'ast>> {
         let transforms = self.transforms();
         if transforms.is_empty() {
@@ -154,10 +158,18 @@ pub trait Driver: Send + Sync + 'static {
                 ast: Cow::Borrowed(ast),
             });
         } else {
+            // Start out assuming that we have types.
+            let mut has_types = true;
             let mut rewritten = ast.clone();
             let mut extra = TransformExtra::default();
             for transform in transforms {
+                trace!(transform = %transform.name(), input = %rewritten.emit_to_string(Target::BigQuery), "transforming");
+                if transform.requires_types() && !has_types {
+                    let scope = Scope::root();
+                    rewritten.infer_types(&scope)?;
+                }
                 extra.extend(transform.transform(&mut rewritten)?);
+                has_types = false;
             }
             Ok(RewrittenAst {
                 extra,

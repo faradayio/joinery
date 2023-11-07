@@ -9,6 +9,10 @@ pub struct CleanUpTempManually {
 }
 
 impl Transform for CleanUpTempManually {
+    fn name(&self) -> &'static str {
+        "CleanUpTempManually"
+    }
+
     fn transform(self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         let mut native_teardown_sql = vec![];
 

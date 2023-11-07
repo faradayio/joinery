@@ -13,6 +13,10 @@ use super::{Transform, TransformExtra};
 pub struct OrReplaceToDropIfExists;
 
 impl Transform for OrReplaceToDropIfExists {
+    fn name(&self) -> &'static str {
+        "OrReplaceToDropIfExists"
+    }
+
     fn transform(self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         let old_statements = sql_program.statements.take();
         for mut node_or_sep in old_statements {

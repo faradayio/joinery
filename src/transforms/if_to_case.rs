@@ -34,6 +34,10 @@ impl IfToCase {
 }
 
 impl Transform for IfToCase {
+    fn name(&self) -> &'static str {
+        "IfToCase"
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         sql_program.drive_mut(self.as_mut());
         Ok(TransformExtra::default())

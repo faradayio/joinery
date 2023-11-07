@@ -48,6 +48,10 @@ impl StandardizeCurrentDate {
 }
 
 impl Transform for StandardizeCurrentDate {
+    fn name(&self) -> &'static str {
+        "StandardizeCurrentDate"
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         sql_program.drive_mut(self.as_mut());
         Ok(TransformExtra::default())

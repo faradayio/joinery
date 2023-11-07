@@ -43,6 +43,18 @@ mod wrap_nested_queries;
 
 /// A transform that modifies an [`SqlProgram`].
 pub trait Transform {
+    /// A human-readable name for this transform.
+    fn name(&self) -> &'static str;
+
+    /// Does this transform require currently valid type information?
+    ///
+    /// This is sort of analogous to an LLVM analysis pass that can be
+    /// invalidated and recreated, except we can only perform a single type of
+    /// analysis.
+    fn requires_types(&self) -> bool {
+        false
+    }
+
     /// Apply this transform to an [`SqlProgram`].
     ///
     /// Returns a list of extra SQL statements that need to be executed before

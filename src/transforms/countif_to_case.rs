@@ -37,6 +37,10 @@ impl CountifToCase {
 }
 
 impl Transform for CountifToCase {
+    fn name(&self) -> &'static str {
+        "CountifToCase"
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         sql_program.drive_mut(self.as_mut());
         Ok(TransformExtra::default())

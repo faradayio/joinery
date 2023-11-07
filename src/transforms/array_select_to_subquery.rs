@@ -49,6 +49,14 @@ impl ArraySelectToSubquery {
 }
 
 impl Transform for ArraySelectToSubquery {
+    fn name(&self) -> &'static str {
+        "ArraySelectToSubquery"
+    }
+
+    fn requires_types(&self) -> bool {
+        true
+    }
+
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
         sql_program.drive_mut(self.as_mut());
         Ok(TransformExtra::default())
