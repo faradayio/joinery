@@ -19,6 +19,7 @@ pub use self::{
     index_from_zero::IndexFromZero,
     is_bool_to_case::IsBoolToCase,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
+    qualify_to_subquery::QualifyToSubquery,
     rename_functions::{RenameFunctions, Udf},
     standardize_current_date::StandardizeCurrentDate,
     wrap_nested_queries::WrapNestedQueries,
@@ -35,6 +36,7 @@ mod index_from_one;
 mod index_from_zero;
 mod is_bool_to_case;
 mod or_replace_to_drop_if_exists;
+mod qualify_to_subquery;
 mod rename_functions;
 mod standardize_current_date;
 mod wrap_nested_queries;

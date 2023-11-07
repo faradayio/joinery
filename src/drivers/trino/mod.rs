@@ -177,6 +177,7 @@ impl Driver for TrinoDriver {
             Box::new(transforms::IndexFromOne),
             Box::new(transforms::InUnnestToInSelect),
             Box::new(transforms::IsBoolToCase),
+            Box::new(transforms::QualifyToSubquery),
             Box::<transforms::ExpandExcept>::default(),
             Box::new(transforms::OrReplaceToDropIfExists),
             Box::new(transforms::RenameFunctions::new(

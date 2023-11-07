@@ -174,6 +174,11 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
         ArgumentType::Value(ValueType::Simple(SimpleType::Bool))
     }
 
+    /// Create an INT64 type.
+    pub fn int64() -> Self {
+        ArgumentType::Value(ValueType::Simple(SimpleType::Int64))
+    }
+
     /// Expect a [`ValueType`].
     pub fn expect_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {

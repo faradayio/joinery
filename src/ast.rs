@@ -714,6 +714,12 @@ impl Emit for SetOperator {
 /// A `SELECT` expression.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct SelectExpression {
+    /// Type information added later by inference.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    pub ty: Option<TableType>,
+
     pub select_options: SelectOptions,
     pub select_list: SelectList,
     pub from_clause: Option<FromClause>,
@@ -1303,7 +1309,7 @@ pub struct NullsClause {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct Limit {
     pub limit_token: Keyword,
-    pub value: Box<Expression>,
+    pub value: Literal,
 }
 
 /// A window frame clause.
@@ -1965,7 +1971,7 @@ peg::parser! {
                 }
             }
 
-        rule select_expression() -> SelectExpression
+        pub rule select_expression() -> SelectExpression
             = select_options:select_options()
               select_list:select_list()
               from_clause:from_clause()?
@@ -1977,6 +1983,7 @@ peg::parser! {
               limit:limit()?
             {
                 SelectExpression {
+                    ty: None,
                     select_options,
                     select_list,
                     from_clause,
@@ -2011,7 +2018,7 @@ peg::parser! {
                 SelectList { items }
             }
 
-        rule select_list_item() -> SelectListItem
+        pub rule select_list_item() -> SelectListItem
             = star:p("*") except:except()? {
                 SelectListItem::Wildcard { ty: None, star, except }
             }
@@ -2404,10 +2411,10 @@ peg::parser! {
             }
 
         rule limit() -> Limit
-            = limit_token:k("LIMIT") value:expression() {
+            = limit_token:k("LIMIT") value:literal() {
                 Limit {
                     limit_token,
-                    value: Box::new(value),
+                    value,
                 }
             }
 

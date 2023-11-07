@@ -1,7 +1,5 @@
--- pending: sqlite3 QUALIFY needs to be rewritten as subquery.
--- pending: trino QUALIFY needs to be rewritten as subquery.
---
--- QUALIFY
+-- QUALIFY has a portabe rewrite using a nested query, so we expect it to work
+-- everywhere.
 
 CREATE TEMP TABLE stores (id INT64, state STRING, sales INT64);
 INSERT INTO stores VALUES

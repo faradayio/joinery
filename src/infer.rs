@@ -285,17 +285,18 @@ impl InferTypes for ast::SelectExpression {
 
         trace!(sql = %self.emit_to_string(ast::Target::BigQuery), "inferring types");
         let ast::SelectExpression {
+            ty,
             //select_options,
             select_list: ast::SelectList {
                 items: select_list, ..
             },
             from_clause,
-            //where_clause,
+            where_clause,
             group_by,
-            //having,
-            //qualify,
-            //order_by,
-            //limit,
+            having,
+            qualify,
+            order_by,
+            limit,
             ..
         } = self;
 
@@ -306,6 +307,11 @@ impl InferTypes for ast::SelectExpression {
             Ok(ColumnSetScope::new_empty(scope))
         }?;
         trace!(columns = %column_set_scope.column_set(), "columns after FROM clause");
+
+        // Check our WHERE clause.
+        if let Some(where_clause) = where_clause {
+            where_clause.infer_types(&column_set_scope)?;
+        }
 
         // See if we have a GROUP BY clause.
         if let Some(group_by) = group_by {
@@ -319,6 +325,11 @@ impl InferTypes for ast::SelectExpression {
             column_set_scope =
                 column_set_scope.try_transform(|column_set| column_set.group_by(&[]))?;
             trace!(columns = %column_set_scope.column_set(), "columns after implicit GROUP BY");
+        }
+
+        // Check our HAVING clause.
+        if let Some(having) = having {
+            having.infer_types(&column_set_scope)?;
         }
 
         // Helper function to add columns from a table type to a list of columns.
@@ -383,6 +394,38 @@ impl InferTypes for ast::SelectExpression {
         }
         let table_type = TableType { columns: cols };
         trace!(table_type = %table_type, "select list type");
+
+        // Handle our QUALIFY clause.
+        if let Some(qualify) = qualify {
+            // BigQuery also allows us to see SELECT columns, but that's not
+            // easy to do using our portable rewrite.
+            qualify.infer_types(&column_set_scope)?;
+        }
+
+        // Handle our ORDER BY clause.
+        if let Some(order_by) = order_by {
+            // Make a new scope for ORDER BY, which can see columns from the
+            // FROM clause and SELECT list.
+            let scope = column_set_scope.clone().try_into_handle_for_subquery()?;
+            let mut scope = Scope::new(&scope);
+            for column in &table_type.columns {
+                if let Some(name) = &column.name {
+                    scope.add(
+                        Name::from(name.clone()),
+                        Type::Argument(column.ty.to_owned()),
+                    )?;
+                }
+            }
+            let scope = scope.into_handle();
+            order_by.infer_types(&ColumnSetScope::new_empty(&scope))?;
+        }
+
+        // Handle our LIMIT clause.
+        if let Some(limit) = limit {
+            limit.infer_types(&())?;
+        }
+
+        *ty = Some(table_type.clone());
         Ok(table_type)
     }
 }
@@ -478,6 +521,17 @@ impl InferTypes for ast::JoinOperation {
     }
 }
 
+impl InferTypes for ast::WhereClause {
+    type Scope = ColumnSetScope;
+    type Output = ();
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let ty = self.expression.infer_types(scope)?;
+        ty.expect_subtype_of(&ArgumentType::bool(), &self.expression)?;
+        Ok(())
+    }
+}
+
 impl InferTypes for ast::GroupBy {
     type Scope = ColumnSetScope;
     /// We output a list of names that can be used normally in the SELECT list.
@@ -512,13 +566,35 @@ impl InferTypes for ast::GroupBy {
     }
 }
 
+impl InferTypes for ast::Having {
+    type Scope = ColumnSetScope;
+    type Output = ();
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let ty = self.expression.infer_types(scope)?;
+        ty.expect_subtype_of(&ArgumentType::bool(), &self.expression)?;
+        Ok(())
+    }
+}
+
+impl InferTypes for ast::Qualify {
+    type Scope = ColumnSetScope;
+    type Output = ();
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let ty = self.expression.infer_types(scope)?;
+        ty.expect_subtype_of(&ArgumentType::bool(), &self.expression)?;
+        Ok(())
+    }
+}
+
 impl InferTypes for ast::Expression {
     type Scope = ColumnSetScope;
     type Output = ArgumentType;
 
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
-            ast::Expression::Literal(Literal { value, .. }) => value.infer_types(scope),
+            ast::Expression::Literal(Literal { value, .. }) => value.infer_types(&()),
             ast::Expression::BoolValue(_) => Ok(ArgumentType::bool()),
             ast::Expression::Null { .. } => Ok(ArgumentType::null()),
             ast::Expression::ColumnName(name) => name.infer_types(scope),
@@ -547,7 +623,7 @@ impl InferTypes for ast::Expression {
 }
 
 impl InferTypes for LiteralValue {
-    type Scope = ColumnSetScope;
+    type Scope = ();
     type Output = ArgumentType;
 
     fn infer_types(&mut self, _scope: &Self::Scope) -> Result<Self::Output> {
@@ -903,6 +979,17 @@ impl InferTypes for ast::OrderBy {
         for item in self.items.node_iter_mut() {
             item.expression.infer_types(scope)?;
         }
+        Ok(())
+    }
+}
+
+impl InferTypes for ast::Limit {
+    type Scope = ();
+    type Output = ();
+
+    fn infer_types(&mut self, _scope: &Self::Scope) -> Result<Self::Output> {
+        let ty = self.value.value.infer_types(&())?;
+        ty.expect_subtype_of(&ArgumentType::int64(), &self.value)?;
         Ok(())
     }
 }

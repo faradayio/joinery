@@ -645,11 +645,11 @@ impl ColumnSetScope {
                         name.to_name(),
                         SourceError::simple(
                             format!(
-                                "cannot use aggregate column {} in subquery",
+                                "cannot use aggregate column {} in subquery or ORDER BY clause",
                                 name.column.unescaped_bigquery()
                             ),
                             name.column.span(),
-                            "aggregate columns cannot be used in subqueries",
+                            "aggregate columns cannot be used here",
                         ),
                     );
                     continue;

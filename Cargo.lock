@@ -1215,6 +1215,7 @@ dependencies = [
  "phf",
  "pretty_assertions",
  "prusto",
+ "rand",
  "regex",
  "rusqlite",
  "serde",

@@ -14,6 +14,7 @@ mod tokenizer;
 mod transforms;
 mod types;
 mod unification;
+mod unique_names;
 mod util;
 
 use cmd::{
