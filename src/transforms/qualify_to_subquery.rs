@@ -2,7 +2,10 @@ use derive_visitor::{DriveMut, VisitorMut};
 use joinery_macros::sql_quote;
 
 use crate::{
-    ast::{self, Qualify, SelectExpression, SelectList, SelectListItem},
+    ast::{
+        self, FromClause, FromItem, Qualify, QueryExpression, QueryStatement, SelectExpression,
+        SelectList, SelectListItem,
+    },
     errors::Result,
     tokenizer::{Ident, Spanned},
     types::{ArgumentType, ColumnType},
@@ -58,7 +61,9 @@ impl QualifyToSubquery {
             // Make a copy of our SELECT expression.
             let nested_expr = expr.clone();
 
-            // Rewrite the original SELECT expression to be a subquery.
+            // Rewrite the original SELECT expression to be a subquery. The
+            // `#nested_expr` used here is a placeholder; we'll patch it up
+            // later with one that retains type information.
             let mut new_expr = sql_quote! {
                 SELECT * EXCEPT (#new_name)
                 FROM (#nested_expr)
@@ -68,10 +73,27 @@ impl QualifyToSubquery {
             .expect("should be valid SQL");
 
             // Patch up the type inference.
+            //
+            // TODO: Maybe we should just re-run type inference after this pass?
             let SelectExpression {
                 select_list: SelectList { items },
+                from_clause:
+                    Some(FromClause {
+                        from_item: FromItem::Subquery { query, .. },
+                        ..
+                    }),
                 ..
-            } = &mut new_expr;
+            } = &mut new_expr
+            else {
+                panic!("did not get expected SELECT expression");
+            };
+            let QueryStatement {
+                query_expression: QueryExpression::SelectExpression(new_nested_expr),
+            } = query.as_mut()
+            else {
+                panic!("did not get expected FROM clause");
+            };
+            *new_nested_expr = nested_expr;
             let Some(SelectListItem::Wildcard { ty, .. }) = items.node_iter_mut().next() else {
                 panic!("did not get expected SELECT list item");
             };
