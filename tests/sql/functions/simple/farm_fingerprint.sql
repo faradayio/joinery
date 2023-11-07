@@ -1,6 +1,8 @@
 -- pending: snowflake FARM_FINGERPRINT only exists on BigQuery
 -- pending: sqlite3 FARM_FINGERPRINT only exists on BigQuery
--- pending: trino FARM_FINGERPRINT only exists on BigQuery
+--
+-- This works on Trino if you load the UDF as described in `./java/README.md`.
+
 CREATE OR REPLACE TABLE __result1 AS
 SELECT
     FARM_FINGERPRINT('foo') AS str_farm,
