@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use derive_visitor::{Drive, Visitor};
 use tracing::trace;
 
 use crate::{
@@ -13,6 +12,10 @@ use crate::{
     types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
     unification::{UnificationTable, Unify},
 };
+
+use self::contains_aggregate::ContainsAggregate;
+
+mod contains_aggregate;
 
 // TODO: Remember this rather scary example. Verify BigQuery supports it
 // and that we need it.
@@ -319,7 +322,7 @@ impl InferTypes for ast::SelectExpression {
             column_set_scope = column_set_scope
                 .try_transform(|column_set| column_set.group_by(&group_by_names))?;
             trace!(columns = %column_set_scope.column_set(), "columns after GROUP BY");
-        } else if contains_aggregate(&column_set_scope, &*select_list) {
+        } else if select_list.contains_aggregate(&column_set_scope) {
             // If we have aggregates but no GROUP BY, we need to add a synthetic
             // GROUP BY of the empty set of columns.
             column_set_scope =
@@ -1136,69 +1139,6 @@ fn nyi(spanned: &dyn Spanned, name: &str) -> Error {
         spanned.span(),
         format!("not yet implemented: {}", name),
     )
-}
-
-/// Check an [`ast::Expression`] for aggregate functions.
-///
-/// This is used to detect implicit `GROUP BY` clauses, as in `SELECT SUM(x)
-/// FROM t`.
-fn contains_aggregate(scope: &ColumnSetScope, node: &ast::NodeVec<ast::SelectListItem>) -> bool {
-    let mut visitor = ContainsAggregate::new(scope);
-    node.drive(&mut visitor);
-    visitor.contains_aggregate
-}
-
-/// A struct that we use to walk an AST looking for aggregate functions.
-///
-/// TODO: We probably need to be a lot more careful about sub-queries here.
-///
-/// TODO: We may want to have `trait ContainsAggregate` at some point.
-#[derive(Debug, Visitor)]
-#[visitor(
-    ast::ArrayAggExpression(enter),
-    ast::CountExpression(enter),
-    ast::FunctionCall(enter)
-)]
-struct ContainsAggregate<'scope> {
-    scope: &'scope ColumnSetScope,
-    contains_aggregate: bool,
-}
-
-impl<'scope> ContainsAggregate<'scope> {
-    fn new(scope: &'scope ColumnSetScope) -> Self {
-        Self {
-            scope,
-            contains_aggregate: false,
-        }
-    }
-
-    fn enter_array_agg_expression(&mut self, _array_agg: &ast::ArrayAggExpression) {
-        self.contains_aggregate = true;
-    }
-
-    fn enter_count_expression(&mut self, _count: &ast::CountExpression) {
-        self.contains_aggregate = true;
-    }
-
-    fn enter_function_call(&mut self, fcall: &ast::FunctionCall) {
-        if self.contains_aggregate {
-            return;
-        }
-        if fcall.over_clause.is_some() {
-            // OVER clauses may contain aggregate functions, but they don't
-            // normally trigger an implicit GROUP BY.
-            return;
-        }
-        match self.scope.get_function_type(&fcall.name) {
-            Ok(func_ty) if func_ty.is_aggregate() => {
-                self.contains_aggregate = true;
-            }
-            _ => {
-                // If we're not sure what this function is, assume it's not an
-                // aggregate. We'll call `infer_types` later to check.
-            }
-        }
-    }
 }
 
 #[cfg(test)]
