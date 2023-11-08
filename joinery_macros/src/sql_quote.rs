@@ -64,9 +64,15 @@ fn emit_sql_token_exprs(
             }
             TokenTree::Ident(ident) => {
                 let ident_str = ident.to_string();
-                sql_token_exprs.push(quote_spanned! { ident_str.span() =>
-                    __tokens.push(Token::ident(#ident_str, Span::Unknown))
-                });
+                if let Some(ident_str) = ident_str.strip_prefix("r#") {
+                    sql_token_exprs.push(quote_spanned! { ident_str.span() =>
+                        __tokens.push(Token::quoted_ident(#ident_str, Span::Unknown))
+                    });
+                } else {
+                    sql_token_exprs.push(quote_spanned! { ident_str.span() =>
+                        __tokens.push(Token::ident(#ident_str, Span::Unknown))
+                    });
+                }
             }
             TokenTree::Punct(punct) => {
                 let punct_str = punct.to_string();

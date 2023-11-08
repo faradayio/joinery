@@ -190,6 +190,11 @@ impl Token {
         Self::Ident(Ident::new(ident, span))
     }
 
+    /// Construct a new quoted identifier token.
+    pub fn quoted_ident(ident: &str, span: Span) -> Self {
+        Self::Ident(Ident::new_quoted(ident, span))
+    }
+
     /// Construct a new punctuation token.
     pub fn punct(punct: &str, span: Span) -> Self {
         Self::Punct(Punct::new(punct, span))
@@ -375,10 +380,21 @@ pub struct Ident {
 }
 
 impl Ident {
-    /// Create a new `Ident` with no source location.
+    /// Create a new `Ident`.
     pub fn new(name: &str, span: Span) -> Self {
         Self {
             token: RawToken::new(name, span),
+            name: name.to_owned(),
+        }
+    }
+
+    /// Create a new quoted `Ident` that can't be mistaken for a keyword.
+    pub fn new_quoted(name: &str, span: Span) -> Self {
+        // Yes, the upper level parser tells these appart by looking at the
+        // uppercased `RawToken` and checking _that_ against the keyword list.
+        let quoted = format!("`{}`", name);
+        Self {
+            token: RawToken::new(&quoted, span),
             name: name.to_owned(),
         }
     }

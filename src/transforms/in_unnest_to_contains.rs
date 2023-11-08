@@ -8,22 +8,22 @@ use crate::{
 
 use super::{Transform, TransformExtra};
 
-/// Transform `val IN UNNEST(expr)` into `val IN (SELECT * FROM UNNEST(expr))`.
+/// Transform `val IN UNNEST(expr)` into `CONTAINS(expr, val)`.
 #[derive(VisitorMut)]
 #[visitor(Expression(enter))]
-pub struct InUnnestToInSelect;
+pub struct InUnnestToContains;
 
-impl InUnnestToInSelect {
+impl InUnnestToContains {
     fn enter_expression(&mut self, expr: &mut Expression) {
         if let Expression::In(InExpression {
             left,
             not_token,
-            in_token,
             value_set: InValueSet::Unnest { expression, .. },
+            ..
         }) = expr
         {
             let replacement = sql_quote! {
-                #left #not_token #in_token (SELECT * FROM UNNEST(#expression))
+                (#not_token r#CONTAINS(#expression, #left))
             }
             .try_into_expression()
             .expect("generated SQL should always parse");
@@ -32,7 +32,7 @@ impl InUnnestToInSelect {
     }
 }
 
-impl Transform for InUnnestToInSelect {
+impl Transform for InUnnestToContains {
     fn name(&self) -> &'static str {
         "InUnnestToInSelect"
     }

@@ -14,7 +14,7 @@ pub use self::{
     countif_to_case::CountifToCase,
     expand_except::ExpandExcept,
     if_to_case::IfToCase,
-    in_unnest_to_in_select::InUnnestToInSelect,
+    in_unnest_to_contains::InUnnestToContains,
     index_from_one::IndexFromOne,
     index_from_zero::IndexFromZero,
     is_bool_to_case::IsBoolToCase,
@@ -31,7 +31,7 @@ mod clean_up_temp_manually;
 mod countif_to_case;
 mod expand_except;
 mod if_to_case;
-mod in_unnest_to_in_select;
+mod in_unnest_to_contains;
 mod index_from_one;
 mod index_from_zero;
 mod is_bool_to_case;
