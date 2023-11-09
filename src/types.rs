@@ -22,7 +22,7 @@ use crate::{
     errors::{format_err, Error, Result},
     known_files::{FileId, KnownFiles},
     scope::{ColumnSet, ColumnSetColumn, ColumnSetColumnName},
-    tokenizer::{Ident, Span, Spanned},
+    tokenizer::{Ident, Keyword, PseudoKeyword, Punct, Span, Spanned},
     unification::{UnificationTable, Unify},
     util::is_c_ident,
 };
@@ -364,12 +364,11 @@ impl<TV: TypeVarSupport> ValueType<TV> {
             // an ARRAY<INT64> is not a subtype of ARRAY<FLOAT64>, as
             (ValueType::Array(SimpleType::Bottom), ValueType::Array(_)) => true,
 
-            // TODO: Structs with anonymous fields may be subtype of structs
-            // with named fields.
-
-            // TODO: Tables with unknown column names, built by `SELECT` and
-            // combined with `UNION`, may be subtypes of tables with known
-            // column names.
+            // Structs may be subtypes of other structs.
+            (
+                ValueType::Simple(SimpleType::Struct(a)),
+                ValueType::Simple(SimpleType::Struct(b)),
+            ) => a.is_subtype_of(b),
 
             // Otherwise, assume it isn't a subtype.
             _ => false,
@@ -414,6 +413,18 @@ impl<TV: TypeVarSupport> ValueType<TV> {
                 "no valid values",
             )),
             _ => Ok(()),
+        }
+    }
+
+    /// Expect this value type to be a struct type.
+    pub fn expect_struct_type(&self, spanned: &dyn Spanned) -> Result<&StructType<TV>> {
+        match self {
+            ValueType::Simple(SimpleType::Struct(s)) => Ok(s),
+            _ => Err(Error::annotated(
+                format!("expected struct type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
         }
     }
 }
@@ -512,6 +523,22 @@ impl Unify for ValueType<TypeVar> {
                 .cloned(),
             ValueType::Simple(t) => Ok(ValueType::Simple(t.resolve(table, spanned)?)),
             ValueType::Array(t) => Ok(ValueType::Array(t.resolve(table, spanned)?)),
+        }
+    }
+}
+
+impl TryFrom<ValueType> for ast::DataType {
+    type Error = Error;
+
+    fn try_from(value: ValueType) -> Result<Self> {
+        match value {
+            ValueType::Simple(t) => t.try_into(),
+            ValueType::Array(t) => Ok(ast::DataType::Array {
+                array_token: Keyword::new("ARRAY", Span::Unknown),
+                lt: Punct::new("<", Span::Unknown),
+                data_type: Box::new(t.try_into()?),
+                gt: Punct::new(">", Span::Unknown),
+            }),
         }
     }
 }
@@ -668,10 +695,76 @@ impl<TV: TypeVarSupport> fmt::Display for SimpleType<TV> {
     }
 }
 
+impl TryFrom<SimpleType> for ast::DataType {
+    type Error = Error;
+
+    fn try_from(value: SimpleType) -> Result<Self> {
+        let pk = |s| PseudoKeyword::new(s, Span::Unknown);
+        match value {
+            SimpleType::Bool => Ok(ast::DataType::Bool(pk("BOOL"))),
+            SimpleType::Bottom => Err(format_err!(
+                "cannot convert unknown type to a printable type"
+            )),
+            SimpleType::Bytes => Ok(ast::DataType::Bytes(pk("BYTES"))),
+            SimpleType::Date => Ok(ast::DataType::Date(pk("DATE"))),
+            SimpleType::Datepart => Err(format_err!(
+                "cannot convert datepart type to a printable type"
+            )),
+            SimpleType::Datetime => Ok(ast::DataType::Datetime(pk("DATETIME"))),
+            SimpleType::Float64 => Ok(ast::DataType::Float64(pk("FLOAT64"))),
+            SimpleType::Geography => Ok(ast::DataType::Geography(pk("GEOGRAPHY"))),
+            SimpleType::Int64 => Ok(ast::DataType::Int64(pk("INT64"))),
+            SimpleType::Interval => Err(format_err!(
+                "cannot convert interval type to a printable type"
+            )),
+            SimpleType::Null => Err(format_err!(
+                "cannot convert unknown type to a printable type"
+            )),
+            SimpleType::Numeric => Ok(ast::DataType::Numeric(pk("NUMERIC"))),
+            SimpleType::String => Ok(ast::DataType::String(pk("STRING"))),
+            SimpleType::Time => Ok(ast::DataType::Time(pk("TIME"))),
+            SimpleType::Timestamp => Ok(ast::DataType::Timestamp(pk("TIMESTAMP"))),
+            SimpleType::Struct(s) => s.try_into(),
+            SimpleType::Parameter(_) => {
+                unreachable!("SimpleType::Parameter should contain no values")
+            }
+        }
+    }
+}
+
 /// A struct type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     pub fields: Vec<StructElementType<TV>>,
+}
+
+impl<TV: TypeVarSupport> StructType<TV> {
+    /// Is this a subtype of `other`?
+    pub fn is_subtype_of(&self, other: &StructType<TV>) -> bool {
+        // We are a subtype of `other` if we have the same fields, and each of
+        // our fields is a subtype of the corresponding field in `other`.
+        if self.fields.len() != other.fields.len() {
+            return false;
+        }
+        for (a, b) in self.fields.iter().zip(&other.fields) {
+            if !a.is_subtype_of(b) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Return an error if we are not a subtype of `other`.
+    pub fn expect_subtype_of(&self, other: &StructType<TV>, spanned: &dyn Spanned) -> Result<()> {
+        if !self.is_subtype_of(other) {
+            return Err(Error::annotated(
+                format!("expected {}, found {}", other, self),
+                spanned.span(),
+                "type mismatch",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Unify for StructType<TypeVar> {
@@ -705,6 +798,23 @@ impl Unify for StructType<TypeVar> {
     }
 }
 
+impl TryFrom<StructType> for ast::DataType {
+    type Error = Error;
+
+    fn try_from(value: StructType) -> Result<Self> {
+        let mut fields = ast::NodeVec::new(",");
+        for field in value.fields {
+            fields.push(field.try_into()?);
+        }
+        Ok(ast::DataType::Struct {
+            struct_token: Keyword::new("STRUCT", Span::Unknown),
+            lt: Punct::new("<", Span::Unknown),
+            fields,
+            gt: Punct::new(">", Span::Unknown),
+        })
+    }
+}
+
 impl<TV: TypeVarSupport> fmt::Display for StructType<TV> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "STRUCT<")?;
@@ -724,6 +834,36 @@ impl<TV: TypeVarSupport> fmt::Display for StructType<TV> {
 pub struct StructElementType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     pub name: Option<Ident>,
     pub ty: ValueType<TV>,
+}
+
+impl<TV: TypeVarSupport> StructElementType<TV> {
+    /// Is this a subtype of `other`?
+    pub fn is_subtype_of(&self, other: &StructElementType<TV>) -> bool {
+        // We are a subtype of `other` if we have the same name, or if we have
+        // no name and `other` has a name.
+        //
+        // TODO: We may need to refine this carefully to match the expected
+        // behavior. Some of these combinations can't occur in the `STRUCT(..)`
+        // syntax, because it doesn't allow `STRUCT<..>(..) to use `AS`.
+        self.ty.is_subtype_of(&other.ty)
+            && match (&self.name, &other.name) {
+                (Some(a), Some(b)) => a == b,
+                (None, Some(_)) => true,
+                (None, None) => true,
+                (Some(_), None) => false,
+            }
+    }
+}
+
+impl TryFrom<StructElementType> for ast::StructField {
+    type Error = Error;
+
+    fn try_from(value: StructElementType) -> Result<Self> {
+        Ok(ast::StructField {
+            name: value.name,
+            data_type: value.ty.try_into()?,
+        })
+    }
 }
 
 impl<TV: TypeVarSupport> fmt::Display for StructElementType<TV> {

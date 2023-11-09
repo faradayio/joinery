@@ -40,7 +40,7 @@ use crate::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
         RawToken, Span, Spanned, ToTokens, Token, TokenStream, TokenWriter,
     },
-    types::TableType,
+    types::{StructType, TableType},
     util::{is_c_ident, AnsiIdent, AnsiString},
 };
 
@@ -1173,6 +1173,14 @@ impl Emit for ArrayExpression {
     }
 }
 
+/// The type of the elements in an `ARRAY` expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct ArrayElementType {
+    pub lt: Punct,
+    pub elem_type: DataType,
+    pub gt: Punct,
+}
+
 /// An `ARRAY` definition. Either a `SELECT` expression or a list of
 /// expressions.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
@@ -1205,19 +1213,61 @@ pub struct ArraySelectExpression {
 }
 
 /// A struct expression.
-#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
 pub struct StructExpression {
+    /// Type information added later by inference.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    pub ty: Option<StructType>,
+
     pub struct_token: Keyword,
+    pub field_decls: Option<StructFieldDeclarations>,
     pub paren1: Punct,
     pub fields: SelectList,
     pub paren2: Punct,
 }
 
-/// The type of the elements in an `ARRAY` expression.
+impl Emit for StructExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
+        match t {
+            Target::Trino => {
+                f.write_token_start("CAST(")?;
+                self.struct_token.ident.token.with_str("ROW").emit(t, f)?;
+                self.paren1.emit(t, f)?;
+                // Loop over fields, emitting them without any aliases.
+                for (i, item) in self.fields.items.node_iter().enumerate() {
+                    if i > 0 {
+                        f.write_token_start(", ")?;
+                    }
+                    match item {
+                        SelectListItem::Expression { expression, .. } => {
+                            expression.emit(t, f)?;
+                        }
+                        _ => panic!("Unexpected select list item (should have been caught by type checker): {:?}", item),
+                    }
+                }
+                self.paren2.emit(t, f)?;
+                f.write_token_start("AS")?;
+                let ty = self
+                    .ty
+                    .as_ref()
+                    .expect("type should have been added by type checker");
+                let data_type = DataType::try_from(ty.clone())
+                    .expect("should be able to print data type of ROW");
+                data_type.emit(t, f)?;
+                f.write_token_start(")")
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
+/// Fields declared by a `STRUCT<..>(..)` expression.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
-pub struct ArrayElementType {
+pub struct StructFieldDeclarations {
     pub lt: Punct,
-    pub elem_type: DataType,
+    pub fields: NodeVec<StructField>,
     pub gt: Punct,
 }
 
@@ -2353,6 +2403,11 @@ peg::parser! {
                 }
               }
 
+        rule array_element_type() -> ArrayElementType
+            = lt:p("<") elem_type:data_type() gt:p(">") {
+                ArrayElementType { lt, elem_type, gt }
+            }
+
         rule array_definition() -> ArrayDefinition
             = select:array_select_expression() { ArrayDefinition::Query { select: Box::new(select) } }
             / expressions:sep(<expression()>, ",") { ArrayDefinition::Elements(expressions) }
@@ -2378,18 +2433,22 @@ peg::parser! {
             }
 
         rule struct_expression() -> StructExpression
-            = struct_token:k("STRUCT") paren1:p("(") fields:select_list() paren2:p(")") {
+            = struct_token:k("STRUCT") field_decls:struct_field_declarations()?
+              paren1:p("(") fields:select_list() paren2:p(")")
+            {
                 StructExpression {
+                    ty: None,
                     struct_token,
+                    field_decls,
                     paren1,
                     fields,
                     paren2,
                 }
             }
 
-        rule array_element_type() -> ArrayElementType
-            = lt:p("<") elem_type:data_type() gt:p(">") {
-                ArrayElementType { lt, elem_type, gt }
+        rule struct_field_declarations() -> StructFieldDeclarations
+            = lt:p("<") fields:sep(<struct_field()>, ",") gt:p(">") {
+                StructFieldDeclarations { lt, fields, gt }
             }
 
         rule count_expression() -> CountExpression

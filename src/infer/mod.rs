@@ -8,8 +8,11 @@ use crate::{
     ast::{self, ConditionJoinOperator, Emit, Expression, Name},
     errors::{Error, Result},
     scope::{ColumnSet, ColumnSetScope, Scope, ScopeGet, ScopeHandle},
-    tokenizer::{Ident, Literal, LiteralValue, Spanned},
-    types::{ArgumentType, ColumnType, SimpleType, TableType, Type, Unnested, ValueType},
+    tokenizer::{Ident, Keyword, Literal, LiteralValue, Punct, Spanned},
+    types::{
+        ArgumentType, ColumnType, ResolvedTypeVarsOnly, SimpleType, StructElementType, StructType,
+        TableType, Type, Unnested, ValueType,
+    },
     unification::{UnificationTable, Unify},
 };
 
@@ -649,6 +652,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(&()),
             ast::Expression::BoolValue(_) => Ok(ArgumentType::bool()),
             ast::Expression::Null { .. } => Ok(ArgumentType::null()),
+            ast::Expression::Interval(_) => Err(nyi(self, "INTERVAL expression")),
             ast::Expression::ColumnName(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
             ast::Expression::Is(is) => is.infer_types(scope),
@@ -665,11 +669,13 @@ impl InferTypes for ast::Expression {
             }
             ast::Expression::Parens { expression, .. } => expression.infer_types(scope),
             ast::Expression::Array(array) => array.infer_types(scope),
+            ast::Expression::Struct(struct_expr) => struct_expr.infer_types(scope),
             ast::Expression::Count(count) => count.infer_types(scope),
+            ast::Expression::CurrentDate(_) => Err(nyi(self, "CURRENT_DATE expression")),
             ast::Expression::ArrayAgg(array_agg) => array_agg.infer_types(scope),
+            ast::Expression::SpecialDateFunctionCall(_) => Err(nyi(self, "special date function")),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::Index(index) => index.infer_types(scope),
-            _ => Err(nyi(self, "expression")),
         }
     }
 }
@@ -970,6 +976,83 @@ impl InferTypes for ast::ArrayDefinition {
                 Ok(elem_ty)
             }
         }
+    }
+}
+
+impl InferTypes for ast::StructExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let ast::StructExpression {
+            ty,
+            struct_token,
+            field_decls,
+            fields,
+            ..
+        } = self;
+
+        // Infer our struct type from the field expressions.
+        let mut field_types = vec![];
+        for field in fields.items.node_iter_mut() {
+            if let ast::SelectListItem::Expression { expression, alias } = field {
+                let field_ty = expression.infer_types(scope)?;
+                let field_ty = field_ty.expect_value_type(expression)?;
+                let ident = alias
+                    .clone()
+                    .map(|a| a.ident)
+                    .or_else(|| expression.infer_column_name());
+                field_types.push(StructElementType {
+                    name: ident,
+                    ty: field_ty.clone(),
+                });
+            } else {
+                // We could forbid this in the grammar if we were less lazy.
+                return Err(Error::annotated(
+                    "struct field must be expression, not wildcard",
+                    field.span(),
+                    "expression required",
+                ));
+            }
+        }
+        let actual_ty = StructType {
+            fields: field_types,
+        };
+
+        // If we have `field_decls`, use those to build our official type.
+        let return_ty = if let Some(field_decls) = field_decls {
+            let expected_ty =
+                ValueType::<ResolvedTypeVarsOnly>::try_from(&ast::DataType::Struct {
+                    struct_token: Keyword::new("STRUCT", struct_token.span()),
+                    lt: Punct::new("<", field_decls.lt.span()),
+                    fields: field_decls.fields.clone(),
+                    gt: Punct::new(">", field_decls.gt.span()),
+                })?;
+            let expected_ty = expected_ty.expect_struct_type(field_decls)?;
+            actual_ty.expect_subtype_of(expected_ty, field_decls)?;
+            expected_ty.clone()
+        } else {
+            actual_ty
+        };
+
+        *ty = Some(return_ty.clone());
+        if return_ty
+            .fields
+            .iter()
+            .any(|f| f.ty == ValueType::Simple(SimpleType::Null))
+        {
+            return Err(Error::annotated(
+                format!(
+                    "NULL column in {}, try STRUCT<col1 type1, ..>(..)",
+                    return_ty
+                ),
+                struct_token.span(),
+                "contains a NULL field",
+            ));
+        }
+        let return_ty = ValueType::Simple(SimpleType::Struct(return_ty));
+        return_ty.expect_inhabited(field_decls)?;
+        Ok(ArgumentType::Value(return_ty))
     }
 }
 
