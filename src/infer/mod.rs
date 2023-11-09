@@ -9,7 +9,7 @@ use crate::{
     errors::{Error, Result},
     scope::{ColumnSet, ColumnSetScope, Scope, ScopeGet, ScopeHandle},
     tokenizer::{Ident, Literal, LiteralValue, Spanned},
-    types::{ArgumentType, ColumnType, SimpleType, TableType, Type, ValueType},
+    types::{ArgumentType, ColumnType, SimpleType, TableType, Type, Unnested, ValueType},
     unification::{UnificationTable, Unify},
 };
 
@@ -289,7 +289,7 @@ impl InferTypes for ast::SelectExpression {
         trace!(sql = %self.emit_to_string(ast::Target::BigQuery), "inferring types");
         let ast::SelectExpression {
             ty,
-            //select_options,
+            select_options: _,
             select_list: ast::SelectList {
                 items: select_list, ..
             },
@@ -300,7 +300,6 @@ impl InferTypes for ast::SelectExpression {
             qualify,
             order_by,
             limit,
-            ..
         } = self;
 
         // See if we have a FROM clause.
@@ -433,6 +432,33 @@ impl InferTypes for ast::SelectExpression {
     }
 }
 
+impl InferTypes for ast::ArraySelectExpression {
+    type Scope = ScopeHandle;
+    // Return the element type of the array.
+    type Output = SimpleType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let ast::ArraySelectExpression {
+            select_options: _,
+            expression,
+            from_token: _,
+            unnest,
+            alias,
+            where_clause,
+        } = self;
+
+        let alias = alias.ident.clone();
+        let column_set = unnest.infer_types(&(ColumnSetScope::new_empty(scope), Some(alias)))?;
+        let scope = ColumnSetScope::new(scope, column_set);
+        let elem_type = expression.infer_types(&scope)?;
+        let elem_type = elem_type.expect_simple_type(expression)?;
+        if let Some(where_clause) = where_clause {
+            where_clause.infer_types(&scope)?;
+        }
+        Ok(elem_type.clone())
+    }
+}
+
 impl InferTypes for ast::FromClause {
     type Scope = ScopeHandle;
     type Output = ColumnSetScope;
@@ -452,41 +478,64 @@ impl InferTypes for ast::FromItem {
     type Output = ColumnSetScope;
 
     fn infer_types(&mut self, (outer_scope, scope): &Self::Scope) -> Result<Self::Output> {
-        match self {
-            ast::FromItem::TableName { table_name, alias } => {
-                let table_type = outer_scope.get_table_type(table_name)?;
-                let name = match alias {
-                    Some(alias) => alias.ident.clone().into(),
-                    None => table_name.clone(),
-                };
-
-                let column_set = ColumnSet::from_table(Some(name), table_type);
+        // We need to handle `UNNEST(..)` specially because it interacts with
+        // our alias.
+        match &mut self.table_expression {
+            ast::FromTableExpression::Unnest(unnest) => {
+                let unnest_scope = (scope.clone(), self.alias.clone().map(|a| a.ident));
+                let column_set = unnest.infer_types(&unnest_scope)?;
                 Ok(ColumnSetScope::new(outer_scope, column_set))
             }
-            ast::FromItem::Subquery { query, alias, .. } => {
-                let table_type = query.infer_types(outer_scope)?;
-                let name = alias.clone().map(|alias| alias.ident.into());
+            _ => {
+                // TODO: Do we want `outer_scope` here?
+                let (name, table_type) = self.table_expression.infer_types(outer_scope)?;
+                let alias = self.alias.as_ref().map(ast::Alias::name);
+                let name = alias.or(name);
                 let column_set = ColumnSet::from_table(name, table_type);
                 Ok(ColumnSetScope::new(outer_scope, column_set))
             }
-            ast::FromItem::Unnest {
-                expression, alias, ..
-            } => {
-                let array_ty = expression.infer_types(scope)?;
-                let array_ty = array_ty.expect_array_type(expression)?;
-                let mut table_ty = array_ty.unnest(expression)?;
-                if array_ty.unnests_to_anonymous_column() {
-                    // If we have an alias, use it as our single column's name. Leave the table anonymous.
-                    table_ty.columns[0].name = alias.as_ref().map(|alias| alias.ident.clone());
-                    let column_set = ColumnSet::from_table(None, table_ty);
-                    Ok(ColumnSetScope::new(outer_scope, column_set))
-                } else {
-                    // We have a multi-column output table. Use the alias as the table name.
-                    let name = alias.clone().map(|alias| alias.ident.into());
-                    let column_set = ColumnSet::from_table(name, table_ty);
-                    Ok(ColumnSetScope::new(outer_scope, column_set))
-                }
+        }
+    }
+}
+
+impl InferTypes for ast::FromTableExpression {
+    type Scope = ScopeHandle;
+    type Output = (Option<Name>, TableType);
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        match self {
+            ast::FromTableExpression::TableName(table_name) => {
+                let table_type = scope.get_table_type(table_name)?;
+                Ok((Some(table_name.clone()), table_type))
             }
+            ast::FromTableExpression::Subquery { query, .. } => {
+                let table_type = query.infer_types(scope)?;
+                Ok((None, table_type))
+            }
+            ast::FromTableExpression::Unnest(_) => {
+                // This interracts with the alias handling in `FromItem`.
+                panic!("UnnestExpression should be handled by FromItem")
+            }
+        }
+    }
+}
+
+impl InferTypes for ast::UnnestExpression {
+    type Scope = (ColumnSetScope, Option<Ident>);
+    type Output = ColumnSet;
+
+    fn infer_types(&mut self, (scope, name): &Self::Scope) -> Result<Self::Output> {
+        let array_ty = self.expression.infer_types(scope)?;
+        let array_ty = array_ty.expect_array_type(&self.expression)?;
+        match array_ty.unnest(&self.expression)? {
+            Unnested::AnonymousColumn(mut table_ty) => {
+                table_ty.columns[0].name = name.clone();
+                Ok(ColumnSet::from_table(None, table_ty))
+            }
+            Unnested::NamedColumns(table_ty) => Ok(ColumnSet::from_table(
+                name.clone().map(Name::from),
+                table_ty,
+            )),
         }
     }
 }
@@ -760,7 +809,7 @@ impl InferTypes for ast::InValueSet {
                 let array_ty = expression.infer_types(scope)?;
                 let array_ty = array_ty.expect_array_type(expression)?;
                 let table_ty = array_ty.unnest(expression)?;
-                Ok(table_ty)
+                Ok(table_ty.into())
             }
         }
     }
@@ -907,20 +956,9 @@ impl InferTypes for ast::ArrayDefinition {
     /// Infer the **element type** of the array.
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         match self {
-            ast::ArrayDefinition::Query { ty, query } => {
-                let table_ty = query.infer_types(&scope.clone().try_into_handle_for_subquery()?)?;
-                *ty = Some(table_ty.clone());
-                let elem_ty = table_ty.expect_one_column(query)?.ty.clone();
-                if table_ty.columns[0].name.is_none() {
-                    // If we have an anonymous column, we can't rewrite
-                    // ARRAY(SELECT ..) into something more portable.
-                    return Err(Error::annotated(
-                        "column in ARRAY(SELECT ..) must be named",
-                        query.span(),
-                        "anonymous column",
-                    ));
-                }
-                Ok(elem_ty)
+            ast::ArrayDefinition::Query { select } => {
+                let elem_ty = select.infer_types(&scope.clone().try_into_handle_for_subquery()?)?;
+                Ok(ArgumentType::Value(ValueType::Simple(elem_ty)))
             }
             ast::ArrayDefinition::Elements(exprs) => {
                 // We can use infer_call if we're careful.

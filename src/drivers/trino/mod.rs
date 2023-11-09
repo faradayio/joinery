@@ -173,7 +173,6 @@ impl Driver for TrinoDriver {
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
         vec![
-            Box::new(transforms::ArraySelectToSubquery),
             Box::new(transforms::QualifyToSubquery),
             Box::<transforms::ExpandExcept>::default(),
             Box::new(transforms::InUnnestToContains),

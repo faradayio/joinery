@@ -68,7 +68,7 @@ impl Span {
     pub fn from_line_col(file_id: FileId, line_col: LineCol) -> Self {
         Span::File {
             file_id,
-            span: line_col.column..line_col.column,
+            span: line_col.offset..line_col.offset,
         }
     }
 

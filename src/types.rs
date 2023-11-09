@@ -313,6 +313,24 @@ impl<TV: TypeVarSupport> fmt::Display for ArgumentType<TV> {
     }
 }
 
+/// An unnested [`ValueType`].
+#[derive(Clone, Debug)]
+pub enum Unnested {
+    /// This type unnests to a single anonymous column.
+    AnonymousColumn(TableType),
+    /// This type unnests to a table with named columns.
+    NamedColumns(TableType),
+}
+
+impl From<Unnested> for TableType {
+    fn from(unnested: Unnested) -> Self {
+        match unnested {
+            Unnested::AnonymousColumn(t) => t,
+            Unnested::NamedColumns(t) => t,
+        }
+    }
+}
+
 /// A value type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
@@ -401,26 +419,15 @@ impl<TV: TypeVarSupport> ValueType<TV> {
 }
 
 impl ValueType<ResolvedTypeVarsOnly> {
-    /// Does this type unnest to a single anonymous column?
-    ///
-    /// This should match the behavior of [`Self::unnest`].
-    pub fn unnests_to_anonymous_column(&self) -> bool {
-        match self {
-            ValueType::Array(SimpleType::Struct(_)) => false,
-            ValueType::Array(_) => true,
-            _ => false,
-        }
-    }
-
     /// Unnest an array type into a table type, according to [Google's rules][unnest].
     ///
     /// [unnest]: https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#unnest_operator
-    pub fn unnest(&self, spanned: &dyn Spanned) -> Result<TableType> {
+    pub fn unnest(&self, spanned: &dyn Spanned) -> Result<Unnested> {
         match self {
             // Structs unnest to tables with the same columns.
             //
             // TODO: JSON, too, if we ever support it.
-            ValueType::Array(SimpleType::Struct(s)) => Ok(TableType {
+            ValueType::Array(SimpleType::Struct(s)) => Ok(Unnested::NamedColumns(TableType {
                 columns: s
                     .fields
                     .iter()
@@ -430,15 +437,15 @@ impl ValueType<ResolvedTypeVarsOnly> {
                         not_null: false,
                     })
                     .collect(),
-            }),
+            })),
             // Other types unnest to tables with a single anonymous column.
-            ValueType::Array(elem_ty) => Ok(TableType {
+            ValueType::Array(elem_ty) => Ok(Unnested::AnonymousColumn(TableType {
                 columns: vec![ColumnType {
                     name: None,
                     ty: ArgumentType::Value(ValueType::Simple(elem_ty.clone())),
                     not_null: false,
                 }],
-            }),
+            })),
             _ => Err(Error::annotated(
                 "cannot unnest a non-array",
                 spanned.span(),

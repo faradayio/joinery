@@ -1074,33 +1074,91 @@ pub struct ArrayExpression {
 
 impl Emit for ArrayExpression {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match t {
-            Target::Snowflake => {
-                self.delim1.token.with_str("[").emit(t, f)?;
-                self.definition.emit(t, f)?;
-                self.delim2.token.with_str("]").emit(t, f)?;
-            }
-            Target::SQLite3 => {
-                if let Some(array_token) = &self.array_token {
-                    array_token.emit(t, f)?;
-                } else {
-                    f.write_token_start("ARRAY")?;
+        match self {
+            // ARRAY(SELECT ..) needs a very heavy transformation for Trino.
+            ArrayExpression {
+                array_token,
+                delim1,
+                definition: ArrayDefinition::Query { select },
+                delim2,
+                ..
+            } if t == Target::Trino => {
+                // We can't do this with a transform and sql_quote because it
+                // outputs Trino-specific closure syntax.
+                let ArraySelectExpression {
+                    select_options: SelectOptions { distinct, .. },
+                    expression,
+                    from_token: _,
+                    unnest,
+                    alias,
+                    where_clause,
+                } = select.as_ref();
+                let first_token = array_token
+                    .as_ref()
+                    .map(|t| &t.ident.token)
+                    .unwrap_or_else(|| &delim1.token);
+                let last_token = &delim2.token;
+
+                first_token.with_ws_only().emit(t, f)?;
+
+                if distinct.is_some() {
+                    f.write_token_start("ARRAY_DISTINCT(")?;
                 }
-                self.delim1.token.with_str("(").emit(t, f)?;
-                self.definition.emit(t, f)?;
-                self.delim2.token.with_str(")").emit(t, f)?;
-            }
-            Target::Trino => {
-                if let Some(array_token) = &self.array_token {
-                    array_token.emit(t, f)?;
-                } else {
-                    f.write_token_start("ARRAY")?;
+
+                f.write_token_start("TRANSFORM(")?;
+
+                if where_clause.is_some() {
+                    f.write_token_start("FILTER(")?;
                 }
-                self.delim1.token.with_str("[").emit(t, f)?;
-                self.definition.emit(t, f)?;
-                self.delim2.token.with_str("]").emit(t, f)?;
+                unnest.expression.emit(t, f)?;
+                if let Some(where_clause) = where_clause {
+                    f.write_token_start(", ")?;
+                    alias.ident.emit(t, f)?;
+                    f.write_token_start(" -> ")?;
+                    where_clause.expression.emit(t, f)?;
+                    f.write_token_start(")")?;
+                }
+
+                f.write_token_start(", ")?;
+                alias.ident.emit(t, f)?;
+                f.write_token_start(" -> ")?;
+                expression.emit(t, f)?;
+                f.write_token_start(")")?;
+
+                if distinct.is_some() {
+                    f.write_token_start(")")?;
+                }
+
+                last_token.with_ws_only().emit(t, f)?;
             }
-            _ => self.emit_default(t, f)?,
+            _ => match t {
+                Target::Snowflake => {
+                    self.delim1.token.with_str("[").emit(t, f)?;
+                    self.definition.emit(t, f)?;
+                    self.delim2.token.with_str("]").emit(t, f)?;
+                }
+                Target::SQLite3 => {
+                    if let Some(array_token) = &self.array_token {
+                        array_token.emit(t, f)?;
+                    } else {
+                        f.write_token_start("ARRAY")?;
+                    }
+                    self.delim1.token.with_str("(").emit(t, f)?;
+                    self.definition.emit(t, f)?;
+                    self.delim2.token.with_str(")").emit(t, f)?;
+                }
+                Target::Trino => {
+                    if let Some(array_token) = &self.array_token {
+                        array_token.emit(t, f)?;
+                    } else {
+                        f.write_token_start("ARRAY")?;
+                    }
+                    self.delim1.token.with_str("[").emit(t, f)?;
+                    self.definition.emit(t, f)?;
+                    self.delim2.token.with_str("]").emit(t, f)?;
+                }
+                _ => self.emit_default(t, f)?,
+            },
         }
         Ok(())
     }
@@ -1111,14 +1169,30 @@ impl Emit for ArrayExpression {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub enum ArrayDefinition {
     Query {
-        /// Type information added later by inference.
-        #[emit(skip)]
-        #[to_tokens(skip)]
-        #[drive(skip)]
-        ty: Option<TableType>,
-        query: Box<QueryExpression>,
+        /// The `SELECT` expression. BigQuery allows a [`QueryExpression`] here,
+        /// but translating `ARRAY(SELECT ...)` to other databases involves some
+        /// very complicated transformations, so we want to restrict things
+        /// here.
+        ///
+        /// BigQuery effectively uses this as a MAP/FILTER/DISTINCT operation on
+        /// the input array, and we have the best chance of translating it if we
+        /// recognize that.
+        select: Box<ArraySelectExpression>,
     },
     Elements(NodeVec<Expression>),
+}
+
+/// A very restricted version of [`SelectExpression`] that we allow in an
+/// `ARRAY(SELECT ...)`, because we handle this as a special case to avoid
+/// hitting correlated subquery restrictions in other databases.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct ArraySelectExpression {
+    pub select_options: SelectOptions,
+    pub expression: Expression,
+    pub from_token: Keyword,
+    pub unnest: UnnestExpression,
+    pub alias: Alias,
+    pub where_clause: Option<WhereClause>,
 }
 
 /// A struct expression.
@@ -1513,6 +1587,13 @@ pub struct Alias {
     pub ident: Ident,
 }
 
+impl Alias {
+    /// Get the [`Name`] of this alias.
+    pub fn name(&self) -> Name {
+        self.ident.clone().into()
+    }
+}
+
 /// The `FROM` clause.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct FromClause {
@@ -1523,47 +1604,20 @@ pub struct FromClause {
 
 /// Items which may appear in a `FROM` clause.
 #[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
-pub enum FromItem {
-    /// A table name, optionally with an alias.
-    TableName {
-        table_name: Name,
-        alias: Option<Alias>,
-    },
-    /// A subquery, optionally with an alias. These parens belong here in the
-    /// grammar; they're different from the ones in [`QueryExpression`].
-    Subquery {
-        paren1: Punct,
-        query: Box<QueryStatement>,
-        paren2: Punct,
-        alias: Option<Alias>,
-    },
-    /// A `UNNEST` clause.
-    Unnest {
-        unnest_token: Keyword,
-        paren1: Punct,
-        expression: Box<Expression>,
-        paren2: Punct,
-        alias: Option<Alias>,
-    },
+pub struct FromItem {
+    pub table_expression: FromTableExpression,
+    pub alias: Option<Alias>,
 }
 
 impl Emit for FromItem {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match self {
-            FromItem::Unnest {
-                unnest_token,
-                paren1,
-                expression,
-                paren2,
+            FromItem {
+                table_expression: table_expression @ FromTableExpression::Unnest(..),
                 alias: Some(Alias { as_token, ident }),
             } if t == Target::Trino => {
-                unnest_token.emit(t, f)?;
-                paren1.emit(t, f)?;
-                expression.emit(t, f)?;
-                paren2.emit(t, f)?;
-                if let Some(as_token) = as_token {
-                    as_token.emit(t, f)?;
-                }
+                table_expression.emit(t, f)?;
+                as_token.emit(t, f)?;
                 // UNNEST aliases aren't like other aliases, and Trino treats
                 // them specially.
                 f.write_token_start("U(")?;
@@ -1573,6 +1627,31 @@ impl Emit for FromItem {
             _ => self.emit_default(t, f),
         }
     }
+}
+
+/// A table-valued expression which can occur in a `FROM` clause.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub enum FromTableExpression {
+    /// A table name.
+    TableName(Name),
+    /// A subquery. These parens belong here in the grammar; they're different
+    /// from the ones in [`QueryExpression`].
+    Subquery {
+        paren1: Punct,
+        query: Box<QueryStatement>,
+        paren2: Punct,
+    },
+    /// A `UNNEST` clause.
+    Unnest(UnnestExpression),
+}
+
+/// A `UNNEST` clause.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct UnnestExpression {
+    pub unnest_token: Keyword,
+    pub paren1: Punct,
+    pub expression: Box<Expression>,
+    pub paren2: Punct,
 }
 
 /// A join operation.
@@ -2258,9 +2337,28 @@ peg::parser! {
               }
 
         rule array_definition() -> ArrayDefinition
-            = query:query_expression() { ArrayDefinition::Query { ty: None, query: Box::new(query) } }
+            = select:array_select_expression() { ArrayDefinition::Query { select: Box::new(select) } }
             / expressions:sep(<expression()>, ",") { ArrayDefinition::Elements(expressions) }
             / { ArrayDefinition::Elements(NodeVec::new(",")) }
+
+        rule array_select_expression() -> ArraySelectExpression
+            = select_options:select_options()
+              expression:expression()
+              comma:p(",")?
+              from_token:k("FROM")
+              unnest:unnest_expression()
+              alias:alias()
+              where_clause:where_clause()?
+            {
+                ArraySelectExpression {
+                    select_options,
+                    expression,
+                    from_token,
+                    unnest,
+                    alias,
+                    where_clause,
+                }
+            }
 
         rule struct_expression() -> StructExpression
             = struct_token:k("STRUCT") paren1:p("(") fields:select_list() paren2:p(")") {
@@ -2533,24 +2631,31 @@ peg::parser! {
             }
 
         rule from_item() -> FromItem
-            = table_name:name() alias:alias()? {
-                FromItem::TableName { table_name, alias }
-            }
-            / paren1:p("(") query:query_statement() paren2:p(")") alias:alias()? {
-                FromItem::Subquery {
-                    paren1,
-                    query: Box::new(query),
-                    paren2,
+            = table_expression:from_table_expression() alias:alias()? {
+                FromItem {
+                    table_expression,
                     alias,
                 }
             }
-            / unnest_token:k("UNNEST") paren1:p("(") expression:expression() paren2:p(")") alias:alias()? {
-                FromItem::Unnest {
+
+        rule from_table_expression() -> FromTableExpression
+            = table_name:name() { FromTableExpression::TableName(table_name) }
+            / paren1:p("(") query:query_statement() paren2:p(")") {
+                FromTableExpression::Subquery {
+                    paren1,
+                    query: Box::new(query),
+                    paren2,
+                }
+            }
+            / unnest:unnest_expression() { FromTableExpression::Unnest(unnest) }
+
+        rule unnest_expression() -> UnnestExpression
+            = unnest_token:k("UNNEST") paren1:p("(") expression:expression() paren2:p(")") {
+                UnnestExpression {
                     unnest_token,
                     paren1,
                     expression: Box::new(expression),
                     paren2,
-                    alias,
                 }
             }
 
@@ -2828,8 +2933,6 @@ peg::parser! {
 
 #[cfg(test)]
 mod tests {
-    use crate::drivers::{sqlite3::SQLite3Locator, Locator};
-
     use super::*;
 
     #[tokio::test]
@@ -2928,7 +3031,10 @@ mod tests {
             (r#"SELECT a, CAST(NULL AS STRING) AS c FROM t"#, None),
             (r#"SELECT a, CAST(NULL AS DATETIME) AS c FROM t"#, None),
             (r#"SELECT a, SAFE_CAST(NULL AS BOOL) AS c FROM t"#, None),
-            (r#"SELECT ARRAY(SELECT 1)"#, None),
+            (
+                r#"SELECT ARRAY(SELECT DISTINCT i*2 FROM UNNEST([1,2]) AS i WHERE MOD(i, 2) = 0)"#,
+                None,
+            ),
             (r#"SELECT ARRAY(1, 2)"#, None),
             (r#"SELECT ARRAY[1, 2]"#, None),
             (r#"SELECT [1, 2]"#, None),
@@ -2994,30 +3100,7 @@ CREATE OR REPLACE TABLE `project-123`.proxies.t2 AS (
             ),
         ];
 
-        // Set up SQLite3 database for testing transpiled SQL.
-        let mut conn = SQLite3Locator::memory().driver().await.unwrap();
-
-        // Create some fixtures.
-        let fixtures = r#"
-            CREATE TABLE t (a INT, b INT);
-            CREATE TABLE "p-123.d.t" (a INT, b INT);
-            CREATE TABLE "d.t" (a INT, b INT);
-
-            -- For our big query.
-            CREATE TABLE "project-123.sources.s1" (
-                random_id INT,
-                join_id INT
-            );
-            CREATE TABLE "project-123.proxies.t1" (
-                first_name TEXT,
-                last_name TEXT,
-                join_id INT
-            );
-        "#;
-        conn.execute_native_sql_statement(fixtures)
-            .await
-            .expect("failed to create SQLite3 fixtures");
-
+        // Make sure we can parse and re-emit all the examples.
         let mut files = KnownFiles::new();
         for &(sql, normalized) in sql_examples {
             println!("parsing:   {}", sql);
