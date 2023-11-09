@@ -480,6 +480,15 @@ impl Name {
         node_vec.into()
     }
 
+    /// Create from a dotted string.
+    pub fn new_from_dotted(s: &str, span: Span) -> Name {
+        let mut node_vec = NodeVec::new(".");
+        for part in s.split('.') {
+            node_vec.push(Ident::new(part, span.clone()));
+        }
+        node_vec.into()
+    }
+
     /// Combine this name with another name, using a dot as a separator.
     pub fn combine(&self, other: &Name) -> Name {
         let mut node_vec = self.items.clone();

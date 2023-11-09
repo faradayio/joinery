@@ -55,7 +55,7 @@ impl RenameFunctions {
             // Rename the function.
             //
             // TODO: Preserve whitespace and source location.
-            function_call.name = Name::new(new_name, function_call.name.span());
+            function_call.name = Name::new_from_dotted(new_name, function_call.name.span());
         } else if let Some(udf) = self.udf_table.get(&name) {
             // We'll need a UDF, so add it to our list it if isn't already
             // there.

@@ -1,5 +1,4 @@
 -- pending: sqlite3 No SHA256 function
--- pending: trino SHA256 only takes VARBINARY args
 
 CREATE OR REPLACE TABLE __result1 AS
 SELECT
