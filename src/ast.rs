@@ -1416,6 +1416,10 @@ pub enum WindowFrameStart {
         unbounded_token: Keyword,
         preceding_token: Keyword,
     },
+    CurrentRow {
+        current_token: Keyword,
+        row_token: PseudoKeyword,
+    },
 }
 
 /// A window frame end. Keep this simple for now.
@@ -1424,6 +1428,10 @@ pub enum WindowFrameEnd {
     CurrentRow {
         current_token: Keyword,
         row_token: PseudoKeyword,
+    },
+    UnboundedFollowing {
+        unbounded_token: Keyword,
+        following_token: Keyword,
     },
 }
 
@@ -2544,12 +2552,24 @@ peg::parser! {
                     preceding_token,
                 }
             }
+            / current_token:k("CURRENT") row_token:pk("ROW") {
+                WindowFrameStart::CurrentRow {
+                    current_token,
+                    row_token,
+                }
+            }
 
         rule window_frame_end() -> WindowFrameEnd
             = current_token:k("CURRENT") row_token:pk("ROW") {
                 WindowFrameEnd::CurrentRow {
                     current_token,
                     row_token,
+                }
+            }
+            / unbounded_token:k("UNBOUNDED") following_token:k("FOLLOWING") {
+                WindowFrameEnd::UnboundedFollowing {
+                    unbounded_token,
+                    following_token,
                 }
             }
 

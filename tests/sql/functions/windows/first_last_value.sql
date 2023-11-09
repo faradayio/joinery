@@ -1,6 +1,3 @@
--- pending: sqlite3 FIRST_VALUE, LAST_VALUE seem to require frames to work?
--- pending: trino FIRST_VALUE, LAST_VALUE seem to require frames to work?
-
 -- FIRST_VALUE, LAST_VALUE
 
 -- A fixture table for testing window functions.
@@ -22,7 +19,8 @@ CREATE OR REPLACE TABLE __result1 AS
 SELECT
     item,
     FIRST_VALUE(item) OVER (PARTITION BY category ORDER BY price) AS cheapest_alternative,
-    LAST_VALUE(item) OVER (PARTITION BY category ORDER BY price) AS most_expensive_alternative,
+    -- We need the RANGE frame here.
+    LAST_VALUE(item) OVER (PARTITION BY category ORDER BY price RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS most_expensive_alternative,
 FROM groceries;
 
 CREATE OR REPLACE TABLE __expected1 (
