@@ -2,7 +2,7 @@ use derive_visitor::{DriveMut, VisitorMut};
 use joinery_macros::sql_quote;
 
 use crate::{
-    ast::{self, CurrentDate, Expression},
+    ast::{self, CurrentTimeUnit, Expression},
     errors::Result,
 };
 
@@ -11,11 +11,11 @@ use super::{Transform, TransformExtra};
 /// Ensure `CURRENT_DATE` either has parens, or doesn't.
 #[derive(VisitorMut)]
 #[visitor(Expression(enter))]
-pub struct StandardizeCurrentDate {
+pub struct StandardizeCurrentTimeUnit {
     want_parens: bool,
 }
 
-impl StandardizeCurrentDate {
+impl StandardizeCurrentTimeUnit {
     /// Ensure `CURRENT_DATE` always has parens.
     #[allow(dead_code)]
     pub fn parens() -> Self {
@@ -28,14 +28,14 @@ impl StandardizeCurrentDate {
     }
 
     fn enter_expression(&mut self, expr: &mut Expression) {
-        if let Expression::CurrentDate(CurrentDate {
-            current_date_token,
+        if let Expression::CurrentTimeUnit(CurrentTimeUnit {
+            current_time_unit_token,
             empty_parens,
         }) = expr
         {
             match (self.want_parens, empty_parens.is_some()) {
                 (true, false) => {
-                    let replacement = sql_quote! { #current_date_token () }
+                    let replacement = sql_quote! { #current_time_unit_token () }
                         .try_into_expression()
                         .expect("generated SQL should always parse");
                     *expr = replacement;
@@ -47,7 +47,7 @@ impl StandardizeCurrentDate {
     }
 }
 
-impl Transform for StandardizeCurrentDate {
+impl Transform for StandardizeCurrentTimeUnit {
     fn name(&self) -> &'static str {
         "StandardizeCurrentDate"
     }

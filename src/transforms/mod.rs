@@ -20,7 +20,7 @@ pub use self::{
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     qualify_to_subquery::QualifyToSubquery,
     rename_functions::{RenameFunctions, Udf},
-    standardize_current_date::StandardizeCurrentDate,
+    standardize_current_time_unit::StandardizeCurrentTimeUnit,
     wrap_nested_queries::WrapNestedQueries,
 };
 
@@ -36,7 +36,7 @@ mod is_bool_to_case;
 mod or_replace_to_drop_if_exists;
 mod qualify_to_subquery;
 mod rename_functions;
-mod standardize_current_date;
+mod standardize_current_time_unit;
 mod wrap_nested_queries;
 
 /// A transform that modifies an [`SqlProgram`].

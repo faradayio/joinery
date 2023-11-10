@@ -1,0 +1,3 @@
+-- pending: snowflake Possible, effort may vary
+-- pending: sqlite3 Possible, effort may vary
+-- pending: trino Possible, effort may vary

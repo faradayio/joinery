@@ -61,7 +61,6 @@ impl ContainsAggregate for ast::Expression {
             ast::Expression::Literal(_) => false,
             ast::Expression::BoolValue(_) => false,
             ast::Expression::Null(_) => false,
-            ast::Expression::Interval(interval) => interval.contains_aggregate(scope),
             ast::Expression::Name(_) => false,
             ast::Expression::Cast(cast) => cast.contains_aggregate(scope),
             ast::Expression::Is(is) => is.contains_aggregate(scope),
@@ -79,7 +78,7 @@ impl ContainsAggregate for ast::Expression {
             ast::Expression::Struct(st) => st.contains_aggregate(scope),
             // TODO: false if we add `OVER`.
             ast::Expression::Count(_) => true,
-            ast::Expression::CurrentDate(_) => false,
+            ast::Expression::CurrentTimeUnit(_) => false,
             // TODO: false if we add `OVER`.
             ast::Expression::ArrayAgg(_) => true,
             ast::Expression::SpecialDateFunctionCall(fcall) => fcall.contains_aggregate(scope),
@@ -215,11 +214,12 @@ impl ContainsAggregate for ast::SpecialDateFunctionCall {
     }
 }
 
-impl ContainsAggregate for ast::ExpressionOrDatePart {
+impl ContainsAggregate for ast::SpecialDateExpression {
     fn contains_aggregate(&self, scope: &ColumnSetScope) -> bool {
         match self {
-            ast::ExpressionOrDatePart::Expression(expr) => expr.contains_aggregate(scope),
-            ast::ExpressionOrDatePart::DatePart(_) => false,
+            ast::SpecialDateExpression::Expression(expr) => expr.contains_aggregate(scope),
+            ast::SpecialDateExpression::Interval(_) => false,
+            ast::SpecialDateExpression::DatePart(_) => false,
         }
     }
 }

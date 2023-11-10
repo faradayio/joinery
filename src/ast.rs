@@ -845,7 +845,6 @@ pub enum Expression {
     Literal(Literal),
     BoolValue(Keyword),
     Null(Keyword),
-    Interval(IntervalExpression),
     Name(Name),
     Cast(Cast),
     Is(IsExpression),
@@ -869,7 +868,7 @@ pub enum Expression {
     Array(ArrayExpression),
     Struct(StructExpression),
     Count(CountExpression),
-    CurrentDate(CurrentDate),
+    CurrentTimeUnit(CurrentTimeUnit),
     ArrayAgg(ArrayAggExpression),
     SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
@@ -1306,11 +1305,13 @@ pub struct CaseElseClause {
     pub result: Box<Expression>,
 }
 
-/// `CURRENT_DATE` may appear as either `CURRENT_DATE` or `CURRENT_DATE()`.
-/// And different databases seem to support one or the other or both.
+/// `CURRENT_DATE` may appear as either `CURRENT_DATE` or `CURRENT_DATE()`. And
+/// the same for several similar functions. And different databases seem to
+/// support one or the other or both.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
-pub struct CurrentDate {
-    pub current_date_token: PseudoKeyword,
+pub struct CurrentTimeUnit {
+    /// `CURRENT_DATE` or `CURRENT_DATETIME`, perhaps others later.
+    pub current_time_unit_token: PseudoKeyword,
     pub empty_parens: Option<EmptyParens>,
 }
 
@@ -1328,14 +1329,15 @@ pub struct EmptyParens {
 pub struct SpecialDateFunctionCall {
     pub function_name: PseudoKeyword,
     pub paren1: Punct,
-    pub args: NodeVec<ExpressionOrDatePart>,
+    pub args: NodeVec<SpecialDateExpression>,
     pub paren2: Punct,
 }
 
 /// An expression or a date part.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
-pub enum ExpressionOrDatePart {
+pub enum SpecialDateExpression {
     Expression(Expression),
+    Interval(IntervalExpression),
     DatePart(DatePart),
 }
 
@@ -1500,14 +1502,24 @@ pub enum WindowFrameEnd {
 pub enum DataType {
     Bool(PseudoKeyword),
     Bytes(PseudoKeyword),
+    /// A "wall-clock" date with no timezone. Does not necessarily represent a
+    /// specific point in time, especially in the future, due to time zones,
+    /// leap seconds, etc.
     Date(PseudoKeyword),
+    /// A "wall-clock" date and time with no timezone.
     Datetime(PseudoKeyword),
     Float64(PseudoKeyword),
     Geography(PseudoKeyword), // WGS84
     Int64(PseudoKeyword),
+    /// A fixed-precision numeric type. Equivalent to `DECIMAL(38,9)` in other
+    /// databases. Often used for currency, where values like 0.01 must be
+    /// represented exactly.
     Numeric(PseudoKeyword),
     String(PseudoKeyword),
+    /// A "wall-clock" time with no timezone.
     Time(PseudoKeyword),
+    /// An absolute moment in time. May be stored as a number of seconds
+    /// relative to specific UTC epoch, instead of carrying a timezone.
     Timestamp(PseudoKeyword),
     Array {
         array_token: Keyword,
@@ -2292,13 +2304,12 @@ peg::parser! {
             array_expression:array_expression() { Expression::Array(array_expression) }
             struct_expression:struct_expression() { Expression::Struct(struct_expression) }
             count_expression:count_expression() { Expression::Count(count_expression) }
-            current_date:current_date() { Expression::CurrentDate(current_date) }
+            current_time_unit:current_time_unit() { Expression::CurrentTimeUnit(current_time_unit) }
             paren1:p("(") query:query_expression() paren2:p(")") { Expression::Query { paren1, query: Box::new(query), paren2 } }
             paren1:p("(") expression:expression() paren2:p(")") { Expression::Parens { paren1, expression: Box::new(expression), paren2 } }
             literal:literal() { Expression::Literal(literal) }
             bool_token:(k("TRUE") / k("FALSE")) { Expression::BoolValue(bool_token) }
             null_token:k("NULL") { Expression::Null(null_token) }
-            interval_expression:interval_expression() { Expression::Interval(interval_expression) }
             cast:cast() { Expression::Cast(cast) }
             array_agg:array_agg() { Expression::ArrayAgg(array_agg) }
             special_date_function_call:special_date_function_call() { Expression::SpecialDateFunctionCall(special_date_function_call) }
@@ -2487,10 +2498,10 @@ peg::parser! {
                 }
             }
 
-        rule current_date() -> CurrentDate
-            = current_date_token:pk("CURRENT_DATE") empty_parens:empty_parens()? {
-                CurrentDate {
-                    current_date_token,
+        rule current_time_unit() -> CurrentTimeUnit
+            = current_time_unit_token:(pk("CURRENT_DATETIME") / pk("CURRENT_DATE")) empty_parens:empty_parens()? {
+                CurrentTimeUnit {
+                    current_time_unit_token,
                     empty_parens,
                 }
             }
@@ -2518,7 +2529,7 @@ peg::parser! {
 
         rule special_date_function_call() -> SpecialDateFunctionCall
             = function_name:special_date_function_name() paren1:p("(")
-              args:sep(<expression_or_date_part()>, ",") paren2:p(")") {
+              args:sep(<special_date_expression()>, ",") paren2:p(")") {
                 SpecialDateFunctionCall {
                     function_name,
                     paren1,
@@ -2528,11 +2539,13 @@ peg::parser! {
             }
 
         rule special_date_function_name() -> PseudoKeyword
-            = pk("DATE_DIFF") / pk("DATE_TRUNC") / pk("DATETIME_DIFF") / pk("DATETIME_TRUNC")
+            = pk("DATE_DIFF") / pk("DATE_TRUNC") / pk("DATE_ADD") / pk("DATE_SUB")
+            / pk("DATETIME_DIFF") / pk("DATETIME_TRUNC") / pk("DATETIME_SUB")
 
-        rule expression_or_date_part() -> ExpressionOrDatePart
-            = date_part:date_part() { ExpressionOrDatePart::DatePart(date_part) }
-            / expression:expression() { ExpressionOrDatePart::Expression(expression) }
+        rule special_date_expression() -> SpecialDateExpression
+            = interval:interval_expression() { SpecialDateExpression::Interval(interval) }
+            / date_part:date_part() { SpecialDateExpression::DatePart(date_part) }
+            / expression:expression() { SpecialDateExpression::Expression(expression) }
 
         pub rule function_call() -> FunctionCall
             = name:name() paren1:p("(")

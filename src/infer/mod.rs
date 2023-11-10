@@ -652,7 +652,6 @@ impl InferTypes for ast::Expression {
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(&()),
             ast::Expression::BoolValue(_) => Ok(ArgumentType::bool()),
             ast::Expression::Null { .. } => Ok(ArgumentType::null()),
-            ast::Expression::Interval(_) => Err(nyi(self, "INTERVAL expression")),
             ast::Expression::Name(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
             ast::Expression::Is(is) => is.infer_types(scope),
@@ -671,9 +670,9 @@ impl InferTypes for ast::Expression {
             ast::Expression::Array(array) => array.infer_types(scope),
             ast::Expression::Struct(struct_expr) => struct_expr.infer_types(scope),
             ast::Expression::Count(count) => count.infer_types(scope),
-            ast::Expression::CurrentDate(_) => Err(nyi(self, "CURRENT_DATE expression")),
+            ast::Expression::CurrentTimeUnit(current) => current.infer_types(scope),
             ast::Expression::ArrayAgg(array_agg) => array_agg.infer_types(scope),
-            ast::Expression::SpecialDateFunctionCall(_) => Err(nyi(self, "special date function")),
+            ast::Expression::SpecialDateFunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::Index(index) => index.infer_types(scope),
             ast::Expression::FieldAccess(field_access) => field_access.infer_types(scope),
@@ -1120,6 +1119,17 @@ impl InferTypes for ast::CountExpression {
     }
 }
 
+impl InferTypes for ast::CurrentTimeUnit {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let func_name = Name::from(self.current_time_unit_token.ident.clone());
+        let func_ty = scope.get_function_type(&func_name)?;
+        func_ty.return_type_for(&[], false, &func_name)
+    }
+}
+
 impl InferTypes for ast::ArrayAggExpression {
     type Scope = ColumnSetScope;
     type Output = ArgumentType;
@@ -1156,6 +1166,37 @@ impl InferTypes for ast::Limit {
         let ty = self.value.value.infer_types(&())?;
         ty.expect_subtype_of(&ArgumentType::int64(), &self.value)?;
         Ok(())
+    }
+}
+
+impl InferTypes for ast::SpecialDateFunctionCall {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let func_ty = scope.get_function_type(&Name::from(self.function_name.ident.clone()))?;
+        let mut arg_types = vec![];
+        for arg in &mut self.args.node_iter_mut() {
+            arg_types.push(arg.infer_types(scope)?);
+        }
+        func_ty.return_type_for(&arg_types, false, &self.function_name)
+    }
+}
+
+impl InferTypes for ast::SpecialDateExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        match self {
+            ast::SpecialDateExpression::Expression(expression) => expression.infer_types(scope),
+            ast::SpecialDateExpression::Interval(_) => {
+                Ok(ArgumentType::Value(ValueType::Simple(SimpleType::Interval)))
+            }
+            ast::SpecialDateExpression::DatePart(_) => {
+                Ok(ArgumentType::Value(ValueType::Simple(SimpleType::Datepart)))
+            }
+        }
     }
 }
 
