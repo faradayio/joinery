@@ -26,7 +26,7 @@ use crate::{
 #[derive(Debug, Parser)]
 pub struct SqlTestOpt {
     /// A directory containing SQL test files.
-    dir_path: PathBuf,
+    dir_paths: Vec<PathBuf>,
 
     /// A database locator to run tests against.
     #[clap(long, visible_alias = "db", default_value = "sqlite3::memory:")]
@@ -48,54 +48,54 @@ pub async fn cmd_sql_test(files: &mut KnownFiles, opt: &SqlTestOpt) -> Result<()
     let mut test_failures: Vec<(PathBuf, Error)> = vec![];
     let mut pending: Vec<PendingTestInfo> = vec![];
 
-    // Build a glob matching our test files, for use with `glob`.
-    let dir_path_str = opt.dir_path.as_os_str().to_str().ok_or_else(|| {
-        format_err!(
-            "Failed to convert path to UTF-8: {}",
-            opt.dir_path.display()
-        )
-    })?;
-    let (base_dir, pattern) = if opt.dir_path.is_dir() {
-        (opt.dir_path.clone(), format!("{}/**/*.sql", dir_path_str))
-    } else {
-        let parent = opt.dir_path.parent().ok_or_else(|| {
-            // This should be impossible, since we already checked that this
-            // isn't a directory, and should therefore have a parent.
-            format_err!("Failed to get parent directory: {}", opt.dir_path.display())
+    // Loop over test directories.
+    for dir_path in &opt.dir_paths {
+        // Build a glob matching our test files, for use with `glob`.
+        let dir_path_str = dir_path.as_os_str().to_str().ok_or_else(|| {
+            format_err!("Failed to convert path to UTF-8: {}", dir_path.display())
         })?;
-        (parent.to_owned(), dir_path_str.to_owned())
-    };
+        let (base_dir, pattern) = if dir_path.is_dir() {
+            (dir_path.clone(), format!("{}/**/*.sql", dir_path_str))
+        } else {
+            let parent = dir_path.parent().ok_or_else(|| {
+                // This should be impossible, since we already checked that this
+                // isn't a directory, and should therefore have a parent.
+                format_err!("Failed to get parent directory: {}", dir_path.display())
+            })?;
+            (parent.to_owned(), dir_path_str.to_owned())
+        };
 
-    // Loop over test files.
-    for entry in glob::glob(&pattern).context("Failed to read test directory")? {
-        let path = entry.context("Failed to read test file")?;
+        // Loop over test files.
+        for entry in glob::glob(&pattern).context("Failed to read test directory")? {
+            let path = entry.context("Failed to read test file")?;
 
-        // Read file.
-        let file_id = files.add(&path)?;
-        let sql = files.source_code(file_id)?;
+            // Read file.
+            let file_id = files.add(&path)?;
+            let sql = files.source_code(file_id)?;
 
-        // Skip pending tests unless asked to run them.
-        if !opt.pending {
-            let short_path = path.strip_prefix(&base_dir).unwrap_or(&path);
-            if let Some(pending_test_info) =
-                PendingTestInfo::for_target(locator.target(), short_path, sql)
-            {
-                progress('P');
-                pending.push(pending_test_info);
-                continue;
+            // Skip pending tests unless asked to run them.
+            if !opt.pending {
+                let short_path = path.strip_prefix(&base_dir).unwrap_or(&path);
+                if let Some(pending_test_info) =
+                    PendingTestInfo::for_target(locator.target(), short_path, sql)
+                {
+                    progress('P');
+                    pending.push(pending_test_info);
+                    continue;
+                }
             }
-        }
 
-        // Test query.
-        let mut driver = locator.driver().await?;
-        match run_test(&mut *driver, files, file_id).await {
-            Ok(_) => {
-                progress('.');
-                test_ok_count += 1;
-            }
-            Err(e) => {
-                progress('E');
-                test_failures.push((path, e));
+            // Test query.
+            let mut driver = locator.driver().await?;
+            match run_test(&mut *driver, files, file_id).await {
+                Ok(_) => {
+                    progress('.');
+                    test_ok_count += 1;
+                }
+                Err(e) => {
+                    progress('E');
+                    test_failures.push((path, e));
+                }
             }
         }
     }
