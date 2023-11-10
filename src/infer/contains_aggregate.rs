@@ -62,7 +62,7 @@ impl ContainsAggregate for ast::Expression {
             ast::Expression::BoolValue(_) => false,
             ast::Expression::Null(_) => false,
             ast::Expression::Interval(interval) => interval.contains_aggregate(scope),
-            ast::Expression::ColumnName(_) => false,
+            ast::Expression::Name(_) => false,
             ast::Expression::Cast(cast) => cast.contains_aggregate(scope),
             ast::Expression::Is(is) => is.contains_aggregate(scope),
             ast::Expression::In(in_expr) => in_expr.contains_aggregate(scope),
@@ -85,6 +85,9 @@ impl ContainsAggregate for ast::Expression {
             ast::Expression::SpecialDateFunctionCall(fcall) => fcall.contains_aggregate(scope),
             ast::Expression::FunctionCall(fcall) => fcall.contains_aggregate(scope),
             ast::Expression::Index(idx) => idx.contains_aggregate(scope),
+            // Putting an aggregate here would be very weird. Do not allow it
+            // until forced to do so.
+            ast::Expression::FieldAccess(_) => false,
         }
     }
 }

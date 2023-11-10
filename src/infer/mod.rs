@@ -609,7 +609,7 @@ impl InferTypes for ast::GroupBy {
         for expr in self.expressions.node_iter_mut() {
             let _ty = expr.infer_types(scope)?;
             match expr {
-                Expression::ColumnName(name) => {
+                Expression::Name(name) => {
                     group_by_names.push(name.clone());
                 }
                 _ => {
@@ -653,7 +653,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::BoolValue(_) => Ok(ArgumentType::bool()),
             ast::Expression::Null { .. } => Ok(ArgumentType::null()),
             ast::Expression::Interval(_) => Err(nyi(self, "INTERVAL expression")),
-            ast::Expression::ColumnName(name) => name.infer_types(scope),
+            ast::Expression::Name(name) => name.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
             ast::Expression::Is(is) => is.infer_types(scope),
             ast::Expression::In(in_expr) => in_expr.infer_types(scope),
@@ -676,6 +676,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::SpecialDateFunctionCall(_) => Err(nyi(self, "special date function")),
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::Index(index) => index.infer_types(scope),
+            ast::Expression::FieldAccess(field_access) => field_access.infer_types(scope),
         }
     }
 }
@@ -709,7 +710,47 @@ impl InferTypes for ast::Name {
     type Output = ArgumentType;
 
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        scope.get_argument_type(self)
+        // `scope` contains the columns we can see. But this might be something
+        // like `[my_table.]my_struct_column.field1.field2`, so we need to be
+        // prepared to split this.
+
+        // First, find the split between our "base name" (presumably a column)
+        // and any field accesses.
+        let mut field_names_with_base_names = vec![];
+        let mut candidate = self.clone();
+        let mut base_type = loop {
+            match scope.get_argument_type(&candidate) {
+                Ok(base_type) => break base_type,
+                Err(_) => {
+                    let (next, field_name) = candidate.split_table_and_column();
+                    if let Some(next) = next {
+                        field_names_with_base_names.push((field_name, next.clone()));
+                        candidate = next;
+                    } else {
+                        // Report an error containing the original name.
+                        return Err(Error::annotated(
+                            format!("unknown name: {}", self.unescaped_bigquery()),
+                            self.span(),
+                            "not found",
+                        ));
+                    }
+                }
+            }
+        };
+
+        // Now that we have a base type, look up each field.
+        for (field_name, base_name) in field_names_with_base_names.into_iter().rev() {
+            // TODO: These errors here _might_ not always be optimal for the
+            // user if we're not actually dealing with structs? But maybe
+            // they're OK in most cases.
+            base_type = ArgumentType::Value(
+                base_type
+                    .expect_struct_type(&base_name)?
+                    .expect_field(&Name::from(field_name))?
+                    .clone(),
+            );
+        }
+        Ok(base_type)
     }
 }
 
@@ -1159,7 +1200,7 @@ impl InferTypes for ast::PartitionBy {
         let mut partition_by_names = vec![];
         for expr in self.expressions.node_iter_mut() {
             match expr {
-                ast::Expression::ColumnName(name) => {
+                ast::Expression::Name(name) => {
                     scope.get_argument_type(name)?;
                     partition_by_names.push(name.clone());
                 }
@@ -1188,6 +1229,18 @@ impl InferTypes for ast::IndexExpression {
     }
 }
 
+impl InferTypes for ast::FieldAccessExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let struct_ty = self.expression.infer_types(scope)?;
+        let struct_ty = struct_ty.expect_struct_type(&self.expression)?;
+        let field_ty = struct_ty.expect_field(&Name::from(self.field_name.clone()))?;
+        Ok(ArgumentType::Value(field_ty.clone()))
+    }
+}
+
 /// Figure out whether an expression defines an implicit column name.
 pub trait InferColumnName {
     /// Infer the column name, if any.
@@ -1206,7 +1259,7 @@ impl<T: InferColumnName> InferColumnName for Option<T> {
 impl InferColumnName for ast::Expression {
     fn infer_column_name(&mut self) -> Option<Ident> {
         match self {
-            ast::Expression::ColumnName(name) => {
+            ast::Expression::Name(name) => {
                 let (_table, col) = name.split_table_and_column();
                 Some(col)
             }

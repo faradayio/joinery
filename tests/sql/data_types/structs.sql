@@ -2,7 +2,7 @@
 -- pending: sqlite3 Need to build structs from scratch
 
 CREATE OR REPLACE TABLE __result1 AS
-WITH t AS (SELECT 1 AS a)
+WITH t AS (SELECT 1 AS a, STRUCT<field INT64>(2) AS s)
 SELECT
     -- Not allowed on Trino.
     -- STRUCT() AS empty_struct,
@@ -14,7 +14,8 @@ SELECT
     STRUCT<a INT64, b INT64>(1, 2) AS named_values_with_type,
     STRUCT([1] AS arr) AS struct_with_array,
     STRUCT(STRUCT(1 AS a) AS `inner`) AS struct_with_struct,
-    --STRUCT(1 AS a).a AS struct_field_access,
+    s.field AS struct_field_access,
+    STRUCT(1 AS a).a AS struct_expr_field_access,
 FROM t;
 
 CREATE OR REPLACE TABLE __expected1 (
@@ -27,7 +28,8 @@ CREATE OR REPLACE TABLE __expected1 (
     named_values_with_type STRUCT<a INT64, b INT64>,
     struct_with_array STRUCT<arr ARRAY<INT64>>,
     struct_with_struct STRUCT<`inner` STRUCT<a INT64>>,
-    --struct_field_access INT64,
+    struct_field_access INT64,
+    struct_expr_field_access INT64,
 );
 INSERT INTO __expected1
 SELECT
@@ -39,5 +41,6 @@ SELECT
     STRUCT<INT64>(NULL), -- anon_value_with_type
     STRUCT(1, 2), -- named_values_with_type
     STRUCT([1]), -- struct_with_array
-    STRUCT(STRUCT(1)); -- struct_with_struct
-    --1; -- struct_field_access
+    STRUCT(STRUCT(1)), -- struct_with_struct
+    2, -- struct_field_access
+    1; -- struct_expr_field_access

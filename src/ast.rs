@@ -846,7 +846,7 @@ pub enum Expression {
     BoolValue(Keyword),
     Null(Keyword),
     Interval(IntervalExpression),
-    ColumnName(Name),
+    Name(Name),
     Cast(Cast),
     Is(IsExpression),
     In(InExpression),
@@ -874,6 +874,7 @@ pub enum Expression {
     SpecialDateFunctionCall(SpecialDateFunctionCall),
     FunctionCall(FunctionCall),
     Index(IndexExpression),
+    FieldAccess(FieldAccessExpression),
 }
 
 impl Expression {
@@ -1647,6 +1648,14 @@ pub enum IndexOffset {
     },
 }
 
+/// A field access expression.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct FieldAccessExpression {
+    pub expression: Box<Expression>,
+    pub dot: Punct,
+    pub field_name: Ident,
+}
+
 /// An `AS` alias.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct Alias {
@@ -2248,6 +2257,14 @@ peg::parser! {
                 })
             }
             --
+            expression:(@) dot:p(".") field_name:ident() {
+                Expression::FieldAccess(FieldAccessExpression {
+                    expression: Box::new(expression),
+                    dot,
+                    field_name,
+                })
+            }
+            --
             case_token:k("CASE")
             case_expr:expression()?
             when_clauses:(case_when_clause()*)
@@ -2288,7 +2305,7 @@ peg::parser! {
             // Things from here down might start with arbitrary identifiers, so
             // we need to be careful about the order.
             function_call:function_call() { Expression::FunctionCall(function_call) }
-            column_name:name() { Expression::ColumnName(column_name) }
+            column_name:name() { Expression::Name(column_name) }
         }
 
         rule interval_expression() -> IntervalExpression

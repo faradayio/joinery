@@ -203,6 +203,18 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
         }
     }
 
+    /// Expect a [`StructType`].
+    pub fn expect_struct_type(&self, spanned: &dyn Spanned) -> Result<&StructType<TV>> {
+        match self {
+            ArgumentType::Value(ValueType::Simple(SimpleType::Struct(t))) => Ok(t),
+            _ => Err(Error::annotated(
+                format!("expected struct type, found {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
     /// Expect an [`ArrayType`].
     pub fn expect_array_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {
@@ -739,6 +751,22 @@ pub struct StructType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
 }
 
 impl<TV: TypeVarSupport> StructType<TV> {
+    /// Get the type of a field, or raise an error if the field does not exist.
+    pub fn expect_field(&self, name: &Name) -> Result<&ValueType<TV>> {
+        for field in &self.fields {
+            if let Some(field_name) = &field.name {
+                if Name::from(field_name.clone()) == *name {
+                    return Ok(&field.ty);
+                }
+            }
+        }
+        Err(Error::annotated(
+            format!("no such field {} in {}", name.unescaped_bigquery(), self),
+            name.span(),
+            "no such field",
+        ))
+    }
+
     /// Is this a subtype of `other`?
     pub fn is_subtype_of(&self, other: &StructType<TV>) -> bool {
         // We are a subtype of `other` if we have the same fields, and each of
