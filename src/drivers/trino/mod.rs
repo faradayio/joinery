@@ -44,6 +44,7 @@ pub static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "ARRAY_LENGTH" => "CARDINALITY",
     "ARRAY_TO_STRING" => "ARRAY_JOIN",
+    "CURRENT_DATETIME" => "CURRENT_TIMESTAMP",
     "GENERATE_UUID" => "memory.joinery_compat.GENERATE_UUID",
     "SHA256" => "memory.joinery_compat.SHA256_COMPAT",
     "TO_HEX" => "memory.joinery_compat.TO_HEX_COMPAT",
@@ -187,6 +188,7 @@ impl Driver for TrinoDriver {
                 &UDFS,
                 &format_udf,
             )),
+            Box::new(transforms::StandardizeCurrentTimeUnit::no_parens()),
             Box::new(transforms::CleanUpTempManually {
                 format_name: &|table_name| AnsiIdent(&table_name.unescaped_bigquery()).to_string(),
             }),

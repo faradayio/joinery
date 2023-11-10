@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use derive_visitor::{DriveMut, VisitorMut};
 
 use crate::{
-    ast::{self, FunctionCall, Name},
+    ast::{self, CurrentTimeUnit, FunctionCall, Name},
     errors::Result,
-    tokenizer::Spanned,
+    tokenizer::{Ident, Spanned},
 };
 
 use super::{Transform, TransformExtra};
@@ -19,7 +19,7 @@ pub struct Udf {
 }
 
 #[derive(VisitorMut)]
-#[visitor(FunctionCall(enter))]
+#[visitor(CurrentTimeUnit(enter), FunctionCall(enter))]
 pub struct RenameFunctions {
     // Lookup table containing function replacements.
     function_table: &'static phf::Map<&'static str, &'static str>,
@@ -46,6 +46,16 @@ impl RenameFunctions {
             udf_table,
             format_udf,
             udfs: HashMap::new(),
+        }
+    }
+
+    /// Allow renaming CURRENT_DATETIME, etc.
+    fn enter_current_time_unit(&mut self, current_time_unit: &mut ast::CurrentTimeUnit) {
+        let ident = &current_time_unit.current_time_unit_token.ident;
+        let name = ident.token.as_str().to_ascii_uppercase();
+        if let Some(&new_name) = self.function_table.get(&name) {
+            // Rename the function.
+            current_time_unit.current_time_unit_token.ident = Ident::new(new_name, ident.span());
         }
     }
 
