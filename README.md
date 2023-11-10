@@ -104,10 +104,17 @@ Then you can run `joinery` with:
 --database "trino://anyone@localhost/memory/default"
 ```
 
+## Developing
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase.
+
+
 ## Other projects of interest
 
-Check out:
+If you're interested in running analytic SQL queries across multiple databases, you may also be interested in:
 
+- [PRQL](https://prql-lang.org/). There are a lot of languages out there that compile to SQL, but this one is my favorite. It reads as a pipeline from top to bottom, the features are clean and orthogonal, and it handles window functions. If you're starting a greenfield project, definitely take a look.
+- [Logica](https://logica.dev/). This is probably the most mature Datalog-to-SQL compiler, with a particular focus on BigQuery.
 - [`sqlglot`](https://github.com/tobymao/sqlglot). Transform between many different SQL dialects. Much better feature coverage than we have, though it may generate incorrect SQL in tricky cases. If you're planning on adjusting your translated queries by hand, or if you need to support a wide variety of dialects, this is probably a better choice than `joinery`.
-- [BigQuery Emulator](https://github.com/goccy/bigquery-emulator). A local emulator for BigQuery. This supports a larger fraction of BigQuery features than we do.
 - [`dbt-core`](https://github.com/dbt-labs/dbt-core).
+- [BigQuery Emulator](https://github.com/goccy/bigquery-emulator). A local emulator for BigQuery. This supports a larger fraction of BigQuery features than we do.
