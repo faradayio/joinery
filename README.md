@@ -1,15 +1,56 @@
-# `joinery`: A BigQuery SQL transpiler experiment
+# `joinery`: Transpile (some) of BigQuery's "Standard SQL" dialect to other databases
 
-Very incomplete.
+This is an experimental tool to transpile (some) SQL code written in BigQuery's "Standard SQL" dialect into other dialects. For example, it can transform:
 
-Check out:
+```sql
+SELECT ARRAY(
+    SELECT DISTINCT val / 2
+    FROM UNNEST(arr) AS val
+    WHERE MOD(val, 2) = 0
+) AS arr
+FROM array_select_data;
+```
 
-- `dbt-core`
-- `sqlglot`
+...into the Trino-compatible SQL:
+
+```sql
+SELECT ARRAY_DISTINCT(
+    TRANSFORM(
+        FILTER(arr, val -> MOD(val, 2) = 0),
+        val -> val / 2
+    )
+) AS arr
+FROM array_select_data
+```
+
+It even does type inference, which is needed for certain complex transformations! The transformation process makes some effort to preserve whitespace and comments, so the output SQL is still mostly readable.
+
+## Current status
+
+This is very much a work in progress, though it has enough features to run a large fraction of our production workload. It supports the following databases to some degree:
+
+- Trino: Best coverage. Easy to run locally under Docker.
+  - AWS Athena 3: Mostly works, but we need to port the UDFs.
+  - Presto: Try it and see?
+- Snowflake: Not bad.
+- SQLite3: Will probably be removed soon. Might be replaced with DuckDB?
+
+If you want to run _your_ production workloads, **you will almost certainly need to contribute code.** In particular, our API coverage is limited. See [`tests/sql/`](./tests/sql/) for examples of what we support.
+
+## Design philosophy
+
+In an _ideal_ world, `joinery` would do one of two things:
+
+1. Translate your SQL into something that runs identically on your target database, or
+2. Report a clear error explaining why it can't.
+
+In the real world, neither BigQuery's Standard SQL nor any of our target dialects have any kind of formal semantics, and there has been way too much empiricism and guesswork involved. But `joinery` has been designed to approach the ideal over time.
 
 ## Installing
 
 ```bash
+git clone https://github.com/faradayio/joinery.git
+cd joinery
 cargo install --path .
 ```
 
@@ -43,7 +84,11 @@ You'll also need to set the `SNOWFLAKE_PASSWORD` environment variable.
 
 ### Trino
 
-To run under Trino, you'll need to load the plugin, as described in [`java/trino-plugin/README.md`](./java/trino-plugin/README.md).
+To run under Trino, you may want to load the plugin, as described in [`java/trino-plugin/README.md`](./java/trino-plugin/README.md). If you don't mind some unit test failures on `FARM_FINGERPRINT`, you can also just run:
+
+```bash
+docker run --name trino -d -p 8080:8080 trinodb/trino
+```
 
 Then you need to start a Trino shell:
 
@@ -51,7 +96,7 @@ Then you need to start a Trino shell:
 docker exec -it trino trino
 ```
 
-...and paste in the contents of [`./sql/trino_compat.sql`](./sql/trino_compat.sql).
+...and paste in the contents of [`./sql/trino_compat.sql`](./sql/trino_compat.sql). This will provide SQL UDFs that implement a bunch of BigQ
 
 Then you can run `joinery` with:
 
@@ -59,25 +104,10 @@ Then you can run `joinery` with:
 --database "trino://anyone@localhost/memory/default"
 ```
 
-## Grammar tracing
+## Other projects of interest
 
-Run tests with tracing enabled:
+Check out:
 
-```bash
-cargo test --features trace
-```
-
-```bash
-cargo install pegviz --git=https://github.com/fasterthanlime/pegviz.git
-pegviz -o trace.html
-```
-
-Now take all the test output between these two lines, inclusive:
-
-```txt
-[PEG_INPUT_START]
-...
-[PEG_TRACE_STOP]
-```
-
-...and paste it into the standard input of `pegviz`. Then hit control-D. You should then be able to open `trace.html` in your browser and see a nice visualization of the grammar.
+- [`sqlglot`](https://github.com/tobymao/sqlglot). Transform between many different SQL dialects. Much better feature coverage than we have, though it may generate incorrect SQL in tricky cases. If you're planning on adjusting your translated queries by hand, or if you need to support a wide variety of dialects, this is probably a better choice than `joinery`.
+- [BigQuery Emulator](https://github.com/goccy/bigquery-emulator). A local emulator for BigQuery. This supports a larger fraction of BigQuery features than we do.
+- [`dbt-core`](https://github.com/dbt-labs/dbt-core).
