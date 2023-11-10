@@ -20,6 +20,7 @@ pub use self::{
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     qualify_to_subquery::QualifyToSubquery,
     rename_functions::{RenameFunctions, Udf},
+    special_date_functions_to_trino::SpecialDateFunctionsToTrino,
     standardize_current_time_unit::StandardizeCurrentTimeUnit,
     wrap_nested_queries::WrapNestedQueries,
 };
@@ -36,6 +37,7 @@ mod is_bool_to_case;
 mod or_replace_to_drop_if_exists;
 mod qualify_to_subquery;
 mod rename_functions;
+mod special_date_functions_to_trino;
 mod standardize_current_time_unit;
 mod wrap_nested_queries;
 

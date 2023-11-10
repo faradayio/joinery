@@ -661,6 +661,7 @@ impl InferTypes for ast::Expression {
             ast::Expression::Not(not) => not.infer_types(scope),
             ast::Expression::If(if_expr) => if_expr.infer_types(scope),
             ast::Expression::Case(case) => case.infer_types(scope),
+            ast::Expression::Unary(unary) => unary.infer_types(scope),
             ast::Expression::Binop(binop) => binop.infer_types(scope),
             ast::Expression::Query { query, .. } => {
                 let table_ty = query.infer_types(&scope.clone().try_into_handle_for_subquery()?)?;
@@ -955,6 +956,21 @@ impl InferTypes for ast::CaseExpression {
             }
             Ok(result_tv.resolve(&table, self)?)
         }
+    }
+}
+
+impl InferTypes for ast::UnaryExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let func_name = &Name::new(
+            &format!("%UNARY{}", self.op_token.token.as_str()),
+            self.op_token.span(),
+        );
+        let func_ty = scope.get_function_type(func_name)?;
+        let arg_ty = self.expression.infer_types(scope)?;
+        func_ty.return_type_for(&[arg_ty], false, func_name)
     }
 }
 

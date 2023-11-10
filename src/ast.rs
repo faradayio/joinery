@@ -854,6 +854,7 @@ pub enum Expression {
     Not(NotExpression),
     If(IfExpression),
     Case(CaseExpression),
+    Unary(UnaryExpression),
     Binop(BinopExpression),
     Query {
         paren1: Punct,
@@ -908,6 +909,14 @@ pub struct IntervalExpression {
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct DatePart {
     pub date_part_token: PseudoKeyword,
+}
+
+impl DatePart {
+    /// Get a lowercase ASCII string.
+    pub fn to_literal(&self) -> Literal {
+        let s = self.date_part_token.ident.name.to_ascii_lowercase();
+        Literal::string(&s, self.date_part_token.span())
+    }
 }
 
 /// A cast expression.
@@ -1058,6 +1067,13 @@ pub struct CaseExpression {
     pub when_clauses: Vec<CaseWhenClause>,
     pub else_clause: Option<CaseElseClause>,
     pub end_token: Keyword,
+}
+
+/// A unary operator.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct UnaryExpression {
+    pub op_token: Punct,
+    pub expression: Box<Expression>,
 }
 
 /// A binary operator.
@@ -1339,6 +1355,32 @@ pub enum SpecialDateExpression {
     Expression(Expression),
     Interval(IntervalExpression),
     DatePart(DatePart),
+}
+
+impl SpecialDateExpression {
+    /// If this contains an expression, return it.
+    pub fn try_as_expression(&self) -> Option<&Expression> {
+        match self {
+            SpecialDateExpression::Expression(expression) => Some(expression),
+            _ => None,
+        }
+    }
+
+    /// If this contains an interval expression, return it.
+    pub fn try_as_interval(&self) -> Option<&IntervalExpression> {
+        match self {
+            SpecialDateExpression::Interval(interval) => Some(interval),
+            _ => None,
+        }
+    }
+
+    /// If this contains a date part, return it.
+    pub fn try_as_date_part(&self) -> Option<&DatePart> {
+        match self {
+            SpecialDateExpression::DatePart(date_part) => Some(date_part),
+            _ => None,
+        }
+    }
 }
 
 /// An `ARRAY_AGG` expression.
@@ -2269,6 +2311,10 @@ peg::parser! {
                 })
             }
             --
+            op_token:p("-") right:@ {
+                Expression::Unary(UnaryExpression { op_token, expression: Box::new(right) })
+            }
+            --
             expression:(@) dot:p(".") field_name:ident() {
                 Expression::FieldAccess(FieldAccessExpression {
                     expression: Box::new(expression),
@@ -2527,7 +2573,7 @@ peg::parser! {
                 }
             }
 
-        rule special_date_function_call() -> SpecialDateFunctionCall
+        pub rule special_date_function_call() -> SpecialDateFunctionCall
             = function_name:special_date_function_name() paren1:p("(")
               args:sep(<special_date_expression()>, ",") paren2:p(")") {
                 SpecialDateFunctionCall {
@@ -2540,7 +2586,7 @@ peg::parser! {
 
         rule special_date_function_name() -> PseudoKeyword
             = pk("DATE_DIFF") / pk("DATE_TRUNC") / pk("DATE_ADD") / pk("DATE_SUB")
-            / pk("DATETIME_DIFF") / pk("DATETIME_TRUNC") / pk("DATETIME_SUB")
+            / pk("DATETIME_DIFF") / pk("DATETIME_TRUNC") / pk("DATETIME_ADD") / pk("DATETIME_SUB")
 
         rule special_date_expression() -> SpecialDateExpression
             = interval:interval_expression() { SpecialDateExpression::Interval(interval) }
@@ -3093,7 +3139,6 @@ mod tests {
             (r"SELECT * FROM t WHERE a < 0.5", None),
             (r"SELECT * FROM t WHERE a BETWEEN 1 AND 10", None),
             (r"SELECT * FROM t WHERE a NOT BETWEEN 1 AND 10", None),
-            (r"SELECT INTERVAL -3 DAY", None),
             (r"SELECT * FROM t WHERE a IN (1,2)", None),
             (r"SELECT * FROM t WHERE a NOT IN (1,2)", None),
             (r"SELECT * FROM t WHERE a IN (SELECT b FROM t)", None),

@@ -1,6 +1,5 @@
 -- pending: snowflake Lots of work but low risk.
 -- pending: sqlite3 Lots of work but low risk.
--- pending: trino Work in progress
 
 -- Moon landing UTC: 1969-07-20T20:17:39Z
 
@@ -19,7 +18,7 @@ SELECT
     -- boundary conditions. If anyone wants to write really rigorous test cases
     -- that cover all the boundary conditions, and make sure they pass for
     -- all/most dialects, that would be amazing.
-    DATE_DIFF(DATE('1969-07-20'), DATE('1969-07-20'), SECOND) AS same_time,
+    DATE_DIFF(DATE('1969-07-20'), DATE('1969-07-20'), DAY) AS same_time,
     DATE_DIFF(DATE('1969-07-21'), DATE('1969-07-20'), DAY) AS one_day_later,
     DATE_DIFF(DATE('1969-08-20'), DATE('1969-07-20'), MONTH) AS one_month_later,
     DATE_DIFF(DATE('1970-07-20'), DATE('1969-07-20'), YEAR) AS one_year_later,

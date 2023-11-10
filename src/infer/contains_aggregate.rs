@@ -70,6 +70,7 @@ impl ContainsAggregate for ast::Expression {
             ast::Expression::Not(not) => not.contains_aggregate(scope),
             ast::Expression::If(if_expr) => if_expr.contains_aggregate(scope),
             ast::Expression::Case(case) => case.contains_aggregate(scope),
+            ast::Expression::Unary(unary) => unary.contains_aggregate(scope),
             ast::Expression::Binop(binop) => binop.contains_aggregate(scope),
             // We never look into sub-queries.
             ast::Expression::Query { .. } => false,
@@ -176,6 +177,12 @@ impl ContainsAggregate for ast::CaseWhenClause {
 impl ContainsAggregate for ast::CaseElseClause {
     fn contains_aggregate(&self, scope: &ColumnSetScope) -> bool {
         self.result.contains_aggregate(scope)
+    }
+}
+
+impl ContainsAggregate for ast::UnaryExpression {
+    fn contains_aggregate(&self, scope: &ColumnSetScope) -> bool {
+        self.expression.contains_aggregate(scope)
     }
 }
 

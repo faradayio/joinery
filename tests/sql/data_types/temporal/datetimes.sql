@@ -1,6 +1,5 @@
 -- pending: snowflake Lots of work but low risk.
 -- pending: sqlite3 Lots of work but low risk.
--- pending: trino Work in progress
 
 -- Moon landing UTC: 1969-07-20T20:17:39Z
 
@@ -33,6 +32,8 @@ SELECT
     DATETIME_TRUNC(DATETIME('1969-07-20 20:17:39'), HOUR) AS trunc_hour,
     DATETIME_TRUNC(DATETIME('1969-07-20 20:17:39'), DAY) AS trunc_day,
 
+    DATETIME_ADD(DATETIME('1969-07-20 20:17:39'), INTERVAL 10 SECOND) AS add_ten_seconds_later,
+
     DATETIME_SUB(DATETIME('1969-07-20 20:17:39'), INTERVAL 10 SECOND) AS sub_ten_seconds_earlier,
     DATETIME_SUB(DATETIME('1969-07-20 20:17:39'), INTERVAL 1 MINUTE) AS sub_one_minute_earlier,
     ;
@@ -54,6 +55,8 @@ CREATE OR REPLACE TABLE __expected1 (
     trunc_hour DATETIME,
     trunc_day DATETIME,
 
+    add_ten_seconds_later DATETIME,
+
     sub_ten_seconds_earlier DATETIME,
     sub_one_minute_earlier DATETIME,
 );
@@ -73,6 +76,8 @@ INSERT INTO __expected1 VALUES (
     DATETIME('1969-07-20 20:17:00'), -- trunc_minute
     DATETIME('1969-07-20 20:00:00'), -- trunc_hour
     DATETIME('1969-07-20 00:00:00'), -- trunc_day
+
+    DATETIME('1969-07-20 20:17:49'), -- add_ten_seconds_later
 
     DATETIME('1969-07-20 20:17:29'), -- sub_ten_seconds_earlier
     DATETIME('1969-07-20 20:16:39'), -- sub_one_minute_earlier

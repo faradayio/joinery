@@ -398,6 +398,14 @@ impl Ident {
             name: name.to_owned(),
         }
     }
+
+    /// Create a new [`Ident`], overriding the string.
+    pub fn with_str(&self, s: &str) -> Self {
+        Self {
+            token: self.token.with_str(s),
+            name: s.to_owned(),
+        }
+    }
 }
 
 impl Spanned for Ident {
@@ -625,6 +633,11 @@ impl TokenStream {
     /// Try to parse this stream as a [`ast::Expression`].
     pub fn try_into_expression(self) -> Result<ast::Expression> {
         self.try_into_parsed(ast::sql_program::expression)
+    }
+
+    /// Try to parse this stream as a [`ast::SpecialDateFunctionCall`].
+    pub fn try_into_special_date_function_call(self) -> Result<ast::SpecialDateFunctionCall> {
+        self.try_into_parsed(ast::sql_program::special_date_function_call)
     }
 
     /// Try to parse this stream as a [`ast::FunctionCall`].

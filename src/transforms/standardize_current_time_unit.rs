@@ -49,7 +49,7 @@ impl StandardizeCurrentTimeUnit {
 
 impl Transform for StandardizeCurrentTimeUnit {
     fn name(&self) -> &'static str {
-        "StandardizeCurrentDate"
+        "StandardizeCurrentTimeUnit"
     }
 
     fn transform(mut self: Box<Self>, sql_program: &mut ast::SqlProgram) -> Result<TransformExtra> {
