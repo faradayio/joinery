@@ -1,4 +1,4 @@
-# `joinery`: Safely transpile between SQL dialects
+# `joinery`: Safe SQL transpiler, written in Rust
 
 It was decided to write a greenfield transpiler in Rust due to concerns about correctness of Python-based solutions.
 
