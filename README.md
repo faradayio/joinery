@@ -1,6 +1,88 @@
-# `joinery`: Transpile (some) of BigQuery's "Standard SQL" dialect to other databases
+# `joinery`: Safe SQL transpiler, written in Rust
 
-**Current status:** Preparing for a quiet public release, but not yet there. This is currently a proof of concept that runs the tests in [`tests/sql/`](./tests/sql/), but which isn't _quite_ ready for anything else. See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase. This code is less than 2 months old, and it was built quickly, so we still have some refactoring to do.
+It was decided to write a greenfield transpiler in Rust due to concerns about correctness of Python-based solutions.
+
+[BigQuery "Standard SQL"](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax) was taken as the reference dialect, but it is anticipated the other input dialects will be supported.
+
+It performs type inference (necessary, for example, to expand `EXCEPT(*)` into a list of columns, because Trino doesn't support it) and preserves whitespace.
+
+If you want to run _your_ production workloads, **you will almost certainly need to contribute code.** In particular, our API coverage is limited. See [`tests/sql/`](./tests/sql/) for examples of what we support.
+
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase.
+
+```
+$ joinery --help
+Usage: joinery <COMMAND>
+
+Commands:
+  parse      Parse SQL from a CSV file containing `id` and `query` columns
+  sql-test   Run SQL tests from a directory
+  transpile  Transpile BigQuery SQL to another dialect
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## Status
+
+<table>
+    <tr>
+        <th>Dialect</th>
+        <th>Input</th>
+        <th>Output</th>
+        <th>Comments</th>
+    </tr>
+    <tr>
+        <td>BigQuery</td>
+        <td>🟢</td>
+        <td>🟢</td>
+        <td></td>
+    </tr>
+        <tr>
+        <td>Snowflake</td>
+        <td>🔴</td>
+        <td>🟢</td>
+        <td>"Not bad"</td>
+    </tr>
+    <tr>
+        <td>Trino</td>
+        <td>🔴</td>
+        <td>🟢</td>
+        <td>Best coverage. Easy to run locally under Docker.</td>
+    </tr>
+    <tr>
+        <td>Athena 3 (Trino)</td>
+        <td>🔴</td>
+        <td>🟢</td>
+        <td>Need to convert UDFs</td>
+    </tr>
+    <tr>
+        <td>Athena 2 (Presto)</td>
+        <td>?</td>
+        <td>?</td>
+        <td>Try it?</td>
+    </tr>
+    <tr>
+        <td>Redshift</td>
+        <td>🔴</td>
+        <td>🔴</td>
+        <td></td>
+    </tr>
+    <tr>
+        <td>Postgres</td>
+        <td>🔴</td>
+        <td>🔴</td>
+        <td></td>
+    </tr>
+    <tr>
+        <td>SQLite</td>
+        <td>🟢</td>
+        <td>🟢</td>
+        <td></td>
+    </tr>
+</table>
+
 
 ## What is this?
 
@@ -28,18 +110,6 @@ FROM array_select_data
 ```
 
 It even does type inference, which is needed for certain complex transformations! The transformation process makes some effort to preserve whitespace and comments, so the output SQL is still mostly readable.
-
-## Current status
-
-This is very much a work in progress, though it has enough features to run a large fraction of our production workload. It supports the following databases to some degree:
-
-- Trino: Best coverage. Easy to run locally under Docker.
-  - AWS Athena 3: Mostly works, but we need to port the UDFs.
-  - Presto: Try it and see?
-- Snowflake: Not bad.
-- SQLite3: Will probably be removed soon. Might be replaced with DuckDB?
-
-If you want to run _your_ production workloads, **you will almost certainly need to contribute code.** In particular, our API coverage is limited. See [`tests/sql/`](./tests/sql/) for examples of what we support.
 
 ## Design philosophy
 
@@ -122,3 +192,7 @@ If you're interested in running analytic SQL queries across multiple databases, 
 - [`sqlglot`](https://github.com/tobymao/sqlglot). Transform between many different SQL dialects. Much better feature coverage than we have, though it may generate incorrect SQL in tricky cases. If you're planning on adjusting your translated queries by hand, or if you need to support a wide variety of dialects, this is probably a better choice than `joinery`.
 - [`dbt-core`](https://github.com/dbt-labs/dbt-core).
 - [BigQuery Emulator](https://github.com/goccy/bigquery-emulator). A local emulator for BigQuery. This supports a larger fraction of BigQuery features than we do.
+
+## Corporate support
+
+joinery is open-sourced by [Faraday](https://faraday.ai)
