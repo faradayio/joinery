@@ -2,7 +2,9 @@
 
 It was decided to write a greenfield transpiler in Rust due to concerns about correctness of Python-based solutions.
 
-It performs type inference and preserves whitespace.
+[BigQuery "Standard SQL"](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax) was taken as the reference dialect, but it is anticipated the other input dialects will be supported.
+
+It performs type inference (necessary, for example, to expand `EXCEPT(*)` into a list of columns, because Trino doesn't support it) and preserves whitespace.
 
 If you want to run _your_ production workloads, **you will almost certainly need to contribute code.** In particular, our API coverage is limited. See [`tests/sql/`](./tests/sql/) for examples of what we support.
 
