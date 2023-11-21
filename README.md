@@ -8,6 +8,21 @@ If you want to run _your_ production workloads, **you will almost certainly need
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase.
 
+```
+$ joinery --help
+Usage: joinery <COMMAND>
+
+Commands:
+  parse      Parse SQL from a CSV file containing `id` and `query` columns
+  sql-test   Run SQL tests from a directory
+  transpile  Transpile BigQuery SQL to another dialect
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## Status
 
 <table>
     <tr>
