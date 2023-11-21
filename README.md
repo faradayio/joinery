@@ -1,6 +1,6 @@
 # `joinery`: Transpile (some) of BigQuery's "Standard SQL" dialect to other databases
 
-**Current status:** Preparing for a quiet public release, but not yet there. This is currently a proof of concept that runs the tests in [`tests/sql/`](./tests/sql/). See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase. This code is less than 2 months old, and it was built quickly, so we still have some refactoring to do.
+**Current status:** Preparing for a quiet public release, but not yet there. This is currently a proof of concept that runs the tests in [`tests/sql/`](./tests/sql/), but which isn't _quite_ ready for anything else. See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase. This code is less than 2 months old, and it was built quickly, so we still have some refactoring to do.
 
 ## What is this?
 
