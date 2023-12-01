@@ -170,7 +170,7 @@ Then you need to start a Trino shell:
 docker exec -it trino trino
 ```
 
-...and paste in the contents of [`./sql/trino_compat.sql`](./sql/trino_compat.sql). This will provide SQL UDFs that implement a bunch of BigQ
+...and paste in the contents of [`./sql/trino_compat.sql`](./sql/trino_compat.sql). This will provide SQL UDFs which mirror a bunch of BigQuery's built in functions.
 
 Then you can run `joinery` with:
 
