@@ -56,7 +56,7 @@ pub fn cmd_parse(files: &mut KnownFiles, opt: &ParseOpt) -> Result<()> {
 
         // Skip ML queries, which we don't translate to other databases,
         // anyways.
-        if row.query.contains("FROM ML.") {
+        if row.query.contains("FROM ML.") || row.query.contains("carto.CREATE_SIMPLE_TILESET") {
             ml_count += 1;
             continue;
         } else {
@@ -83,7 +83,7 @@ pub fn cmd_parse(files: &mut KnownFiles, opt: &ParseOpt) -> Result<()> {
     }
 
     println!(
-        "Parsed {} of {} queries, skipped {} with `ML.`. Parsed {}/{} lines.",
+        "Parsed {} of {} queries, skipped {} with `ML.`, etc. Parsed {}/{} lines.",
         ok_count, row_count, ml_count, ok_line_count, line_count
     );
 
