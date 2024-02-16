@@ -1,3 +1,5 @@
+-- pending: sqlite3 No FROM_HEX function.
+
 -- TO_HEX(FROM_HEX(x)) = x
 
 CREATE OR REPLACE TABLE __result1 AS
