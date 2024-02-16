@@ -42,6 +42,7 @@ pub static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 // A `phf_map!` of BigQuery function names to native function names. Use
 // this for simple renaming.
 static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
+    "APPROX_COUNT_DISTINCT" => "APPROX_DISTINCT",
     "ARRAY_LENGTH" => "CARDINALITY",
     "ARRAY_TO_STRING" => "ARRAY_JOIN",
     "CURRENT_DATETIME" => "CURRENT_TIMESTAMP",

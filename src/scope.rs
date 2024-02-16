@@ -240,6 +240,8 @@ static BUILT_IN_FUNCTIONS: &str = "
 -- Functions.
 
 ANY_VALUE = FnAgg<?T>(Agg<?T>) -> ?T;
+APPROX_COUNT_DISTINCT = FnAgg<?T>(Agg<?T>) -> INT64;
+APPROX_QUANTILES = FnAgg<?T>(Agg<?T>, INT64) -> ARRAY<?T>;
 ARRAY_AGG = FnAgg<?T>(Agg<?T>) -> ARRAY<?T>;
 ARRAY_LENGTH = Fn<?T>(ARRAY<?T>) -> INT64;
 ARRAY_TO_STRING = Fn<?T>(ARRAY<?T>, STRING) -> STRING;
