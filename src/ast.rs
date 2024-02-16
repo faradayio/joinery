@@ -644,22 +644,33 @@ pub struct QueryStatement {
 /// [official grammar]:
 ///     https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax#sql_syntax.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
-pub enum QueryExpression {
-    SelectExpression(SelectExpression),
+pub struct QueryExpression {
+    pub with_clause: Option<QueryExpressionWithClause>,
+    pub query: QueryExpressionQuery,
+    pub order_by: Option<OrderBy>,
+    pub limit: Option<Limit>,
+}
+
+/// The `WITH` clause of a `QueryExpression`.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct QueryExpressionWithClause {
+    pub with_token: Keyword,
+    pub ctes: NodeVec<CommonTableExpression>,
+}
+
+/// The actual query portion of a `QueryExpression`.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub enum QueryExpressionQuery {
+    Select(SelectExpression),
     Nested {
         paren1: Punct,
         query: Box<QueryStatement>,
         paren2: Punct,
     },
-    With {
-        with_token: Keyword,
-        ctes: NodeVec<CommonTableExpression>,
-        query: Box<QueryStatement>,
-    },
     SetOperation {
-        left: Box<QueryExpression>,
+        left: Box<QueryExpressionQuery>,
         set_operator: SetOperator,
-        right: Box<QueryExpression>,
+        right: Box<QueryExpressionQuery>,
     },
 }
 
@@ -2139,26 +2150,45 @@ peg::parser! {
                 }
             }
 
-        pub rule query_expression() -> QueryExpression = precedence! {
+        pub rule query_expression() -> QueryExpression =
+            with_clause:query_expression_with_clause()?
+            query:query_expression_query()
+            order_by:order_by()?
+            limit:limit()?
+            {
+                QueryExpression {
+                    with_clause,
+                    query,
+                    order_by,
+                    limit,
+                }
+            }
+
+        rule query_expression_with_clause() -> QueryExpressionWithClause
+            = with_token:k("WITH") ctes:sep_opt_trailing(<common_table_expression()>, ",") {
+                QueryExpressionWithClause {
+                    with_token,
+                    ctes,
+                }
+            }
+
+        pub rule query_expression_query() -> QueryExpressionQuery = precedence! {
             left:(@) set_operator:set_operator() right:@ {
-                QueryExpression::SetOperation {
-                    left: Box::new(left), set_operator, right: Box::new(right)
+                QueryExpressionQuery::SetOperation {
+                    left: Box::new(left),
+                    set_operator,
+                    right: Box::new(right),
                 }
             }
             --
-            select_expression:select_expression() { QueryExpression::SelectExpression(select_expression) }
+            select_expression:select_expression() {
+                QueryExpressionQuery::Select(select_expression)
+            }
             paren1:p("(") query:query_statement() paren2:p(")") {
-                QueryExpression::Nested {
+                QueryExpressionQuery::Nested {
                     paren1,
                     query: Box::new(query),
                     paren2,
-                }
-            }
-            with_token:k("WITH") ctes:sep_opt_trailing(<common_table_expression()>, ",") query:query_statement() {
-                QueryExpression::With {
-                    with_token,
-                    ctes,
-                    query: Box::new(query),
                 }
             }
         }
@@ -2587,6 +2617,7 @@ peg::parser! {
         rule special_date_function_name() -> PseudoKeyword
             = pk("DATE_DIFF") / pk("DATE_TRUNC") / pk("DATE_ADD") / pk("DATE_SUB")
             / pk("DATETIME_DIFF") / pk("DATETIME_TRUNC") / pk("DATETIME_ADD") / pk("DATETIME_SUB")
+            / pk("GENERATE_DATE_ARRAY")
 
         rule special_date_expression() -> SpecialDateExpression
             = interval:interval_expression() { SpecialDateExpression::Interval(interval) }

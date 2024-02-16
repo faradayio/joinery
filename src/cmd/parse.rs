@@ -70,7 +70,7 @@ pub fn cmd_parse(files: &mut KnownFiles, opt: &ParseOpt) -> Result<()> {
             Ok(sql_program) => {
                 ok_count += 1;
                 ok_line_count += row.query.lines().count();
-                println!("OK {}", row.id);
+                //println!("OK {}", row.id);
                 if opt.count_function_calls {
                     function_call_counts.visit(&sql_program);
                 }

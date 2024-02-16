@@ -614,6 +614,16 @@ impl ColumnSetScope {
         }
     }
 
+    /// Create a column set scope from a [`TableType`]. This is used to
+    /// implement some of the more complicated rules around things like `(...
+    /// UNION ALL ...) ORDER BY ...`
+    pub fn new_from_table_type(parent: &ScopeHandle, table_type: &TableType) -> Self {
+        Self {
+            parent: parent.to_owned(),
+            column_set: ColumnSet::from_table(None, table_type.to_owned()),
+        }
+    }
+
     /// Get our [`ColumnSet`].
     pub fn column_set(&self) -> &ColumnSet {
         &self.column_set

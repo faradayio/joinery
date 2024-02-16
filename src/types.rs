@@ -1125,6 +1125,15 @@ pub struct FunctionType {
 }
 
 impl FunctionType {
+    /// Could this function be called with the specified number of arguments?
+    /// We use this to search for unknown functions in SQL code we can't type
+    /// check.
+    pub fn could_be_called_with_arg_count(&self, arg_count: usize) -> bool {
+        self.signatures
+            .iter()
+            .any(|sig| sig.could_be_called_with_arg_count(arg_count))
+    }
+
     /// Is this an aggregate function?
     ///
     /// This is used to detect an implicit `GROUP BY` clause, like in `SELECT
@@ -1219,6 +1228,17 @@ pub struct FunctionSignature {
 }
 
 impl FunctionSignature {
+    /// Could this function be called with the specified number of arguments,
+    /// ignoring the argument types? We use this to search for unknown functions
+    /// in SQL code we can't type check.
+    pub fn could_be_called_with_arg_count(&self, arg_count: usize) -> bool {
+        if self.rest_params.is_some() {
+            arg_count >= self.params.len()
+        } else {
+            arg_count == self.params.len()
+        }
+    }
+
     /// Does this signature match a set of argument types?
     ///
     /// TODO: Distinguish between failed matches and errors.

@@ -616,8 +616,14 @@ impl TokenStream {
     }
 
     /// Try to parse this stream as a [`ast::QueryExpression`].
+    #[allow(dead_code)]
     pub fn try_into_query_expression(self) -> Result<ast::QueryExpression> {
         self.try_into_parsed(ast::sql_program::query_expression)
+    }
+
+    /// Try to parse this stream as a [`ast::QueryExpressionQuery`].
+    pub fn try_into_query_expression_query(self) -> Result<ast::QueryExpressionQuery> {
+        self.try_into_parsed(ast::sql_program::query_expression_query)
     }
 
     /// Try to parse this stream as a [`ast::SelectExpression`].
@@ -1072,6 +1078,11 @@ peg::parser! {
                 Literal { token, value }
             } }
             / quiet! { s_and_token:t(<"'" s:(([^ '\\' | '\''] / escape())*) "'" { s }>) {
+                let (s, token) = s_and_token;
+                let value = LiteralValue::String(s.into_iter().collect());
+                Literal { token, value }
+            } }
+            / quiet! { s_and_token:t(<"\"" s:(([^ '\\' | '\"'] / escape())*) "\"" { s }>) {
                 let (s, token) = s_and_token;
                 let value = LiteralValue::String(s.into_iter().collect());
                 Literal { token, value }

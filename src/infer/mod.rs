@@ -226,24 +226,69 @@ impl InferTypes for ast::QueryExpression {
     type Output = TableType;
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
+        let ast::QueryExpression {
+            with_clause,
+            query,
+            order_by,
+            limit,
+        } = self;
+
+        let mut scope = scope.clone();
+        if let Some(with_clause) = with_clause {
+            scope = with_clause.infer_types(&scope)?;
+        }
+        let (ty, column_set_scope) = query.infer_types(&scope)?;
+        if let Some(order_by) = order_by {
+            let column_set_scope = column_set_scope
+                .unwrap_or_else(|| ColumnSetScope::new_from_table_type(&scope, &ty));
+            order_by.infer_types(&column_set_scope)?;
+        }
+        if let Some(limit) = limit {
+            limit.infer_types(&())?;
+        }
+        Ok(ty)
+    }
+}
+
+impl InferTypes for ast::QueryExpressionWithClause {
+    type Scope = ScopeHandle;
+    type Output = ScopeHandle;
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
+        let mut scope = scope.clone();
+        for cte in self.ctes.node_iter_mut() {
+            scope = cte.infer_types(&scope)?;
+        }
+        Ok(scope)
+    }
+}
+
+impl InferTypes for ast::QueryExpressionQuery {
+    type Scope = ScopeHandle;
+
+    /// We return both a `TableType` and _possibly_ a `ColumnSetScope` because
+    /// `ORDER BY` may need a full `ColumnSetScope` to support things like
+    /// `ORDER BY table1.col1, table2.col2`. But the `ColumnSetScope` is easily
+    /// lost in more complicated cases. See the test `order_and_limit.sql` for
+    /// example code.
+    type Output = (TableType, Option<ColumnSetScope>);
+
+    fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         match self {
-            ast::QueryExpression::SelectExpression(expr) => expr.infer_types(scope),
-            ast::QueryExpression::Nested { query, .. } => query.infer_types(scope),
-            ast::QueryExpression::With { ctes, query, .. } => {
-                // Non-recursive CTEs, so each will create a new namespace.
-                let mut scope = scope.to_owned();
-                for cte in ctes.node_iter_mut() {
-                    scope = cte.infer_types(&scope)?;
-                }
-                query.infer_types(&scope)
+            ast::QueryExpressionQuery::Select(expr) => {
+                let (ty, column_set_scope) = expr.infer_types(scope)?;
+                Ok((ty, Some(column_set_scope)))
             }
-            ast::QueryExpression::SetOperation {
+            ast::QueryExpressionQuery::Nested { query, .. } => {
+                Ok((query.infer_types(scope)?, None))
+            }
+            ast::QueryExpressionQuery::SetOperation {
                 left,
                 set_operator,
                 right,
             } => {
-                let left_ty = left.infer_types(scope)?;
-                let right_ty = right.infer_types(scope)?;
+                let (left_ty, _) = left.infer_types(scope)?;
+                let (right_ty, _) = right.infer_types(scope)?;
                 let result_ty = left_ty.common_supertype(&right_ty).ok_or_else(|| {
                     Error::annotated(
                         format!("cannot combine {} and {}", left_ty, right_ty),
@@ -251,7 +296,7 @@ impl InferTypes for ast::QueryExpression {
                         "incompatible types",
                     )
                 })?;
-                Ok(result_ty)
+                Ok((result_ty, None))
             }
         }
     }
@@ -271,7 +316,11 @@ impl InferTypes for ast::CommonTableExpression {
 
 impl InferTypes for ast::SelectExpression {
     type Scope = ScopeHandle;
-    type Output = TableType;
+
+    /// We return both a `TableType` and a `ColumnSetScope` because `ORDER BY`
+    /// may need a full `ColumnSetScope` to support things like `ORDER BY
+    /// table1.col1, table2.col2`, which is allowed in certain contexts.
+    type Output = (TableType, ColumnSetScope);
 
     fn infer_types(&mut self, scope: &ScopeHandle) -> Result<Self::Output> {
         // In order of type inference:
@@ -431,7 +480,7 @@ impl InferTypes for ast::SelectExpression {
         }
 
         *ty = Some(table_type.clone());
-        Ok(table_type)
+        Ok((table_type, column_set_scope))
     }
 }
 
