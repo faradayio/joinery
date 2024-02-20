@@ -821,6 +821,17 @@ pub enum SelectListItem {
         star: Punct,
         except: Option<Except>,
     },
+    /// A `struct_expr.*` wildcard.
+    ExpressionWildcard {
+        /// Type information added later by inference.
+        #[emit(skip)]
+        #[to_tokens(skip)]
+        #[drive(skip)]
+        ty: Option<StructType>,
+        expression: Expression,
+        dot: Punct,
+        star: Punct,
+    },
 }
 
 /// An `EXCEPT` clause.
@@ -2264,7 +2275,10 @@ peg::parser! {
             / table_name:name() dot:p(".") star:p("*") except:except()? {
                 SelectListItem::TableNameWildcard { ty: None, table_name, dot, star, except }
             }
-            / s:position!() expression:expression() alias:alias()? e:position!() {
+            / expression:expression() dot:p(".") star:p("*") {
+                SelectListItem::ExpressionWildcard { ty: None, expression, dot, star }
+            }
+            / expression:expression() alias:alias()? {
                 SelectListItem::Expression { expression, alias }
             }
 

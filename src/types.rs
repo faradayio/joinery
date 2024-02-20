@@ -450,17 +450,9 @@ impl ValueType<ResolvedTypeVarsOnly> {
             // Structs unnest to tables with the same columns.
             //
             // TODO: JSON, too, if we ever support it.
-            ValueType::Array(SimpleType::Struct(s)) => Ok(Unnested::NamedColumns(TableType {
-                columns: s
-                    .fields
-                    .iter()
-                    .map(|field| ColumnType {
-                        name: field.name.clone(),
-                        ty: ArgumentType::Value(field.ty.clone()),
-                        not_null: false,
-                    })
-                    .collect(),
-            })),
+            ValueType::Array(SimpleType::Struct(s)) => {
+                Ok(Unnested::NamedColumns(s.to_table_type()))
+            }
             // Other types unnest to tables with a single anonymous column.
             ValueType::Array(elem_ty) => Ok(Unnested::AnonymousColumn(TableType {
                 columns: vec![ColumnType {
@@ -792,6 +784,23 @@ impl<TV: TypeVarSupport> StructType<TV> {
             ));
         }
         Ok(())
+    }
+}
+
+impl StructType<ResolvedTypeVarsOnly> {
+    /// Convert to a `TableType`.
+    pub fn to_table_type(&self) -> TableType {
+        TableType {
+            columns: self
+                .fields
+                .iter()
+                .map(|field| ColumnType {
+                    name: field.name.clone(),
+                    ty: ArgumentType::Value(field.ty.clone()),
+                    not_null: false,
+                })
+                .collect(),
+        }
     }
 }
 

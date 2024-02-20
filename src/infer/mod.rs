@@ -239,6 +239,12 @@ impl InferTypes for ast::QueryExpression {
         }
         let (ty, column_set_scope) = query.infer_types(&scope)?;
         if let Some(order_by) = order_by {
+            // This is a bit complicated because `ORDER BY` can see columns from
+            // an immediately adjacent `SELECT` list, but not from a nested
+            // query or a set operation. So we'll use the `column_set_scope` if
+            // we have it, but fall back to creating a new one from the table
+            // type. Both BigQuery and Trino agree on this. See
+            // `order_and_limit.sql` for an example.
             let column_set_scope = column_set_scope
                 .unwrap_or_else(|| ColumnSetScope::new_from_table_type(&scope, &ty));
             order_by.infer_types(&column_set_scope)?;
@@ -443,6 +449,13 @@ impl InferTypes for ast::SelectExpression {
                     // Modified version of `table_name`'s type, built from
                     // `column_set_scope`.
                     *ty = Some(table_type);
+                }
+                ast::SelectListItem::ExpressionWildcard { ty, expression, .. } => {
+                    let struct_type = expression.infer_types(&column_set_scope)?;
+                    let struct_type = struct_type.expect_struct_type(expression)?;
+                    let table_type = struct_type.to_table_type();
+                    add_table_cols(&mut cols, &table_type, &None);
+                    *ty = Some(struct_type.to_owned());
                 }
             }
         }

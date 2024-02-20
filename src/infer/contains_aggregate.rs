@@ -51,6 +51,9 @@ impl ContainsAggregate for ast::SelectListItem {
             } => expression.contains_aggregate(scope),
             ast::SelectListItem::Wildcard { .. }
             | ast::SelectListItem::TableNameWildcard { .. } => false,
+            ast::SelectListItem::ExpressionWildcard { expression, .. } => {
+                expression.contains_aggregate(scope)
+            }
         }
     }
 }
