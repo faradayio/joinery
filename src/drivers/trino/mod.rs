@@ -48,6 +48,7 @@ static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "CURRENT_DATETIME" => "CURRENT_TIMESTAMP",
     "DATETIME" => "memory.joinery_compat.DATETIME",
     "GENERATE_UUID" => "memory.joinery_compat.GENERATE_UUID",
+    "REGEXP_CONTAINS" => "REGEXP_LIKE",
     "SHA256" => "memory.joinery_compat.SHA256_COMPAT",
     "SUBSTR" => "memory.joinery_compat.SUBSTR_COMPAT",
     "TO_HEX" => "memory.joinery_compat.TO_HEX_COMPAT",
