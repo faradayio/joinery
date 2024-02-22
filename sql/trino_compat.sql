@@ -35,6 +35,43 @@ RETURN (
   SHA256(input)
 );
 
+-- Handle odd BigQuery behaviour around the `pos` argument.
+CREATE FUNCTION memory.joinery_compat.SUBSTR_COMPAT(input VARCHAR, pos INT)
+RETURNS VARCHAR
+RETURNS NULL ON NULL INPUT
+RETURN (
+  -- If pos is 0, or less than -LENGTH(input), the result is the same as if it
+  -- were 1.
+  CASE
+    WHEN pos = 0 OR pos < -LENGTH(input) THEN input
+    ELSE SUBSTR(input, pos)
+  END
+);
+
+-- As the two argument case, but also treat a length greater than the string as
+-- as "to the end of the string".
+CREATE FUNCTION memory.joinery_compat.SUBSTR_COMPAT(input VARCHAR, pos INT, len INT)
+RETURNS VARCHAR
+RETURNS NULL ON NULL INPUT
+RETURN (
+  CASE
+    WHEN pos = 0 OR pos < -LENGTH(input) THEN
+      CASE
+        WHEN len > LENGTH(input) THEN input
+        ELSE SUBSTR(input, 1, len)
+      END
+    WHEN pos < 0 THEN
+      CASE
+        WHEN len > -pos THEN SUBSTR(input, pos)
+        ELSE SUBSTR(input, pos, len)
+      END
+    WHEN (pos - 1) + len > LENGTH(input) THEN
+      SUBSTR(input, pos)
+    ELSE
+      SUBSTR(input, pos, len)
+  END
+);
+
 CREATE FUNCTION memory.joinery_compat.TO_HEX_COMPAT(input VARBINARY)
 RETURNS VARCHAR
 RETURNS NULL ON NULL INPUT
