@@ -231,6 +231,9 @@ impl Driver for SnowflakeDriver {
         Target::Snowflake
     }
 
+    // Clippy is confused by the macro expansion of either `#[instrument]` or
+    // `#[async_trait]` here, so silence the warning.
+    #[allow(clippy::blocks_in_conditions)]
     #[instrument(skip(self, sql), err)]
     async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()> {
         debug!(%sql, "executing SQL");
