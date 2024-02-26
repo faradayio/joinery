@@ -26,63 +26,9 @@ Options:
 
 ## Status
 
-<table>
-    <tr>
-        <th>Dialect</th>
-        <th>Input</th>
-        <th>Output</th>
-        <th>Comments</th>
-    </tr>
-    <tr>
-        <td>BigQuery</td>
-        <td>🟢</td>
-        <td>🟢</td>
-        <td></td>
-    </tr>
-        <tr>
-        <td>Snowflake</td>
-        <td>🔴</td>
-        <td>🟢</td>
-        <td>"Not bad"</td>
-    </tr>
-    <tr>
-        <td>Trino</td>
-        <td>🔴</td>
-        <td>🟢</td>
-        <td>Best coverage. Easy to run locally under Docker.</td>
-    </tr>
-    <tr>
-        <td>Athena 3 (Trino)</td>
-        <td>🔴</td>
-        <td>🟢</td>
-        <td>Need to convert UDFs</td>
-    </tr>
-    <tr>
-        <td>Athena 2 (Presto)</td>
-        <td>?</td>
-        <td>?</td>
-        <td>Try it?</td>
-    </tr>
-    <tr>
-        <td>Redshift</td>
-        <td>🔴</td>
-        <td>🔴</td>
-        <td></td>
-    </tr>
-    <tr>
-        <td>Postgres</td>
-        <td>🔴</td>
-        <td>🔴</td>
-        <td></td>
-    </tr>
-    <tr>
-        <td>SQLite</td>
-        <td>🟢</td>
-        <td>🟢</td>
-        <td></td>
-    </tr>
-</table>
-
+- Trino has passing unit tests for all our use cases, but probably not yours. Also, there's a difference between "works with the SQL test suite that _theoretically_ covers the features we support" and "works with gnarly production queries that do tricky things with correlated subqueries."
+- AWS Athena 3 is basically Trino, except UDFs are different and we don't support them yet. There may also be dialect differences. Not currently tested.
+- Snowflake has partial support.
 
 ## What is this?
 
@@ -144,9 +90,39 @@ For the `sql-test` test format, see the [test format docs][tests].
 
 ### SQLite3
 
-This is the default. You don't need to do anything.
+This is the default. You don't need to do anything. It's not very useful, and will either be removed or replaced with DuckDB.
+
+### Trino
+
+To run under Trino, you may want to load the plugin, as described in [`java/trino-plugin/README.md`](./java/trino-plugin/README.md). For local testing, make sure you `curl` and [`asdf`](https://asdf-vm.com/) installed, and then install `just`:
+
+```bash
+cargo install just
+```
+
+Then you can run:
+
+```bash
+just docker-run-trino
+```
+
+From here, you can run the unit tests:
+
+```bash
+just check-trino
+```
+
+Then you need to start a Trino shell:
+
+```bash
+just trino-shell
+```
+
+For more details on all these commands, see the [`Justfile`](./Justfile).
 
 ### Snowflake
+
+This hasn't been updated recently, so some tests for newer features may fail.
 
 You can specify Snowflake using
 
@@ -156,32 +132,9 @@ You can specify Snowflake using
 
 You'll also need to set the `SNOWFLAKE_PASSWORD` environment variable.
 
-### Trino
-
-To run under Trino, you may want to load the plugin, as described in [`java/trino-plugin/README.md`](./java/trino-plugin/README.md). If you don't mind some unit test failures on `FARM_FINGERPRINT`, you can also just run:
-
-```bash
-docker run --name trino -d -p 8080:8080 trinodb/trino
-```
-
-Then you need to start a Trino shell:
-
-```bash
-docker exec -it trino trino
-```
-
-...and paste in the contents of [`./sql/trino_compat.sql`](./sql/trino_compat.sql). This will provide SQL UDFs that implement a bunch of BigQ
-
-Then you can run `joinery` with:
-
-```txt
---database "trino://anyone@localhost/memory/default"
-```
-
 ## Developing
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase.
-
 
 ## Other projects of interest
 
