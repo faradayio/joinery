@@ -14,14 +14,12 @@ trino-plugin:
 
 # Build our Trino image.
 trino-image: trino-plugin
-	docker build -f Dockerfile.trino -t trino-joinery .
+	docker build -f docker/trino/Dockerfile -t trino-joinery .
 
 # Run our Trino image.
 docker-run-trino: trino-image
 	docker run --name trino-joinery -p 8080:8080 -d trino-joinery
-	# Wait for Trino to start.
-	until curl -s http://localhost:8080/v1/info | grep -q '"starting":false'; do sleep 1; done
-	docker exec -it trino-joinery trino --file "/etc/trino/trino_compat.sql"
+	docker exec -it trino-joinery install-udfs
 
 # Stop and delete our Trino container.
 docker-rm-trino:
