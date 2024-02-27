@@ -13,7 +13,7 @@ use tracing::{debug, instrument};
 use crate::{
     ast::Target,
     errors::{format_err, Context, Error, Result},
-    transforms::{self, Transform, Udf},
+    transforms::{self, RenameFunctionsBuilder, Transform, Udf},
     util::AnsiIdent,
 };
 
@@ -249,16 +249,15 @@ impl Driver for SnowflakeDriver {
     }
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
+        let rename_functions = RenameFunctionsBuilder::new(&FUNCTION_NAMES)
+            .udf_table(&UDFS, &format_udf)
+            .build();
         vec![
             Box::new(transforms::CountifToCase),
             Box::new(transforms::IfToCase),
             Box::new(transforms::IndexFromZero),
             Box::new(transforms::IsBoolToCase),
-            Box::new(transforms::RenameFunctions::new(
-                &FUNCTION_NAMES,
-                &UDFS,
-                &format_udf,
-            )),
+            Box::new(rename_functions),
         ]
     }
 

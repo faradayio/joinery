@@ -4,16 +4,18 @@ use std::{fmt, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use codespan_reporting::{diagnostic::Diagnostic, files::Files};
+use joinery_macros::sql_quote;
 use once_cell::sync::Lazy;
 use prusto::{error::Error as PrustoError, Client, ClientBuilder, Presto, QueryError, Row};
 use regex::Regex;
 use tracing::debug;
 
 use crate::{
-    ast::Target,
+    ast::{FunctionCall, Target},
     errors::{format_err, Context, Error, Result, SourceError},
     known_files::KnownFiles,
-    transforms::{self, Transform, Udf},
+    tokenizer::TokenStream,
+    transforms::{self, RenameFunctionsBuilder, Transform},
     util::AnsiIdent,
 };
 
@@ -54,20 +56,21 @@ static FUNCTION_NAMES: phf::Map<&'static str, &'static str> = phf::phf_map! {
     "TO_HEX" => "memory.joinery_compat.TO_HEX_COMPAT",
 };
 
-/// A `phf_map!` of BigQuery function names to UDFs.
-///
-/// TODO: I'm not even sure there's a way to define SQL UDFs in Trino.
-static UDFS: phf::Map<&'static str, &'static Udf> = phf::phf_map! {};
-
-/// Format a UDF.
-///
-/// TODO: I'm not even sure there's a way to define SQL UDFs in Trino.
-fn format_udf(udf: &Udf) -> String {
-    format!(
-        "CREATE OR REPLACE TEMP FUNCTION {} AS $$\n{}\n$$\n",
-        udf.decl, udf.sql
-    )
+/// Rewrite `APPROX_QUANTILES` to `APPROX_PERCENTILE`. We need to implement this
+/// as a function call rewriter, because it's an aggregate function, and we
+/// can't define those as an SQL UDF.
+fn rewrite_approx_quantiles(call: &FunctionCall) -> TokenStream {
+    let mut args = call.args.node_iter();
+    let value_arg = args.next().expect("should be enforced by type checker");
+    let quantiles_arg = args.next().expect("should be enforced by type checker");
+    sql_quote! {
+        APPROX_PERCENTILE(
+            #value_arg,
+            PERCENTILE_ARRAY_FOR_QUANTILES(#quantiles_arg)
+        )
+    }
 }
+
 /// A locator for a Trino database. May or may not also work for Presto.
 #[derive(Debug)]
 pub struct TrinoLocator {
@@ -179,6 +182,9 @@ impl Driver for TrinoDriver {
     }
 
     fn transforms(&self) -> Vec<Box<dyn Transform>> {
+        let rename_functions = RenameFunctionsBuilder::new(&FUNCTION_NAMES)
+            .rewrite_function_call("APPROX_QUANTILES", &rewrite_approx_quantiles)
+            .build();
         vec![
             Box::new(transforms::QualifyToSubquery),
             Box::<transforms::ExpandExcept>::default(),
@@ -187,11 +193,7 @@ impl Driver for TrinoDriver {
             Box::new(transforms::IndexFromOne),
             Box::new(transforms::IsBoolToCase),
             Box::new(transforms::OrReplaceToDropIfExists),
-            Box::new(transforms::RenameFunctions::new(
-                &FUNCTION_NAMES,
-                &UDFS,
-                &format_udf,
-            )),
+            Box::new(rename_functions),
             Box::new(transforms::SpecialDateFunctionsToTrino),
             Box::new(transforms::StandardizeCurrentTimeUnit::no_parens()),
             Box::new(transforms::CleanUpTempManually {

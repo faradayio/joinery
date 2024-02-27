@@ -19,7 +19,7 @@ pub use self::{
     is_bool_to_case::IsBoolToCase,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists,
     qualify_to_subquery::QualifyToSubquery,
-    rename_functions::{RenameFunctions, Udf},
+    rename_functions::{RenameFunctionsBuilder, Udf},
     special_date_functions_to_trino::SpecialDateFunctionsToTrino,
     standardize_current_time_unit::StandardizeCurrentTimeUnit,
     wrap_nested_queries::WrapNestedQueries,
