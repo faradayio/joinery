@@ -9,6 +9,7 @@ public class JoineryPlugin implements io.trino.spi.Plugin {
     public Set<Class<?>> getFunctions() {
         return ImmutableSet.<Class<?>>builder()
                 .add(FarmFingerprintFunction.class)
+                .add(PercentileArrayForQuantilesFunction.class)
                 .build();
     }
 }
