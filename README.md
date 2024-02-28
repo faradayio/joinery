@@ -1,35 +1,5 @@
 # `joinery`: Safe SQL transpiler, written in Rust
 
-It was decided to write a greenfield transpiler in Rust due to concerns about correctness of Python-based solutions.
-
-[BigQuery "Standard SQL"](https://cloud.google.com/bigquery/docs/reference/standard-sql/query-syntax) was taken as the reference dialect, but it is anticipated the other input dialects will be supported.
-
-It performs type inference (necessary, for example, to expand `EXCEPT(*)` into a list of columns, because Trino doesn't support it) and preserves whitespace.
-
-If you want to run _your_ production workloads, **you will almost certainly need to contribute code.** In particular, our API coverage is limited. See [`tests/sql/`](./tests/sql/) for examples of what we support.
-
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for an overview of the codebase.
-
-```
-$ joinery --help
-Usage: joinery <COMMAND>
-
-Commands:
-  parse      Parse SQL from a CSV file containing `id` and `query` columns
-  sql-test   Run SQL tests from a directory
-  transpile  Transpile BigQuery SQL to another dialect
-  help       Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help  Print help
-```
-
-## Status
-
-- Trino has passing unit tests for all our use cases, but probably not yours. Also, there's a difference between "works with the SQL test suite that _theoretically_ covers the features we support" and "works with gnarly production queries that do tricky things with correlated subqueries."
-- AWS Athena 3 is basically Trino, except UDFs are different and we don't support them yet. There may also be dialect differences. Not currently tested.
-- Snowflake has partial support.
-
 ## What is this?
 
 This is an experimental tool to transpile (some) SQL code written in BigQuery's "Standard SQL" dialect into other dialects. For example, it can transform:
@@ -55,7 +25,31 @@ SELECT ARRAY_DISTINCT(
 FROM array_select_data
 ```
 
-It even does type inference, which is needed for certain complex transformations! The transformation process makes some effort to preserve whitespace and comments, so the output SQL is still mostly readable.
+It even does type inference, which is needed for certain complex transformations like handling `SELECT * EXCEPT c1 FROM t1`! The transformation process makes some effort to preserve whitespace and comments, so the output SQL is still mostly readable.
+
+If you want to run _your_ production workloads, **you will almost certainly need to contribute code.** In particular, our API coverage is limited. See [`tests/sql/`](./tests/sql/) for examples of what we support.
+
+## Usage
+
+```
+$ joinery --help
+Usage: joinery <COMMAND>
+
+Commands:
+  parse      Parse SQL from a CSV file containing `id` and `query` columns
+  sql-test   Run SQL tests from a directory
+  transpile  Transpile BigQuery SQL to another dialect
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## Status
+
+- Trino has passing unit tests for all our use cases, but probably not yours. Also, there's a difference between "works with the SQL test suite that _theoretically_ covers the features we support" and "works with gnarly production queries that do tricky things with correlated subqueries."
+- AWS Athena 3 is basically Trino, except UDFs are different and we don't support them yet. There may also be dialect differences. Not currently tested.
+- Snowflake has partial support.
 
 ## Design philosophy
 
