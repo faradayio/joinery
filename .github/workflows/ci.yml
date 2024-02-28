@@ -30,6 +30,7 @@ jobs:
       - name: Build & check Trino
         run: |
           just install-dev-tools
+          (cd java/trino-plugin && java --version && mvn --version)
           just docker-run-trino
           just check-trino
           docker tag trino-joinery ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
