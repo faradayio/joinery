@@ -19,7 +19,7 @@ trino-image: trino-plugin
 # Run our Trino image.
 docker-run-trino: trino-image
 	docker run --name trino-joinery -p 8080:8080 -d trino-joinery
-	docker exec -it trino-joinery install-udfs
+	docker exec trino-joinery install-udfs
 
 # Stop and delete our Trino container.
 docker-rm-trino:
