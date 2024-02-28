@@ -31,7 +31,8 @@ jobs:
         run: |
           just install-dev-tools
           (cd java/trino-plugin && java --version && mvn --version && echo "JAVA_HOME: $JAVA_HOME")
-          set -u JAVA_HOME
+          echo $JAVA_HOME
+          which java
           just docker-run-trino
           just check-trino
           docker tag trino-joinery ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
