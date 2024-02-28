@@ -30,9 +30,8 @@ jobs:
       - name: Build & check Trino
         run: |
           just install-dev-tools
-          . ~/.asdf/plugins/java/set-java-home.bash
-          (cd java/trino-plugin && java --version && mvn --version)
-          echo "JAVA_HOME: $JAVA_HOME"
+          (cd java/trino-plugin && . ~/.asdf/plugins/java/set-java-home.bash)
+          (cd java/trino-plugin && java --version && mvn --version && echo "JAVA_HOME: $JAVA_HOME")
           just docker-run-trino
           just check-trino
           docker tag trino-joinery ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
