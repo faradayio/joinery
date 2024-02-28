@@ -23,6 +23,10 @@ jobs:
       - uses: asdf-vm/actions/setup@f4acd427436df623426c29f7e3e9ea715be28396
       - run: rustup update stable
       - uses: extractions/setup-just@v1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
 
       - uses: actions/checkout@v3
       - name: Build & check core
@@ -31,8 +35,6 @@ jobs:
         run: |
           just install-dev-tools
           (cd java/trino-plugin && java --version && mvn --version && echo "JAVA_HOME: $JAVA_HOME")
-          echo $JAVA_HOME
-          which java
           just docker-run-trino
           just check-trino
           docker tag trino-joinery ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
