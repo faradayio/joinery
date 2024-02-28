@@ -2,21 +2,46 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/trino-joinery
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+      packages: write
+
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build
-    - name: Run tests
-      run: cargo test
+      - run: rustup update stable
+      - uses: extractions/setup-just@v1
+      - uses: actions/checkout@v3
+      - name: Build & check core
+        run: just check
+      - name: Build & check Trino
+        run: |
+          just docker-run-trino
+          just check-trino
+          docker tag trino-joinery ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          push: true
+          # For now, always push the latest `main` build as an image, until
+          # we start making versioned releases.
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
