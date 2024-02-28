@@ -1,4 +1,4 @@
--- pending: trino Rust driver seems to have problems with NULL in certain columns
+-- pending: trino TESTS ONLY: Rust driver seems to have problems with NULL in certain columns
 
 -- CAST(NULL AS <type>) for common types.
 CREATE OR REPLACE TABLE __result1 AS
