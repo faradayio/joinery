@@ -20,7 +20,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: asdf-vm/actions/install@f4acd427436df623426c29f7e3e9ea715be28396
+      - uses: asdf-vm/actions/setup@f4acd427436df623426c29f7e3e9ea715be28396
       - run: rustup update stable
       - uses: extractions/setup-just@v1
 
