@@ -56,6 +56,11 @@ impl RenameFunctionsBuilder {
     }
 
     /// Add a function call rewriter.
+    ///
+    /// WARNING: This should be a last resort, after trying [`Self::udf_table`],
+    /// or defining an SQL UDF and passing it to [`Self::new`] as part of the
+    /// `function_table`. Mostly this should be reserved for rewriting aggregate
+    /// functions, or for databases that don't support SQL UDFs at all.
     pub fn rewrite_function_call(
         mut self,
         name: &'static str,
