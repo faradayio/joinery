@@ -1,6 +1,13 @@
 #!/bin/bash
+#
+# Install UDFs into Trino.
+#
+# Usage: install-udfs [trino_url]
 
 set -euo pipefail
 
-until curl -s http://localhost:8080/v1/info | grep -q '"starting":false'; do sleep 1; done
-trino --file "/etc/trino/trino_compat.sql"
+# URL of our Trino server.
+trino_url="${1:-"http://localhost:8080"}"
+
+until curl -s "$trino_url/v1/info" | grep -q '"starting":false'; do sleep 1; done
+trino --file "/etc/trino/trino_compat.sql" "$trino_url"
