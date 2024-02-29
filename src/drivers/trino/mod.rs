@@ -82,6 +82,7 @@ macro_rules! retry_trino_error {
             match $e {
                 Ok(val) => break Ok(val),
                 Err(e) if should_retry(&e) && max_tries > 0 => {
+                    eprintln!("Retrying Trino query after error");
                     sleep(sleep_duration).await;
                     max_tries -= 1;
                     sleep_duration *= 2;
