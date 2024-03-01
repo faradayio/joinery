@@ -350,9 +350,7 @@ impl fmt::Display for TrinoString<'_> {
 /// and network errors, so we don't need to worry about that. But we do need
 /// to look out for `QueryError`s that might need to be retried.
 fn should_retry(e: &PrustoError) -> bool {
-    // Temporary debugging code to figure out why this isn't triggering.
-    eprintln!("Trino error: {:?}", e);
-    matches!(e, PrustoError::QueryError(QueryError { error_type, .. }) if error_type == "NO_NODES_AVAILABLE")
+    matches!(e, PrustoError::QueryError(QueryError { error_name, .. }) if error_name == "NO_NODES_AVAILABLE")
 }
 
 /// These errors are pages long.
