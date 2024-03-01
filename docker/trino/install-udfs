@@ -1,14 +1,45 @@
-#!/bin/bash
+#!/usr/bin/env python3
 #
 # Install UDFs into Trino.
 #
-# Usage: install-udfs [trino_url]
+# Usage: install-udfs.py [trino_url]
 
-set -euo pipefail
+import json
+import os
+import subprocess
+import sys
+import time
+from urllib import request
 
 # URL of our Trino server.
-trino_url="${1:-"http://localhost:8080"}"
-#echo trino_url: "$trino_url"
+trino_url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080"
 
-until curl -s "$trino_url/v1/info" | grep -q '"starting":false'; do sleep 1; done
-trino --file "/etc/trino/trino_compat.sql" "$trino_url"
+
+# Print to stderr.
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+# Wait for Trino to start.
+eprint(f"Waiting for Trino to start at {trino_url}...")
+max_retries = 30
+while max_retries > 0:
+    max_retries -= 1
+    try:
+        response = request.urlopen(f"{trino_url}/v1/info", data=None, timeout=1)
+        json_data = json.loads(response.read())
+        if json_data["starting"] == False:
+            break
+    except Exception as e:
+        if max_retries == 0:
+            raise
+        pass
+    time.sleep(1)
+eprint("Trino started.")
+
+# Install UDFs by running the Trino CLI client, without replacing the current process.
+eprint("Installing UDFs...")
+subprocess.run(
+    ["trino", "--file", "/etc/trino/trino_compat.sql", trino_url], check=True
+)
+eprint("UDFs installed.")
