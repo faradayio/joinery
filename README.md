@@ -49,7 +49,6 @@ Options:
 
 - Trino has passing unit tests for all our use cases, but probably not yours. Also, there's a difference between "works with the SQL test suite that _theoretically_ covers the features we support" and "works with gnarly production queries that do tricky things with correlated subqueries."
 - AWS Athena 3 is basically Trino, except UDFs are different and we don't support them yet. There may also be dialect differences. Not currently tested.
-- Snowflake has partial support.
 
 ## Design philosophy
 
@@ -113,18 +112,6 @@ just trino-shell
 ```
 
 For more details on all these commands, see the [`Justfile`](./Justfile).
-
-### Snowflake
-
-This hasn't been updated recently, so some tests for newer features may fail.
-
-You can specify Snowflake using
-
-```txt
---database snowflake://<user>@<organization>-<account>[.privatelink]/<warehouse>/<database>
-```
-
-You'll also need to set the `SNOWFLAKE_PASSWORD` environment variable.
 
 ## Developing
 

@@ -1,5 +1,3 @@
--- pending: snowflake Need to force AVG(INT64|FLOAT64) to return FLOAT64, not DECIMAL
---
 -- ANSI standard aggregate functions: AVG, COUNT, MAX, MIN, SUM
 
 CREATE TEMP TABLE ints (i INT64);

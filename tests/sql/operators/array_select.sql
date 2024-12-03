@@ -1,4 +1,3 @@
--- pending: snowflake ARRAY(SELECT ...) requires significant transformation
 -- pending: sqlite3 Does not support arrays
 --
 -- ARRAY(SELECT ...)

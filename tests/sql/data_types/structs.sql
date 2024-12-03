@@ -1,4 +1,3 @@
--- pending: snowflake Need to emulate using OBJECT. May be challenging.
 -- pending: sqlite3 Need to build structs from scratch
 
 CREATE OR REPLACE TABLE __result1 AS

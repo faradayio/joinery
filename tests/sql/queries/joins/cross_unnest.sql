@@ -1,4 +1,3 @@
--- pending: snowflake Should be transpilable.
 -- pending: sqlite3 No array support.
 --
 -- CROSS JOIN UNNEST

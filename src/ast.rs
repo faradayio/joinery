@@ -30,7 +30,6 @@ use joinery_macros::{Emit, EmitDefault, Spanned, ToTokens};
 use crate::{
     drivers::{
         bigquery::{BigQueryName, BigQueryString},
-        snowflake::{SnowflakeString, KEYWORDS as SNOWFLAKE_KEYWORDS},
         sqlite3::KEYWORDS as SQLITE3_KEYWORDS,
         trino::{TrinoString, KEYWORDS as TRINO_KEYWORDS},
     },
@@ -68,7 +67,6 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 #[allow(dead_code)]
 pub enum Target {
     BigQuery,
-    Snowflake,
     SQLite3,
     Trino,
 }
@@ -78,7 +76,6 @@ impl Target {
     pub fn is_keyword(self, s: &str) -> bool {
         let keywords = match self {
             Target::BigQuery => &KEYWORDS,
-            Target::Snowflake => &SNOWFLAKE_KEYWORDS,
             Target::SQLite3 => &SQLITE3_KEYWORDS,
             Target::Trino => &TRINO_KEYWORDS,
         };
@@ -90,7 +87,6 @@ impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Target::BigQuery => write!(f, "bigquery"),
-            Target::Snowflake => write!(f, "snowflake"),
             Target::SQLite3 => write!(f, "sqlite3"),
             Target::Trino => write!(f, "trino"),
         }
@@ -195,7 +191,7 @@ impl Emit for Ident {
         if t.is_keyword(&self.name) || !is_c_ident(&self.name) {
             match t {
                 Target::BigQuery => write!(f, "{}", BigQueryName(&self.name))?,
-                Target::Snowflake | Target::SQLite3 | Target::Trino => {
+                Target::SQLite3 | Target::Trino => {
                     write!(f, "{}", AnsiIdent(&self.name))?;
                 }
             }
@@ -240,7 +236,6 @@ impl Emit for LiteralValue {
             LiteralValue::Float64(fl) => write!(f, "{}", fl),
             LiteralValue::String(s) => match t {
                 Target::BigQuery => write!(f, "{}", BigQueryString(s)),
-                Target::Snowflake => write!(f, "{}", SnowflakeString(s)),
                 Target::SQLite3 => write!(f, "{}", AnsiString(s)),
                 Target::Trino => write!(f, "{}", TrinoString(s)),
             },
@@ -713,7 +708,7 @@ impl Emit for SetOperator {
             // whitespace from the first token in those cases. In other cases,
             // we'll substitute `UNION` with a comment saying what it really
             // should be.
-            Target::Snowflake | Target::SQLite3 => match self {
+            Target::SQLite3 => match self {
                 SetOperator::UnionAll {
                     union_token,
                     all_token,
@@ -836,30 +831,12 @@ pub enum SelectListItem {
 }
 
 /// An `EXCEPT` clause.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct Except {
     pub except_token: Keyword,
     pub paren1: Punct,
     pub columns: NodeVec<Ident>,
     pub paren2: Punct,
-}
-
-impl Emit for Except {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match t {
-            Target::Snowflake => {
-                self.except_token
-                    .ident
-                    .token
-                    .with_str("EXCLUDE")
-                    .emit(t, f)?;
-                self.paren1.token.with_ws_only().emit(t, f)?;
-                self.columns.emit(t, f)?;
-                self.paren2.token.with_ws_only().emit(t, f)
-            }
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// An SQL expression.
@@ -963,9 +940,7 @@ pub enum CastType {
 impl Emit for CastType {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match self {
-            CastType::SafeCast { safe_cast_token }
-                if t == Target::Snowflake || t == Target::Trino =>
-            {
+            CastType::SafeCast { safe_cast_token } if t == Target::Trino => {
                 safe_cast_token.ident.token.with_str("TRY_CAST").emit(t, f)
             }
             // TODO: This isn't strictly right, but it's as close as I know how to
@@ -1180,11 +1155,6 @@ impl Emit for ArrayExpression {
                 last_token.with_ws_only().emit(t, f)?;
             }
             _ => match t {
-                Target::Snowflake => {
-                    self.delim1.token.with_str("[").emit(t, f)?;
-                    self.definition.emit(t, f)?;
-                    self.delim2.token.with_str("]").emit(t, f)?;
-                }
                 Target::SQLite3 => {
                     if let Some(array_token) = &self.array_token {
                         array_token.emit(t, f)?;
@@ -1407,7 +1377,7 @@ impl SpecialDateExpression {
 }
 
 /// An `ARRAY_AGG` expression.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct ArrayAggExpression {
     pub array_agg_token: PseudoKeyword,
     pub paren1: Punct,
@@ -1415,33 +1385,6 @@ pub struct ArrayAggExpression {
     pub expression: Box<Expression>,
     pub order_by: Option<OrderBy>,
     pub paren2: Punct,
-}
-
-impl Emit for ArrayAggExpression {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match self {
-            // Snowflake formats ORDER BY as `ARRAY_AGG(expression) WITHIN GROUP
-            // (ORDER BY ...)`.
-            ArrayAggExpression {
-                array_agg_token,
-                paren1,
-                distinct,
-                expression,
-                order_by: Some(order_by),
-                paren2,
-            } if t == Target::Snowflake => {
-                array_agg_token.emit(t, f)?;
-                paren1.emit(t, f)?;
-                distinct.emit(t, f)?;
-                expression.emit(t, f)?;
-                paren2.emit(t, f)?;
-                f.write_token_start("WITHIN GROUP(")?;
-                order_by.emit(t, f)?;
-                f.write_token_start(")")
-            }
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// A function call.
@@ -1603,27 +1546,6 @@ pub enum DataType {
 impl Emit for DataType {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match t {
-            Target::Snowflake => match self {
-                DataType::Bool(token) => token.ident.token.with_str("BOOLEAN").emit(t, f),
-                DataType::Bytes(token) => token.ident.token.with_str("BINARY").emit(t, f),
-                DataType::Int64(token) => token.ident.token.with_str("INTEGER").emit(t, f),
-                DataType::Date(token) => token.emit(t, f),
-                // "Wall clock" time with no timezone.
-                DataType::Datetime(token) => token.ident.token.with_str("TIMESTAMP_NTZ").emit(t, f),
-                DataType::Float64(token) => token.ident.token.with_str("FLOAT8").emit(t, f),
-                DataType::Geography(token) => token.emit(t, f),
-                DataType::Numeric(token) => token.emit(t, f),
-                DataType::String(token) => token.ident.token.with_str("TEXT").emit(t, f),
-                DataType::Time(token) => token.emit(t, f),
-                // `TIMESTAMP_TZ` will need very careful timezone handling.
-                DataType::Timestamp(token) => token.ident.token.with_str("TIMESTAMP_TZ").emit(t, f),
-                DataType::Array { array_token, .. } => {
-                    array_token.ident.token.with_str("ARRAY").emit(t, f)
-                }
-                DataType::Struct { struct_token, .. } => {
-                    struct_token.ident.token.with_str("OBJECT").emit(t, f)
-                }
-            },
             Target::SQLite3 => match self {
                 DataType::Bool(token) | DataType::Int64(token) => {
                     token.ident.token.with_str("INTEGER").emit(t, f)

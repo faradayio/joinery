@@ -1,4 +1,3 @@
--- pending: snowflake Lots of work but low risk.
 -- pending: sqlite3 Lots of work but low risk.
 
 -- Moon landing UTC: 1969-07-20T20:17:39Z

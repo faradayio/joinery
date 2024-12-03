@@ -1,4 +1,3 @@
--- pending: snowflake Shouldn't be hard.
 -- pending: sqlite3 No array support.
 --
 -- FROM UNNEST

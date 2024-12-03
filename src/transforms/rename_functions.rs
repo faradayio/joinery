@@ -1,4 +1,4 @@
-//! A simple tree-walker that renames functions to their Snowflake equivalents.
+//! A simple tree-walker that renames functions to their target equivalents.
 
 use std::collections::HashMap;
 
@@ -12,12 +12,6 @@ use crate::{
 
 use super::{Transform, TransformExtra};
 
-/// A custom UDF (user-defined function).
-pub struct Udf {
-    pub decl: &'static str,
-    pub sql: &'static str,
-}
-
 /// Given a `FunctionCall`, return a rewritten `TokenStream` that implements the
 /// function in the target dialect. This is basically a proc macro for SQL
 /// function calls.
@@ -26,33 +20,16 @@ pub type FunctionCallRewriter = &'static dyn Fn(&FunctionCall) -> TokenStream;
 /// A builder type for [`RenameFunctions`].
 pub struct RenameFunctionsBuilder {
     function_table: &'static phf::Map<&'static str, &'static str>,
-    udf_table: &'static phf::Map<&'static str, &'static Udf>,
-    format_udf: &'static dyn Fn(&Udf) -> String,
     function_call_rewriters: HashMap<String, FunctionCallRewriter>,
 }
 
 impl RenameFunctionsBuilder {
     /// Create a new `RenameFunctionsBuilder`.
     pub fn new(function_table: &'static phf::Map<&'static str, &'static str>) -> Self {
-        static EMPTY_UDFS: phf::Map<&'static str, &'static Udf> = phf::phf_map! {};
         Self {
             function_table,
-            udf_table: &EMPTY_UDFS,
-            format_udf: &|_| "".to_string(),
             function_call_rewriters: HashMap::new(),
         }
-    }
-
-    /// Set the UDF table and formatter, for databases that support
-    /// `WITH FUNCTION`-like syntax.
-    pub fn udf_table(
-        mut self,
-        udf_table: &'static phf::Map<&'static str, &'static Udf>,
-        format_udf: &'static dyn Fn(&Udf) -> String,
-    ) -> Self {
-        self.udf_table = udf_table;
-        self.format_udf = format_udf;
-        self
     }
 
     /// Add a function call rewriter.
@@ -75,9 +52,6 @@ impl RenameFunctionsBuilder {
     pub fn build(self) -> RenameFunctions {
         RenameFunctions {
             function_table: self.function_table,
-            udf_table: self.udf_table,
-            format_udf: self.format_udf,
-            udfs: HashMap::new(),
             function_call_rewriters: self.function_call_rewriters,
         }
     }
@@ -88,15 +62,6 @@ impl RenameFunctionsBuilder {
 pub struct RenameFunctions {
     // Lookup table containing function replacements.
     function_table: &'static phf::Map<&'static str, &'static str>,
-
-    // Lookup table containing UDF replacements.
-    udf_table: &'static phf::Map<&'static str, &'static Udf>,
-
-    // Format a UDF.
-    format_udf: &'static dyn Fn(&Udf) -> String,
-
-    // UDFs that we need to create, if we haven't already.
-    udfs: HashMap<String, &'static Udf>,
 
     // Function call rewriters.
     function_call_rewriters: HashMap<String, FunctionCallRewriter>,
@@ -120,10 +85,6 @@ impl RenameFunctions {
             //
             // TODO: Preserve whitespace and source location.
             function_call.name = Name::new_from_dotted(new_name, function_call.name.span());
-        } else if let Some(udf) = self.udf_table.get(&name) {
-            // We'll need a UDF, so add it to our list it if isn't already
-            // there.
-            self.udfs.insert(name, udf);
         } else if let Some(rewriter) = self.function_call_rewriters.get(&name) {
             // Rewrite the function call.
             let token_stream = rewriter(function_call);
@@ -145,12 +106,8 @@ impl Transform for RenameFunctions {
         sql_program.drive_mut(self.as_mut());
 
         // Create any UDFs that we need.
-        let mut extra_sql = vec![];
-        for udf in self.udfs.values() {
-            extra_sql.push((self.format_udf)(udf));
-        }
         Ok(TransformExtra {
-            native_setup_sql: extra_sql,
+            native_setup_sql: vec![],
             native_teardown_sql: vec![],
         })
     }

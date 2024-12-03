@@ -14,13 +14,11 @@ use crate::{
 };
 
 use self::{
-    snowflake::{SnowflakeLocator, SNOWFLAKE_LOCATOR_PREFIX},
     sqlite3::{SQLite3Locator, SQLITE3_LOCATOR_PREFIX},
     trino::{TrinoLocator, TRINO_LOCATOR_PREFIX},
 };
 
 pub mod bigquery;
-pub mod snowflake;
 pub mod sqlite3;
 pub mod trino;
 
@@ -44,7 +42,6 @@ impl FromStr for Box<dyn Locator> {
         let prefix = &s[..colon_pos + 1];
         match prefix {
             SQLITE3_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SQLite3Locator>()?)),
-            SNOWFLAKE_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SnowflakeLocator>()?)),
             TRINO_LOCATOR_PREFIX => Ok(Box::new(s.parse::<TrinoLocator>()?)),
             _ => Err(format_err!("unsupported database type: {}", s)),
         }

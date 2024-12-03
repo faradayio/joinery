@@ -1,16 +1,7 @@
--- pending: snowflake Know how we could transpile, see source.
 -- pending: sqlite3 No array support.
 --
 -- UNNEST
---
--- Here's how to get close on Snowflake.
---
--- ```sql
--- CREATE TEMP FUNCTION unnest(arr ARRAY) RETURNS TABLE(value VARIANT)
--- AS $$ SELECT value FROM TABLE(FLATTEN(INPUT => arr)) $$;
---
--- SELECT 2 IN (SELECT * FROM TABLE(UNNEST([1,2,3])))
--- ```
+
 
 CREATE OR REPLACE TABLE __result1 AS
 SELECT

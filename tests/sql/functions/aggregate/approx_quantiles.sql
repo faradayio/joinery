@@ -1,4 +1,3 @@
--- pending: snowflake Use APPROX_PERCENTILE instead of APPROX_QUANTILES (complicated)
 -- pending: sqlite3 No APPROX_QUANTILES function
 
 CREATE TEMP TABLE quantile_data (x INT64);

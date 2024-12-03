@@ -1,4 +1,3 @@
--- pending: snowflake Not mapped.
 -- pending: sqlite3 Not mapped.
 --
 -- SUBSTR
