@@ -305,10 +305,11 @@ pub enum NodeOrSep<T: Node> {
 /// this, we would need to modify [`IntoIterator`] to return interleaved
 /// nodes and separators, and define custom node-only and separator-only
 /// iterators.
-#[derive(Debug, ToTokens)]
+#[derive(Debug, ToTokens, Drive, DriveMut)]
 pub struct NodeVec<T: Node> {
     /// The separator to use when adding items.
     #[to_tokens(skip)]
+    #[drive(skip)]
     pub separator: &'static str,
     /// The nodes and separators in this vector.
     pub items: Vec<NodeOrSep<T>>,

@@ -352,7 +352,7 @@ fn deserialize_query_result<T: serde::de::DeserializeOwned>(
 fn query_result_json(query_result: QueryResult, columns: &[&str]) -> Result<Value> {
     match query_result {
         QueryResult::Arrow(record_batches) => {
-            let rows = record_batches_to_json_rows(&record_batches.iter().collect::<Vec<_>>())
+            let rows = record_batches_to_json_rows(&record_batches.iter().collect::<Vec<_>>()[..])
                 .context("failed to convert Arrow record batches to JSON rows")?
                 .into_iter()
                 // Convert row map to a JSON array.

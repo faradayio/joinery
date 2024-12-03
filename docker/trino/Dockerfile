@@ -1,9 +1,7 @@
 # A Dockerfile which builds a Trino image with our UDFs.
 
 # Use the official Trino image as the base image.
-#
-# TODO: We'll eventually freeze this to a known-good version.
-FROM trinodb/trino:latest
+FROM trinodb/trino:443
 
 # Copy ./java/trino-plugin/target/ to /usr/lib/trino/plugin/joinery.
 ADD ./java/trino-plugin/target/ /usr/lib/trino/plugin/joinery
