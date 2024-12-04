@@ -621,11 +621,6 @@ impl TokenStream {
         self.try_into_parsed(ast::sql_program::query_expression)
     }
 
-    /// Try to parse this stream as a [`ast::QueryExpressionQuery`].
-    pub fn try_into_query_expression_query(self) -> Result<ast::QueryExpressionQuery> {
-        self.try_into_parsed(ast::sql_program::query_expression_query)
-    }
-
     /// Try to parse this stream as a [`ast::SelectExpression`].
     pub fn try_into_select_expression(self) -> Result<ast::SelectExpression> {
         self.try_into_parsed(ast::sql_program::select_expression)

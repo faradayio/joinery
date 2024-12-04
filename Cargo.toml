@@ -17,6 +17,7 @@ async-trait = "0.1.73"
 clap = { version = "4.4.6", features = ["derive", "wrap_help"] }
 codespan-reporting = "0.11.1"
 csv = "1.2.2"
+dbcrossbar_trino = { version = "0.2.2", features = ["macros", "values", "client", "rustls-tls"] }
 derive-visitor = "0.4.0"
 glob = "0.3.1"
 joinery_macros = { path = "joinery_macros" }
@@ -24,8 +25,6 @@ once_cell = "1.18.0"
 owo-colors = "4.0.0-rc.1"
 peg = "0.8.2"
 phf = { version = "0.11.2", features = ["macros"] }
-# Waiting on https://github.com/nooberfsh/prusto/issues/33
-prusto = { git = "https://github.com/nooberfsh/prusto.git" }
 rand = "0.8.4"
 regex = "1.10.0"
 rusqlite = { version = "0.29.0", features = ["bundled", "functions", "vtab"] }

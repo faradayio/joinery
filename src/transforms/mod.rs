@@ -8,33 +8,28 @@
 use crate::{ast, errors::Result};
 
 pub use self::{
-    bool_to_int::BoolToInt, clean_up_temp_manually::CleanUpTempManually,
-    countif_to_case::CountifToCase, expand_except::ExpandExcept, if_to_case::IfToCase,
-    in_unnest_to_contains::InUnnestToContains, index_from_one::IndexFromOne,
-    index_from_zero::IndexFromZero, is_bool_to_case::IsBoolToCase,
+    clean_up_temp_manually::CleanUpTempManually, countif_to_case::CountifToCase,
+    expand_except::ExpandExcept, in_unnest_to_contains::InUnnestToContains,
+    index_from_one::IndexFromOne, is_bool_to_case::IsBoolToCase,
     or_replace_to_drop_if_exists::OrReplaceToDropIfExists, qualify_to_subquery::QualifyToSubquery,
     rename_functions::RenameFunctionsBuilder,
     special_date_functions_to_trino::SpecialDateFunctionsToTrino,
     standardize_current_time_unit::StandardizeCurrentTimeUnit,
-    wrap_nested_queries::WrapNestedQueries,
+    standardize_literal_types::StandardizeLiteralTypes,
 };
 
-mod bool_to_int;
 mod clean_up_temp_manually;
 mod countif_to_case;
 mod expand_except;
-mod if_to_case;
 mod in_unnest_to_contains;
 mod index_from_one;
-mod index_from_zero;
 mod is_bool_to_case;
 mod or_replace_to_drop_if_exists;
 mod qualify_to_subquery;
 mod rename_functions;
 mod special_date_functions_to_trino;
 mod standardize_current_time_unit;
-mod wrap_nested_queries;
-
+mod standardize_literal_types;
 /// A transform that modifies an [`SqlProgram`].
 pub trait Transform {
     /// A human-readable name for this transform.

@@ -3,6 +3,7 @@
 use std::{borrow::Cow, collections::VecDeque, fmt, str::FromStr};
 
 use async_trait::async_trait;
+use dbcrossbar_trino::values::IsCloseEnoughTo;
 use tracing::{debug, trace};
 
 use crate::{
@@ -13,13 +14,9 @@ use crate::{
     transforms::{Transform, TransformExtra},
 };
 
-use self::{
-    sqlite3::{SQLite3Locator, SQLITE3_LOCATOR_PREFIX},
-    trino::{TrinoLocator, TRINO_LOCATOR_PREFIX},
-};
+use self::trino::{TrinoLocator, TRINO_LOCATOR_PREFIX};
 
 pub mod bigquery;
-pub mod sqlite3;
 pub mod trino;
 
 /// A URL-like locator for a database.
@@ -41,7 +38,6 @@ impl FromStr for Box<dyn Locator> {
             .ok_or_else(|| format_err!("could not find scheme for locator: {}", s))?;
         let prefix = &s[..colon_pos + 1];
         match prefix {
-            SQLITE3_LOCATOR_PREFIX => Ok(Box::new(s.parse::<SQLite3Locator>()?)),
             TRINO_LOCATOR_PREFIX => Ok(Box::new(s.parse::<TrinoLocator>()?)),
             _ => Err(format_err!("unsupported database type: {}", s)),
         }
@@ -52,6 +48,14 @@ impl FromStr for Box<dyn Locator> {
 /// test results.
 pub trait Comparable: fmt::Debug + fmt::Display + PartialEq + Send + Sync {}
 impl<T> Comparable for T where T: fmt::Debug + fmt::Display + PartialEq + Send + Sync {}
+
+/// A type that supports basic approximate equality and display, used for
+/// comparing test results. This is typically used for values written to
+/// databases, which might involve small changes to float values and timestamp
+/// precision.
+#[allow(dead_code)]
+pub trait ApproxComparable: fmt::Debug + fmt::Display + IsCloseEnoughTo + Send + Sync {}
+impl<T> ApproxComparable for T where T: fmt::Debug + fmt::Display + IsCloseEnoughTo + Send + Sync {}
 
 /// A database driver. This is mostly used for running SQL tests.
 ///
@@ -204,7 +208,7 @@ pub trait DriverImpl {
     type Type: Comparable;
 
     /// A native value for this database.
-    type Value: Comparable;
+    type Value: ApproxComparable;
 
     /// An iterator over the rows of a table.
     type Rows: Iterator<Item = Result<Vec<Self::Value>>> + Send + Sync;
@@ -259,7 +263,7 @@ pub trait DriverImpl {
         loop {
             match (result_rows.next(), expected_rows.next()) {
                 (Some(Ok(result_row)), Some(Ok(expected_row))) => {
-                    if result_row != expected_row {
+                    if !result_row.is_close_enough_to(&expected_row) {
                         // Build a short diff of recent rows.
                         let mut diff = String::new();
                         for row in result_history.iter() {
@@ -267,6 +271,8 @@ pub trait DriverImpl {
                         }
                         diff.push_str(&format!("- {}\n", vec_to_string(&expected_row)));
                         diff.push_str(&format!("+ {}\n", vec_to_string(&result_row)));
+                        debug!("expected row: {:?}", expected_row);
+                        debug!("result row: {:?}", result_row);
 
                         return Err(Error::tables_not_equal(format!(
                             "row from {} does not match row from {}:\n{}",

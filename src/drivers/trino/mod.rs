@@ -1,20 +1,21 @@
 //! Trino and maybe Presto driver.
 
-use std::{fmt, str::FromStr, sync::Arc, time::Duration};
+use std::{fmt, str::FromStr, time::Duration};
 
 use async_trait::async_trait;
-use codespan_reporting::{diagnostic::Diagnostic, files::Files};
+use dbcrossbar_trino::{
+    client::{Client, ClientBuilder, ClientError, QueryError},
+    DataType, Ident as TrinoIdent, Value,
+};
 use joinery_macros::sql_quote;
 use once_cell::sync::Lazy;
-use prusto::{error::Error as PrustoError, Client, ClientBuilder, Presto, QueryError, Row};
 use regex::Regex;
 use tokio::time::sleep;
 use tracing::debug;
 
 use crate::{
     ast::{FunctionCall, Target},
-    errors::{format_err, Context, Error, Result, SourceError},
-    known_files::KnownFiles,
+    errors::{format_err, Context, Error, Result},
     tokenizer::TokenStream,
     transforms::{self, RenameFunctionsBuilder, Transform},
     util::AnsiIdent,
@@ -170,12 +171,14 @@ pub struct TrinoDriver {
 impl TrinoDriver {
     /// Create a new Trino driver from a locator.
     pub fn from_locator(locator: &TrinoLocator) -> Result<Self> {
-        let client = ClientBuilder::new(&locator.user, &locator.host)
-            .port(locator.port.unwrap_or(8080))
-            .catalog(&locator.catalog)
-            .schema(&locator.schema)
-            .build()
-            .with_context(|| format!("Failed to connect to Trino: {}", locator))?;
+        let client = ClientBuilder::new(
+            locator.user.clone(),
+            locator.host.clone(),
+            locator.port.unwrap_or(8080),
+        )
+        .catalog_and_schema(locator.catalog.clone(), locator.schema.clone())
+        .build();
+
         Ok(Self {
             client,
             catalog: locator.catalog.clone(),
@@ -194,9 +197,10 @@ impl Driver for TrinoDriver {
     async fn execute_native_sql_statement(&mut self, sql: &str) -> Result<()> {
         debug!(%sql, "Executing native SQL statement");
         retry_trino_error! {
-            self.client.execute(sql.to_owned()).await
+            self.client.run_statement(sql).await
         }
-        .map_err(|err| abbreviate_trino_error(sql, err))?;
+        .map_err(Error::other)?;
+        //.map_err(|err| abbreviate_trino_error(sql, err))?;
         Ok(())
     }
 
@@ -213,6 +217,7 @@ impl Driver for TrinoDriver {
             Box::<transforms::ExpandExcept>::default(),
             Box::new(transforms::InUnnestToContains),
             Box::new(transforms::CountifToCase),
+            Box::new(transforms::StandardizeLiteralTypes),
             Box::new(transforms::IndexFromOne),
             Box::new(transforms::IsBoolToCase),
             Box::new(transforms::OrReplaceToDropIfExists),
@@ -229,9 +234,9 @@ impl Driver for TrinoDriver {
     async fn drop_table_if_exists(&mut self, table_name: &str) -> Result<()> {
         let sql = format!("DROP TABLE IF EXISTS {}", AnsiIdent(table_name));
         retry_trino_error! {
-            self.client.execute(sql.clone()).await
+            self.client.run_statement(&sql).await
         }
-        .map_err(|err| abbreviate_trino_error(&sql, err))
+        //.map_err(|err| abbreviate_trino_error(&sql, err))
         .with_context(|| format!("Failed to drop table: {}", table_name))?;
         Ok(())
     }
@@ -244,41 +249,29 @@ impl Driver for TrinoDriver {
 
 #[async_trait]
 impl DriverImpl for TrinoDriver {
-    type Type = String;
-    type Value = serde_json::Value;
+    type Type = DataType;
+    type Value = Value;
     type Rows = Box<dyn Iterator<Item = Result<Vec<Self::Value>>> + Send + Sync>;
 
     #[tracing::instrument(skip(self))]
     async fn table_columns(&mut self, table_name: &str) -> Result<Vec<Column<Self::Type>>> {
-        #[derive(Debug, Presto)]
-        #[allow(non_snake_case)]
-        struct Col {
-            col: String,
-            ty: String,
-        }
+        let catalog = TrinoIdent::new(&self.catalog).map_err(Error::other)?;
+        let schema = TrinoIdent::new(&self.schema).map_err(Error::other)?;
+        let table_name = TrinoIdent::new(table_name).map_err(Error::other)?;
 
-        let sql = format!(
-            "SELECT column_name AS col, data_type AS ty
-            FROM information_schema.columns
-            WHERE table_catalog = {} AND table_schema = {} AND table_name = {}",
-            // TODO: Replace with real string escapes.
-            TrinoString(&self.catalog),
-            TrinoString(&self.schema),
-            TrinoString(table_name)
-        );
-        let dataset = retry_trino_error! {
-            self.client.get_all::<Col>(sql.clone()).await
+        let column_infos = retry_trino_error! {
+            self.client.get_table_column_info(&catalog, &schema, &table_name).await
         }
-        .map_err(|err| abbreviate_trino_error(&sql, err))
         .with_context(|| format!("Failed to get columns for table: {}", table_name))?;
-        Ok(dataset
-            .into_vec()
+        column_infos
             .into_iter()
-            .map(|c| Column {
-                name: c.col,
-                ty: c.ty,
+            .map(|c| {
+                Ok(Column {
+                    name: c.column_name.as_unquoted_str().to_owned(),
+                    ty: DataType::try_from(c.data_type).map_err(Error::other)?,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>>>()
     }
 
     #[tracing::instrument(skip(self))]
@@ -299,11 +292,11 @@ impl DriverImpl for TrinoDriver {
             cols_sql
         );
         let dataset = retry_trino_error! {
-            self.client.get_all::<Row>(sql.clone()).await
+            self.client.get_all::<Vec<Value>>(&sql).await
         }
-        .map_err(|err| abbreviate_trino_error(&sql, err))
+        //.map_err(|err| abbreviate_trino_error(&sql, err))
         .with_context(|| format!("Failed to query table: {}", table_name))?;
-        let rows = dataset.into_vec().into_iter().map(|r| Ok(r.into_json()));
+        let rows = dataset.into_iter().map(|r| Ok(r));
         Ok(Box::new(rows))
     }
 }
@@ -349,67 +342,67 @@ impl fmt::Display for TrinoString<'_> {
 /// Note that the `rusto` crate has internal support for retrying connection
 /// and network errors, so we don't need to worry about that. But we do need
 /// to look out for `QueryError`s that might need to be retried.
-fn should_retry(e: &PrustoError) -> bool {
-    matches!(e, PrustoError::QueryError(QueryError { error_name, .. }) if error_name == "NO_NODES_AVAILABLE")
+fn should_retry(e: &ClientError) -> bool {
+    matches!(e, ClientError::QueryError(QueryError { error_name, .. }) if error_name == "NO_NODES_AVAILABLE")
 }
 
-/// These errors are pages long.
-fn abbreviate_trino_error(sql: &str, e: PrustoError) -> Error {
-    if let PrustoError::QueryError(e) = &e {
-        // We can make these look pretty.
-        let QueryError {
-            message,
-            error_code,
-            error_location,
-            ..
-        } = e;
-        let mut files = KnownFiles::default();
-        let file_id = files.add_string("trino.sql", sql);
+// /// These errors are pages long.
+// fn abbreviate_trino_error(sql: &str, e: PrustoError) -> Error {
+//     if let PrustoError::QueryError(e) = &e {
+//         // We can make these look pretty.
+//         let QueryError {
+//             message,
+//             error_code,
+//             error_location,
+//             ..
+//         } = e;
+//         let mut files = KnownFiles::default();
+//         let file_id = files.add_string("trino.sql", sql);
 
-        let offset = if let Some(loc) = error_location {
-            // We don't want to panic, because we're already processing an
-            // error, and the error comes from an external source. So just
-            // muddle through and return Span::Unknown or a bogus location
-            // if our input data is too odd.
-            //
-            // Convert from u32, defaulting negative values to 1. (Although
-            // lines count from 1.)
-            let line_number = usize::try_from(loc.line_number).unwrap_or(0);
-            let column_number = usize::try_from(loc.column_number).unwrap_or(0);
-            files
-                .line_range(file_id, line_number.saturating_sub(1))
-                .ok()
-                .map(|r| r.start + column_number.saturating_sub(1))
-        } else {
-            None
-        };
+//         let offset = if let Some(loc) = error_location {
+//             // We don't want to panic, because we're already processing an
+//             // error, and the error comes from an external source. So just
+//             // muddle through and return Span::Unknown or a bogus location
+//             // if our input data is too odd.
+//             //
+//             // Convert from u32, defaulting negative values to 1. (Although
+//             // lines count from 1.)
+//             let line_number = usize::try_from(loc.line_number).unwrap_or(0);
+//             let column_number = usize::try_from(loc.column_number).unwrap_or(0);
+//             files
+//                 .line_range(file_id, line_number.saturating_sub(1))
+//                 .ok()
+//                 .map(|r| r.start + column_number.saturating_sub(1))
+//         } else {
+//             None
+//         };
 
-        if let Some(offset) = offset {
-            let diagnostic = Diagnostic::error()
-                .with_message(message.clone())
-                .with_code(format!("TRINO {}", error_code))
-                .with_labels(vec![codespan_reporting::diagnostic::Label::primary(
-                    file_id,
-                    offset..offset,
-                )
-                .with_message("Trino error")]);
+//         if let Some(offset) = offset {
+//             let diagnostic = Diagnostic::error()
+//                 .with_message(message.clone())
+//                 .with_code(format!("TRINO {}", error_code))
+//                 .with_labels(vec![codespan_reporting::diagnostic::Label::primary(
+//                     file_id,
+//                     offset..offset,
+//                 )
+//                 .with_message("Trino error")]);
 
-            return Error::Source(Box::new(SourceError {
-                alternate_summary: message.clone(),
-                diagnostic,
-                files_override: Some(Arc::new(files)),
-            }));
-        }
-    }
+//             return Error::Source(Box::new(SourceError {
+//                 alternate_summary: message.clone(),
+//                 diagnostic,
+//                 files_override: Some(Arc::new(files)),
+//             }));
+//         }
+//     }
 
-    let msg = e
-        .to_string()
-        .lines()
-        .take(10)
-        .collect::<Vec<_>>()
-        .join("\n");
-    format_err!("Trino error: {}", msg)
-}
+//     let msg = e
+//         .to_string()
+//         .lines()
+//         .take(10)
+//         .collect::<Vec<_>>()
+//         .join("\n");
+//     format_err!("Trino error: {}", msg)
+// }
 
 #[cfg(test)]
 mod tests {

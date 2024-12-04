@@ -1067,8 +1067,14 @@ impl InferTypes for ast::ArrayExpression {
         } else {
             return_ty
         };
-        let return_ty = return_ty.expect_simple_type(self)?;
-        Ok(ArgumentType::Value(ValueType::Array(return_ty.clone())))
+
+        // Record our type inference data for use elsewhere.
+        let simple_ty = return_ty.expect_simple_type(self)?;
+        let array_type = ValueType::Array(simple_ty.to_owned());
+        self.ty = Some(array_type.clone());
+
+        // `simple_ty` is the type of the elements, so build the array type around the element type.
+        Ok(ArgumentType::Value(array_type))
     }
 }
 
@@ -1085,13 +1091,27 @@ impl InferTypes for ast::ArrayDefinition {
                 Ok(ArgumentType::Value(ValueType::Simple(elem_ty)))
             }
             ast::ArrayDefinition::Elements(exprs) => {
-                // We can use infer_call if we're careful.
-                let span = exprs.items.span();
-                let func_name = &Name::new("%ARRAY", span);
-                let elem_ty = infer_call(func_name, exprs.node_iter_mut(), false, scope)?;
-                let elem_ty = elem_ty.expect_array_type_returning_elem_type(self)?;
-                let elem_ty = ArgumentType::Value(ValueType::Simple(elem_ty.clone()));
-                Ok(elem_ty)
+                if exprs.is_empty() {
+                    // The type of `ARRAY[]` appears to always be
+                    // `ARRAY<INT64>`. An expression like `SELECT
+                    // ARRAY[STRUCT([]), STRUCT(["hello"])]` fails with the
+                    // error message "Array elements of types
+                    // {STRUCT<ARRAY<INT64>>, STRUCT<ARRAY<STRING>>} do not have
+                    // a common supertype", so BigQuery isn't doing any complex
+                    // inference to find a consistent element type.
+                    //
+                    // And Trino does _very_ weird thing with `ARRAY(unknown)`
+                    // types for empty arrays if we don't infer this.
+                    Ok(ArgumentType::Value(ValueType::Simple(SimpleType::Int64)))
+                } else {
+                    // We can use infer_call if we're careful.
+                    let span = exprs.items.span();
+                    let func_name = &Name::new("%ARRAY", span);
+                    let elem_ty = infer_call(func_name, exprs.node_iter_mut(), false, scope)?;
+                    let elem_ty = elem_ty.expect_array_type_returning_elem_type(self)?;
+                    let elem_ty = ArgumentType::Value(ValueType::Simple(elem_ty.clone()));
+                    Ok(elem_ty)
+                }
             }
         }
     }

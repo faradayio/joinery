@@ -30,7 +30,6 @@ use joinery_macros::{Emit, EmitDefault, Spanned, ToTokens};
 use crate::{
     drivers::{
         bigquery::{BigQueryName, BigQueryString},
-        sqlite3::KEYWORDS as SQLITE3_KEYWORDS,
         trino::{TrinoString, KEYWORDS as TRINO_KEYWORDS},
     },
     errors::{format_err, Error, Result},
@@ -39,8 +38,8 @@ use crate::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
         RawToken, Span, Spanned, ToTokens, Token, TokenStream, TokenWriter,
     },
-    types::{StructType, TableType},
-    util::{is_c_ident, AnsiIdent, AnsiString},
+    types::{StructType, TableType, ValueType},
+    util::{is_c_ident, AnsiIdent},
 };
 
 /// None of these keywords should ever be matched as a bare Ident. We use
@@ -67,7 +66,6 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 #[allow(dead_code)]
 pub enum Target {
     BigQuery,
-    SQLite3,
     Trino,
 }
 
@@ -76,7 +74,6 @@ impl Target {
     pub fn is_keyword(self, s: &str) -> bool {
         let keywords = match self {
             Target::BigQuery => &KEYWORDS,
-            Target::SQLite3 => &SQLITE3_KEYWORDS,
             Target::Trino => &TRINO_KEYWORDS,
         };
         keywords.contains(s.to_ascii_uppercase().as_str())
@@ -87,7 +84,6 @@ impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Target::BigQuery => write!(f, "bigquery"),
-            Target::SQLite3 => write!(f, "sqlite3"),
             Target::Trino => write!(f, "trino"),
         }
     }
@@ -191,7 +187,7 @@ impl Emit for Ident {
         if t.is_keyword(&self.name) || !is_c_ident(&self.name) {
             match t {
                 Target::BigQuery => write!(f, "{}", BigQueryName(&self.name))?,
-                Target::SQLite3 | Target::Trino => {
+                Target::Trino => {
                     write!(f, "{}", AnsiIdent(&self.name))?;
                 }
             }
@@ -236,7 +232,6 @@ impl Emit for LiteralValue {
             LiteralValue::Float64(fl) => write!(f, "{}", fl),
             LiteralValue::String(s) => match t {
                 Target::BigQuery => write!(f, "{}", BigQueryString(s)),
-                Target::SQLite3 => write!(f, "{}", AnsiString(s)),
                 Target::Trino => write!(f, "{}", TrinoString(s)),
             },
         }
@@ -317,6 +312,11 @@ impl<T: Node> NodeVec<T> {
             separator,
             items: vec![],
         }
+    }
+
+    /// Is this [`NodeVec`] empty of real items?
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
     }
 
     /// Take the elements from this [`NodeVec`], leaving it empty, and return a new
@@ -681,7 +681,7 @@ pub struct CommonTableExpression {
 }
 
 /// Set operators.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub enum SetOperator {
     UnionAll {
         union_token: Keyword,
@@ -699,32 +699,6 @@ pub enum SetOperator {
         except_token: Keyword,
         distinct_token: Keyword,
     },
-}
-
-impl Emit for SetOperator {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
-        match t {
-            // SQLite3 only supports `UNION` and `INTERSECT`. We'll keep the
-            // whitespace from the first token in those cases. In other cases,
-            // we'll substitute `UNION` with a comment saying what it really
-            // should be.
-            Target::SQLite3 => match self {
-                SetOperator::UnionAll {
-                    union_token,
-                    all_token,
-                } => {
-                    union_token.emit(t, f)?;
-                    all_token.emit(t, f)
-                }
-                SetOperator::UnionDistinct { union_token, .. } => union_token.emit(t, f),
-                SetOperator::IntersectDistinct {
-                    intersect_token, ..
-                } => intersect_token.emit(t, f),
-                SetOperator::ExceptDistinct { except_token, .. } => except_token.emit(t, f),
-            },
-            _ => self.emit_default(t, f),
-        }
-    }
 }
 
 /// A `SELECT` expression.
@@ -943,11 +917,6 @@ impl Emit for CastType {
             CastType::SafeCast { safe_cast_token } if t == Target::Trino => {
                 safe_cast_token.ident.token.with_str("TRY_CAST").emit(t, f)
             }
-            // TODO: This isn't strictly right, but it's as close as I know how to
-            // get with SQLite3.
-            CastType::SafeCast { safe_cast_token } if t == Target::SQLite3 => {
-                safe_cast_token.ident.token.with_str("CAST").emit(t, f)
-            }
             _ => self.emit_default(t, f),
         }
     }
@@ -1088,6 +1057,12 @@ pub struct BinopExpression {
 /// a missing `ARRAY` and a `delim1` of `(`. We'll let the parser handle that.
 #[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
 pub struct ArrayExpression {
+    /// Type information added later by inference.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    pub ty: Option<ValueType>,
+
     pub array_token: Option<Keyword>,
     pub element_type: Option<ArrayElementType>,
     pub delim1: Punct,
@@ -1155,17 +1130,11 @@ impl Emit for ArrayExpression {
                 last_token.with_ws_only().emit(t, f)?;
             }
             _ => match t {
-                Target::SQLite3 => {
-                    if let Some(array_token) = &self.array_token {
-                        array_token.emit(t, f)?;
-                    } else {
-                        f.write_token_start("ARRAY")?;
-                    }
-                    self.delim1.token.with_str("(").emit(t, f)?;
-                    self.definition.emit(t, f)?;
-                    self.delim2.token.with_str(")").emit(t, f)?;
-                }
                 Target::Trino => {
+                    let needs_cast = self.definition.has_zero_element_expressions();
+                    if needs_cast {
+                        f.write_token_start("CAST(")?;
+                    }
                     if let Some(array_token) = &self.array_token {
                         array_token.emit(t, f)?;
                     } else {
@@ -1174,6 +1143,18 @@ impl Emit for ArrayExpression {
                     self.delim1.token.with_str("[").emit(t, f)?;
                     self.definition.emit(t, f)?;
                     self.delim2.token.with_str("]").emit(t, f)?;
+
+                    if needs_cast {
+                        f.write_token_start(" AS ")?;
+                        let ty = self
+                            .ty
+                            .as_ref()
+                            .expect("type should have been added by type checker");
+                        let data_type = DataType::try_from(ty.clone())
+                            .expect("should be able to print data type of ARRAY");
+                        data_type.emit(t, f)?;
+                        f.write_token_start(")")?;
+                    }
                 }
                 _ => self.emit_default(t, f)?,
             },
@@ -1206,6 +1187,16 @@ pub enum ArrayDefinition {
         select: Box<ArraySelectExpression>,
     },
     Elements(NodeVec<Expression>),
+}
+
+impl ArrayDefinition {
+    /// Is this an empty array expression?
+    pub fn has_zero_element_expressions(&self) -> bool {
+        match self {
+            ArrayDefinition::Query { .. } => false,
+            ArrayDefinition::Elements(elements) => elements.items.is_empty(),
+        }
+    }
 }
 
 /// A very restricted version of [`SelectExpression`] that we allow in an
@@ -1258,7 +1249,7 @@ impl Emit for StructExpression {
                 }
                 self.paren2.emit(t, f)?;
                 f.write_token_start("AS")?;
-                let ty = self
+                let ty: &StructType = self
                     .ty
                     .as_ref()
                     .expect("type should have been added by type checker");
@@ -1546,27 +1537,6 @@ pub enum DataType {
 impl Emit for DataType {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match t {
-            Target::SQLite3 => match self {
-                DataType::Bool(token) | DataType::Int64(token) => {
-                    token.ident.token.with_str("INTEGER").emit(t, f)
-                }
-                // NUMERIC is used when people want accurate math, so we want
-                // either BLOB or TEXT, whatever makes math easier.
-                DataType::Bytes(token) | DataType::Numeric(token) => {
-                    token.ident.token.with_str("BLOB").emit(t, f)
-                }
-                DataType::Float64(token) => token.ident.token.with_str("REAL").emit(t, f),
-                DataType::String(token)
-                | DataType::Date(token)      // All date types should be strings
-                | DataType::Datetime(token)
-                | DataType::Geography(token) // Use GeoJSON
-                | DataType::Time(token)
-                | DataType::Timestamp(token) =>
-                    token.ident.token.with_str("TEXT").emit(t, f),
-                DataType::Array { array_token: token, .. } | DataType::Struct { struct_token: token, .. } => {
-                    token.ident.token.with_str("/*JSON*/TEXT").emit(t, f)
-                }
-            },
             Target::Trino => match self {
                 DataType::Bool(token) => token.ident.token.with_str("BOOLEAN").emit(t, f),
                 DataType::Bytes(token) => token.ident.token.with_str("VARBINARY").emit(t, f),
@@ -2416,6 +2386,7 @@ peg::parser! {
         rule array_expression() -> ArrayExpression
             = delim1:p("[") definition:array_definition() delim2:p("]") {
                 ArrayExpression {
+                    ty: None,
                     array_token: None,
                     element_type: None,
                     delim1,
@@ -2426,6 +2397,7 @@ peg::parser! {
             / array_token:k("ARRAY") element_type:array_element_type()?
               delim1:p("[") definition:array_definition() delim2:p("]") {
                 ArrayExpression {
+                    ty: None,
                     array_token: Some(array_token),
                     element_type,
                     delim1,
@@ -2436,6 +2408,7 @@ peg::parser! {
             / array_token:k("ARRAY") element_type:array_element_type()?
               delim1:p("(") definition:array_definition() delim2:p(")") {
                 ArrayExpression {
+                    ty: None,
                     array_token: Some(array_token),
                     element_type,
                     delim1,
@@ -3068,7 +3041,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_parser_and_run_with_sqlite3() {
+    async fn test_parser() {
         let sql_examples = &[
             // Basic test cases of gradually increasing complexity.
             (r#"SELECT * FROM t"#, None),

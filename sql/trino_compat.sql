@@ -36,7 +36,7 @@ RETURN (
 );
 
 -- Handle odd BigQuery behaviour around the `pos` argument.
-CREATE OR REPLACE FUNCTION memory.joinery_compat.SUBSTR_COMPAT(input VARCHAR, pos INT)
+CREATE OR REPLACE FUNCTION memory.joinery_compat.SUBSTR_COMPAT(input VARCHAR, pos BIGINT)
 RETURNS VARCHAR
 RETURNS NULL ON NULL INPUT
 RETURN (
@@ -50,7 +50,7 @@ RETURN (
 
 -- As the two argument case, but also treat a length greater than the string as
 -- as "to the end of the string".
-CREATE OR REPLACE FUNCTION memory.joinery_compat.SUBSTR_COMPAT(input VARCHAR, pos INT, len INT)
+CREATE OR REPLACE FUNCTION memory.joinery_compat.SUBSTR_COMPAT(input VARCHAR, pos BIGINT, len BIGINT)
 RETURNS VARCHAR
 RETURNS NULL ON NULL INPUT
 RETURN (
