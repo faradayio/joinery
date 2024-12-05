@@ -91,9 +91,13 @@ impl ScopeGet for ScopeHandle {
 enum ScopeEntry {
     /// A name that is defined in this scope.
     Defined(ScopeValue),
-    /// A name that is hidden in this scope.
+    /// A name that is hidden in this scope. This will happen when a top-level
+    /// SQL statement like `DROP TABLE` creates a new scope that hides a name
+    /// defined in the "parent" scope defined by the preceding statements.
     Hidden,
-    /// A name that returns an error when looked up.
+    /// A name that returns an error when looked up. This may happen if two
+    /// names conflict, or sometimes because we're inside a subquery and certain
+    /// names from outer scopes are not available.
     Error(SourceError),
 }
 
