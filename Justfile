@@ -18,12 +18,12 @@ trino-image: trino-plugin
 
 # Run our Trino image.
 docker-run-trino: trino-image
-	docker run --name trino-joinery -p 8080:8080 -d trino-joinery
-	docker exec trino-joinery install-udfs
+	(cd trino && docker compose up)
+	docker compose exec trino install-udfs
 
 # Stop and delete our Trino container.
 docker-rm-trino:
-	docker rm -f trino-joinery
+	(cd trino && docker compose stop && docker compose rm)
 
 # Verify that our image works.
 check:
@@ -35,8 +35,8 @@ check:
 
 # Check Trino. Assumes `docker-run-trino` has been run.
 check-trino:
-	cargo run -- sql-test --database "trino://anyone@localhost/memory/default" ./tests/sql/
+	cargo run -- sql-test --database "trino://admin@localhost/memory/default" ./tests/sql/
 
 # Access a Trino shell.
 trino-shell:
-	docker exec -it trino-joinery trino
+	docker compose exec trino-joinery trino
