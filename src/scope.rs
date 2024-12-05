@@ -32,6 +32,15 @@ use crate::{
 pub type ScopeValue = Type;
 
 /// Common interface to all things that support a scope-like `get` function.
+///
+/// SQL has multiple kinds of scopes, including:
+///
+/// - [`Scope`] (often wrapped by [`ScopeHandle`] for reference counting), which
+///   works more-or-less like a scope in a typical programming language. This
+///   has a few unusual features: names can be hidden, or looking up a name
+///   might return an error.
+/// - [`ColumnSetScope`] (wrapping a [`ColumnSet`]), which implements the
+///   special rules for looking up column names in SQL.
 pub trait ScopeGet {
     /// Get the [`ScopeValue`] associated with `name`.
     ///
@@ -294,6 +303,12 @@ TRIM = Fn(STRING) -> STRING;
 UPPER = Fn(STRING) -> STRING;
 ";
 
+/// The name of a column in a [`ColumnSet`].
+///
+/// In SQL, `t.x` may also be referred to as `x` (if `x` is unambiguous). But
+/// depending on how the [`ColumnSet`] was created, a column name may not always
+/// have a table name, thanks to things like `USING`. See
+/// [`ColumnSet::join_using`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnSetColumnName {
     table: Option<Name>,
@@ -337,6 +352,20 @@ impl fmt::Display for ColumnSetColumnName {
     }
 }
 
+/// A column in a [`ColumnSet`].
+///
+/// This may be unnamed, because SQL allows `SELECT` clauses to contain
+/// anonymous columns. It even allows referring to columns by their ordinal
+/// position in the `SELECT` clause!
+///
+/// ```sql
+/// SELECT
+///     SUM(goals_scored) AS total_goals,
+///     UPPER(last_name),
+///     UPPER(first_name)
+/// FROM players
+/// GROUP BY 2, 3;
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnSetColumn {
     column_name: Option<ColumnSetColumnName>,
@@ -362,6 +391,11 @@ impl fmt::Display for ColumnSetColumn {
 /// A set of columns and types.
 ///
 /// This is output by a `FROM`, `JOIN`, `GROUP BY` or `PARTITION BY` clause.
+///
+/// A [`ColumnSet`] also acts as a specialized kind of scope, different from a
+/// regular [`Scope`] because of various bits of magic in how SQL looks up
+/// names. Normally, you will use a [`ColumnSetScope`], which allows seeing both
+/// column names _and_ names from the parent scope.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ColumnSet {
     columns: Vec<ColumnSetColumn>,

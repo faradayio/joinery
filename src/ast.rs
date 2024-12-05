@@ -750,7 +750,7 @@ pub struct Distinct {
 ///     [ expression. ]*
 ///     [ EXCEPT ( column_name [, ...] ) ]
 ///     [ REPLACE ( expression [ AS ] column_name [, ...] ) ]
-///   
+///
 ///   select_expression:
 ///     expression [ [ AS ] alias ]
 /// ```
@@ -879,7 +879,7 @@ pub struct IntervalExpression {
     pub date_part: DatePart,
 }
 
-/// A date part in an `INTERVAL` expression, or in the special date functions.S
+/// A date part in an `INTERVAL` expression, or in the special date functions.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct DatePart {
     pub date_part_token: PseudoKeyword,
