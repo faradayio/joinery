@@ -739,6 +739,8 @@ impl InferTypes for ast::Expression {
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::Index(index) => index.infer_types(scope),
             ast::Expression::FieldAccess(field_access) => field_access.infer_types(scope),
+            ast::Expression::Load(load_expr) => load_expr.infer_types(scope),
+            ast::Expression::Store(store_expr) => store_expr.infer_types(scope),
         }
     }
 }
@@ -1377,6 +1379,26 @@ impl InferTypes for ast::FieldAccessExpression {
         let struct_ty = struct_ty.expect_struct_type(&self.expression)?;
         let field_ty = struct_ty.expect_field(&Name::from(self.field_name.clone()))?;
         Ok(ArgumentType::Value(field_ty.clone()))
+    }
+}
+
+impl InferTypes for ast::LoadExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        // TODO: More here.
+        self.expression.infer_types(scope)
+    }
+}
+
+impl InferTypes for ast::StoreExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        // TODO: More here.
+        self.expression.infer_types(scope)
     }
 }
 

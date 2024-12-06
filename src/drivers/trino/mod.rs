@@ -5,7 +5,8 @@ use std::{fmt, str::FromStr, time::Duration};
 use async_trait::async_trait;
 use dbcrossbar_trino::{
     client::{Client, ClientBuilder, ClientError, QueryError},
-    ConnectorType as TrinoConnectorType, DataType, Ident as TrinoIdent, Value,
+    ConnectorType as TrinoConnectorType, DataType as TrinoDataType, Field as TrinoField,
+    Ident as TrinoIdent, Value,
 };
 use joinery_macros::sql_quote;
 use once_cell::sync::Lazy;
@@ -18,6 +19,7 @@ use crate::{
     errors::{format_err, Context, Error, Result},
     tokenizer::TokenStream,
     transforms::{self, RenameFunctionsBuilder, Transform},
+    types::{SimpleType, StructElementType, ValueType},
     util::AnsiIdent,
 };
 
@@ -269,7 +271,7 @@ impl Driver for TrinoDriver {
 
 #[async_trait]
 impl DriverImpl for TrinoDriver {
-    type Type = DataType;
+    type Type = TrinoDataType;
     type Value = Value;
     type Rows = Box<dyn Iterator<Item = Result<Vec<Self::Value>>> + Send + Sync>;
 
@@ -288,7 +290,7 @@ impl DriverImpl for TrinoDriver {
             .map(|c| {
                 Ok(Column {
                     name: c.column_name.as_unquoted_str().to_owned(),
-                    ty: DataType::try_from(c.data_type).map_err(Error::other)?,
+                    ty: TrinoDataType::try_from(c.data_type).map_err(Error::other)?,
                 })
             })
             .collect::<Result<Vec<_>>>()
@@ -423,6 +425,76 @@ fn should_retry(e: &ClientError) -> bool {
 //         .join("\n");
 //     format_err!("Trino error: {}", msg)
 // }
+
+impl TryFrom<&'_ ValueType> for TrinoDataType {
+    type Error = Error;
+
+    fn try_from(value_type: &ValueType) -> std::result::Result<Self, Self::Error> {
+        match value_type {
+            ValueType::Simple(simple_type) => TrinoDataType::try_from(simple_type),
+            ValueType::Array(simple_type) => Ok(TrinoDataType::Array(Box::new(
+                TrinoDataType::try_from(simple_type)?,
+            ))),
+        }
+    }
+}
+
+impl TryFrom<&'_ SimpleType> for TrinoDataType {
+    type Error = Error;
+
+    fn try_from(simple_type: &SimpleType) -> std::result::Result<Self, Self::Error> {
+        match simple_type {
+            SimpleType::Bool => Ok(TrinoDataType::Boolean),
+            SimpleType::Bytes => Ok(TrinoDataType::Varbinary),
+            SimpleType::Date => Ok(TrinoDataType::Date),
+            SimpleType::Datetime => Ok(TrinoDataType::timestamp()),
+            SimpleType::Float64 => Ok(TrinoDataType::Double),
+            SimpleType::Geography => Ok(TrinoDataType::SphericalGeography),
+            SimpleType::Int64 => Ok(TrinoDataType::BigInt),
+            SimpleType::Numeric => Ok(TrinoDataType::bigquery_sized_decimal()),
+            SimpleType::String => Ok(TrinoDataType::varchar()),
+            SimpleType::Time => Ok(TrinoDataType::time()),
+            SimpleType::Timestamp => Ok(TrinoDataType::timestamp_with_time_zone()),
+            SimpleType::Struct(struct_type) => {
+                let fields = struct_type
+                    .fields
+                    .iter()
+                    .map(|f| TrinoField::try_from(f))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(TrinoDataType::Row(fields))
+            }
+
+            // These shouldn't make it this far, either because they're not a concrete type,
+            // or because they're types we only allow as constant arguments to functions that
+            // should have been transformed away by now.
+            SimpleType::Bottom | SimpleType::Datepart | SimpleType::Interval | SimpleType::Null => {
+                Err(format_err!(
+                    "Cannot represent {} as concrete Trino type",
+                    simple_type
+                ))
+            }
+
+            // This shouldn't be a constructable value for
+            // `SimpleType<ResolvedTypeVarsOnly>`.
+            SimpleType::Parameter(_) => unreachable!("parameter types should be resolved"),
+        }
+    }
+}
+
+impl TryFrom<&'_ StructElementType> for TrinoField {
+    type Error = Error;
+
+    fn try_from(field: &StructElementType) -> std::result::Result<Self, Self::Error> {
+        let name = match &field.name {
+            Some(name) => Some(TrinoIdent::new(&name.name).map_err(Error::other)?),
+            None => None,
+        };
+        Ok(TrinoField {
+            name,
+            data_type: TrinoDataType::try_from(&field.ty)?,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {

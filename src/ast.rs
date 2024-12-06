@@ -855,6 +855,8 @@ pub enum Expression {
     FunctionCall(FunctionCall),
     Index(IndexExpression),
     FieldAccess(FieldAccessExpression),
+    Load(LoadExpression),
+    Store(StoreExpression),
 }
 
 impl Expression {
@@ -1629,6 +1631,44 @@ pub struct FieldAccessExpression {
     pub expression: Box<Expression>,
     pub dot: Punct,
     pub field_name: Ident,
+}
+
+/// A "load" expression, which transforms an SQL value from a "storage" type (eg
+/// "VARCHAR") to a "memory" type (eg "UUID"). Used for databases like Trino,
+/// where the storage types for a given connector may be more limited than the
+/// standard Trino memory types.
+///
+/// These are not found in the original parsed AST, but are added while
+/// transforming the AST.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct LoadExpression {
+    /// Inferred memory type.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    memory_type: Option<ValueType>,
+
+    /// Our underlying expression.
+    pub expression: Box<Expression>,
+}
+
+/// A "store" expression, which transforms an SQL value from a "memory" type
+/// (eg "UUID") to a "storage" type (eg "VARCHAR"). Used for databases like
+/// Trino, where the storage types for a given connector may be more limited
+/// than the standard Trino memory types.
+///
+/// These are not found in the original parsed AST, but are added while
+/// transforming the AST.
+#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+pub struct StoreExpression {
+    /// Inferred memory type.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    memory_type: Option<ValueType>,
+
+    /// Our underlying expression.
+    pub expression: Box<Expression>,
 }
 
 /// An `AS` alias.
