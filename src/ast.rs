@@ -24,7 +24,7 @@ use std::{
     mem::take,
 };
 
-use dbcrossbar_trino::ConnectorType as TrinoConnectorType;
+use dbcrossbar_trino::{ConnectorType as TrinoConnectorType, DataType as TrinoDataType};
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::{Emit, EmitDefault, Spanned, ToTokens};
 
@@ -1640,7 +1640,7 @@ pub struct FieldAccessExpression {
 ///
 /// These are not found in the original parsed AST, but are added while
 /// transforming the AST.
-#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
 pub struct LoadExpression {
     /// Inferred memory type.
     #[emit(skip)]
@@ -1652,6 +1652,33 @@ pub struct LoadExpression {
     pub expression: Box<Expression>,
 }
 
+impl Emit for LoadExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
+        match t {
+            Target::Trino(connector_type) => {
+                let bq_memory_type = self
+                    .memory_type
+                    .as_ref()
+                    .expect("memory_type should have been filled in by type inference");
+                let trino_memory_type =
+                    TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
+                let transform = connector_type.storage_transform_for(&trino_memory_type);
+                let (prefix, suffix) = transform.load_prefix_and_suffix();
+
+                // Wrapping the expression in our prefix and suffix.
+                // If the expression was col_name containing '[1,2]' in Trino,
+                // BQ memory type -> JSON, Trino memory type -> JSON, Trino storage type -> VARCHAR
+                // The Trino storage type is dependent on what the connector can support.
+                // In this case, the wrapped version would be JSON_PARSE(col_name)
+                f.write_token_start(&prefix)?;
+                self.expression.emit(t, f)?;
+                f.write_token_start(&suffix)
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
+}
+
 /// A "store" expression, which transforms an SQL value from a "memory" type
 /// (eg "UUID") to a "storage" type (eg "VARCHAR"). Used for databases like
 /// Trino, where the storage types for a given connector may be more limited
@@ -1659,7 +1686,7 @@ pub struct LoadExpression {
 ///
 /// These are not found in the original parsed AST, but are added while
 /// transforming the AST.
-#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
 pub struct StoreExpression {
     /// Inferred memory type.
     #[emit(skip)]
@@ -1669,6 +1696,28 @@ pub struct StoreExpression {
 
     /// Our underlying expression.
     pub expression: Box<Expression>,
+}
+
+impl Emit for StoreExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
+        match t {
+            Target::Trino(connector_type) => {
+                let bq_memory_type = self
+                    .memory_type
+                    .as_ref()
+                    .expect("memory_type should have been filled in by type inference");
+                let trino_memory_type =
+                    TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
+                let transform = connector_type.storage_transform_for(&trino_memory_type);
+                let (prefix, suffix) = transform.store_prefix_and_suffix();
+
+                f.write_token_start(&prefix)?;
+                self.expression.emit(t, f)?;
+                f.write_token_start(&suffix)
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// An `AS` alias.
@@ -1958,10 +2007,34 @@ pub enum CreateTableDefinition {
 }
 
 /// A column definition.
-#[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
 pub struct ColumnDefinition {
     pub name: Ident,
     pub data_type: DataType,
+}
+
+impl Emit for ColumnDefinition {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
+        match t {
+            Target::Trino(connector_type) => {
+                // We could have a column definition that is `my_col JSON`, which is a valid column definition in BQ.
+                // But if our connector doesn't support JSON, we need to transform it to VARCHAR in our ColumnDefinition
+                // We want to emit `my_col VARCHAR` in Trino.
+                self.name.emit(t, f)?;
+
+                let bq_memory_type =
+                    ValueType::try_from(&self.data_type).map_err(io::Error::other)?;
+                let trino_memory_type =
+                    TrinoDataType::try_from(&bq_memory_type).map_err(io::Error::other)?;
+
+                let storage_transform = connector_type.storage_transform_for(&trino_memory_type);
+                let storage_type = storage_transform.storage_type();
+
+                f.write_token_start(&storage_type.to_string())
+            }
+            _ => self.emit_default(t, f),
+        }
+    }
 }
 
 /// A `DROP TABLE` statement.
