@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 use crate::{
     ast::{self, Emit, Target},
     errors::{format_err, Error, Result},
-    infer::InferTypes,
+    infer::InferTypes as _,
     scope::Scope,
     transforms::{Transform, TransformExtra},
 };

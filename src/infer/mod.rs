@@ -17,8 +17,10 @@ use crate::{
 };
 
 use self::contains_aggregate::ContainsAggregate;
+pub use self::insert_store_expressions::InsertStoreExpressions;
 
 mod contains_aggregate;
+mod insert_store_expressions;
 
 // TODO: Remember this rather scary example. Verify BigQuery supports it
 // and that we need it.
@@ -120,7 +122,7 @@ impl InferTypes for ast::CreateTableStatement {
                         let ty = ValueType::try_from(&column.data_type)?;
                         let col_ty = ColumnType {
                             name: Some(column.name.clone()),
-                            ty: ArgumentType::Value(ty),
+                            ty: ArgumentType::Stored(ty),
                             // TODO: We don't support this in the main grammar yet.
                             not_null: false,
                         };
@@ -201,10 +203,10 @@ impl InferTypes for ast::ValuesRow {
             // functions can't be used here.
             let scope = ColumnSetScope::new_empty(scope);
             let ty = expr.infer_types(&scope)?;
-            let ty = ty.expect_value_type(expr)?.to_owned();
+            ty.expect_value_or_stored_type(expr)?;
             cols.push(ColumnType {
                 name: None,
-                ty: ArgumentType::Value(ty),
+                ty,
                 not_null: false,
             });
         }
@@ -418,14 +420,17 @@ impl InferTypes for ast::SelectExpression {
                     // BigQuery does not allow select list items to see names
                     // bound by other select list items.
                     let ty = expression.infer_types(&column_set_scope)?;
-                    // Make sure any aggregates have been turned into values.
-                    let ty = ty.expect_value_type(expression)?.to_owned();
+                    // Make sure any aggregates have been turned into values or
+                    // stored values (depending on whether this query is going
+                    // to be stored, or where it's a sub-SELECT being input into
+                    // a further calculation).
+                    ty.expect_value_or_stored_type(expression)?;
                     let name = alias
                         .infer_column_name()
                         .or_else(|| expression.infer_column_name());
                     cols.push(ColumnType {
                         name,
-                        ty: ArgumentType::Value(ty),
+                        ty,
                         not_null: false,
                     });
                 }
@@ -1386,9 +1391,21 @@ impl InferTypes for ast::LoadExpression {
     type Scope = ColumnSetScope;
     type Output = ArgumentType;
 
+    /// `self.expression` should have type `Stored<?T>`, and we return `?T`.
+    ///
+    /// For example, `?T` might map to UUID, and `Stored<?T>` might map to
+    /// VARCHAR, but that's someone else's problem. We only deal with this in
+    /// the abstract.
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        // TODO: More here.
-        self.expression.infer_types(scope)
+        let inferred_type = self.expression.infer_types(scope)?;
+        // Nobody should ever call us on any argument that doesn't have type
+        // `Stored<?T>`, because we're the load operation.
+        let value_type =
+            inferred_type.expect_stored_type_and_return_value_type(&self.expression)?;
+        // Record this for `emit` to use if needed.
+        self.memory_type = Some(value_type.to_owned());
+        // Return the `?T` from our original `Stored<?T>`.
+        Ok(ArgumentType::Value(value_type.to_owned()))
     }
 }
 
@@ -1396,9 +1413,18 @@ impl InferTypes for ast::StoreExpression {
     type Scope = ColumnSetScope;
     type Output = ArgumentType;
 
+    /// `self.expression` should have type `?T`, and we return `Stored<?T>`.
+    ///
+    /// For example, `?T` might map to UUID, and `Stored<?T>` might map to
+    /// VARCHAR, but that's someone else's problem. We only deal with this in
+    /// the abstract.
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        // TODO: More here.
-        self.expression.infer_types(scope)
+        let inferred_type = self.expression.infer_types(scope)?;
+        let value_type = inferred_type.expect_value_type(&self.expression)?;
+        // Record this for `emit` to use if needed.
+        self.memory_type = Some(value_type.to_owned());
+        // Return the Stored<?T> for our original ?T.
+        Ok(ArgumentType::Stored(value_type.to_owned()))
     }
 }
 

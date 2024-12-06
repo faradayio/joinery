@@ -159,6 +159,12 @@ impl<TV: TypeVarSupport> fmt::Display for Type<TV> {
 pub enum ArgumentType<TV: TypeVarSupport = ResolvedTypeVarsOnly> {
     /// A value type.
     Value(ValueType<TV>),
+    /// A stored value type, which may have undergone a target-specific
+    /// transformation. For example, Trino supports `UUID` as an in-memory type,
+    /// but Trino's Hive storage connector does not allow `UUID` columns. So we
+    /// need to store `UUID` as a `VARCHAR` in Hive, and transform it on load
+    /// and store.
+    Stored(ValueType<TV>),
     /// An aggregating value type. Note that we can nest aggregating types.
     Aggregating(Box<ArgumentType<TV>>),
 }
@@ -183,8 +189,51 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
     pub fn expect_value_type(&self, spanned: &dyn Spanned) -> Result<&ValueType<TV>> {
         match self {
             ArgumentType::Value(t) => Ok(t),
+            ArgumentType::Stored(_) => Err(Error::annotated(
+                format!("expected value type, found stored value type {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
             ArgumentType::Aggregating(_) => Err(Error::annotated(
                 format!("expected value type, found aggregate type {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
+    /// Expect a [`ArgumentType::Value`] or [`ArgumentType::Stored`]. We don't
+    /// return the matched type because you probably want to use `self` for any
+    /// downstream processing. This is just a type check.
+    pub fn expect_value_or_stored_type(&self, spanned: &dyn Spanned) -> Result<()> {
+        match self {
+            ArgumentType::Value(_) => Ok(()),
+            ArgumentType::Stored(_) => Ok(()),
+            ArgumentType::Aggregating(_) => Err(Error::annotated(
+                format!(
+                    "expected value or stored type, found aggregate type {}",
+                    self
+                ),
+                spanned.span(),
+                "type mismatch",
+            )),
+        }
+    }
+
+    /// Expect a [`ArgumentType::Stored`] and return the `ValueType` it contains.
+    pub fn expect_stored_type_and_return_value_type(
+        &self,
+        spanned: &dyn Spanned,
+    ) -> Result<&ValueType<TV>> {
+        match self {
+            ArgumentType::Value(_) => Err(Error::annotated(
+                format!("expected stored type, found in-memory value type {}", self),
+                spanned.span(),
+                "type mismatch",
+            )),
+            ArgumentType::Stored(t) => Ok(t),
+            ArgumentType::Aggregating(_) => Err(Error::annotated(
+                format!("expected stored type, found aggregate type {}", self),
                 spanned.span(),
                 "type mismatch",
             )),
@@ -248,6 +297,7 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
         // at least until we discover otherwise.
         match (self, other) {
             (ArgumentType::Value(a), ArgumentType::Value(b)) => a.is_subtype_of(b),
+            (ArgumentType::Stored(a), ArgumentType::Stored(b)) => a.is_subtype_of(b),
             (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => a.is_subtype_of(b),
             _ => false,
         }
@@ -309,6 +359,7 @@ impl Unify for ArgumentType<TypeVar> {
     fn resolve(&self, table: &UnificationTable, spanned: &dyn Spanned) -> Result<Self::Resolved> {
         match self {
             ArgumentType::Value(t) => Ok(ArgumentType::Value(t.resolve(table, spanned)?)),
+            ArgumentType::Stored(t) => Ok(ArgumentType::Stored(t.resolve(table, spanned)?)),
             ArgumentType::Aggregating(t) => Ok(ArgumentType::Aggregating(Box::new(
                 t.resolve(table, spanned)?,
             ))),
@@ -320,6 +371,7 @@ impl<TV: TypeVarSupport> fmt::Display for ArgumentType<TV> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ArgumentType::Value(v) => write!(f, "{}", v),
+            ArgumentType::Stored(v) => write!(f, "Stored<{}>", v),
             ArgumentType::Aggregating(v) => write!(f, "Agg<{}>", v),
         }
     }
@@ -1075,7 +1127,12 @@ impl ColumnType {
     /// [`TableType::name_anonymous_columns`].
     pub fn expect_creatable(&self, spanned: &dyn Spanned) -> Result<()> {
         match &self.ty {
-            ArgumentType::Value(ty) => ty.expect_inhabited(spanned),
+            ArgumentType::Value(ty) => Err(Error::annotated(
+                format!("Internal error: cannot store {} in a column unless it has been converted to a storage type", ty),
+                spanned.span(),
+                "missing conversion to storage type",
+            )),
+            ArgumentType::Stored(ty) => ty.expect_inhabited(spanned),
             ArgumentType::Aggregating(_) => Err(Error::annotated(
                 "Cannot store an aggregate column",
                 spanned.span(),

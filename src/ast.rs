@@ -34,12 +34,14 @@ use crate::{
         trino::{TrinoString, KEYWORDS as TRINO_KEYWORDS},
     },
     errors::{format_err, Error, Result},
+    infer::{InferTypes, InsertStoreExpressions as _},
     known_files::{FileId, KnownFiles},
+    scope::{Scope, ScopeHandle},
     tokenizer::{
         tokenize_sql, EmptyFile, Ident, Keyword, Literal, LiteralValue, PseudoKeyword, Punct,
         RawToken, Span, Spanned, ToTokens, Token, TokenStream, TokenWriter,
     },
-    types::{StructType, TableType, ValueType},
+    types::{SimpleType, StructType, TableType, ValueType},
     util::{is_c_ident, AnsiIdent},
 };
 
@@ -619,6 +621,16 @@ pub struct SqlProgram {
     /// For now, just handle single statements; BigQuery DDL is messy and maybe
     /// out of scope.
     pub statements: NodeVec<Statement>,
+}
+
+impl SqlProgram {
+    /// Call `infer_types` for the first time, using the root scope, and doing
+    /// the one-time task of inserting [`StoreExpression`] where needed.
+    pub fn infer_types_for_first_time(&mut self) -> Result<(Option<TableType>, ScopeHandle)> {
+        self.insert_store_expressions()?;
+        let scope = Scope::root();
+        self.infer_types(&scope)
+    }
 }
 
 /// A statement in our abstract syntax tree.
@@ -1646,7 +1658,7 @@ pub struct LoadExpression {
     #[emit(skip)]
     #[to_tokens(skip)]
     #[drive(skip)]
-    memory_type: Option<ValueType>,
+    pub memory_type: Option<ValueType>,
 
     /// Our underlying expression.
     pub expression: Box<Expression>,
@@ -1655,6 +1667,11 @@ pub struct LoadExpression {
 impl Emit for LoadExpression {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
         match t {
+            Target::BigQuery => {
+                f.write_token_start("%LOAD(")?;
+                self.expression.emit(t, f)?;
+                f.write_token_start(")")
+            }
             Target::Trino(connector_type) => {
                 let bq_memory_type = self
                     .memory_type
@@ -1692,7 +1709,7 @@ pub struct StoreExpression {
     #[emit(skip)]
     #[to_tokens(skip)]
     #[drive(skip)]
-    memory_type: Option<ValueType>,
+    pub memory_type: Option<ValueType>,
 
     /// Our underlying expression.
     pub expression: Box<Expression>,
@@ -1701,21 +1718,33 @@ pub struct StoreExpression {
 impl Emit for StoreExpression {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
         match t {
+            Target::BigQuery => {
+                f.write_token_start("%STORE(")?;
+                self.expression.emit(t, f)?;
+                f.write_token_start(")")
+            }
             Target::Trino(connector_type) => {
                 let bq_memory_type = self
                     .memory_type
                     .as_ref()
                     .expect("memory_type should have been filled in by type inference");
-                let trino_memory_type =
-                    TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
-                let transform = connector_type.storage_transform_for(&trino_memory_type);
-                let (prefix, suffix) = transform.store_prefix_and_suffix();
 
-                f.write_token_start(&prefix)?;
-                self.expression.emit(t, f)?;
-                f.write_token_start(&suffix)
+                // If our bq_memory_type is NULL, we don't need to do any transforms because
+                // NULL is NULL in both storage and memory types and dbcrossbar_trino doesn't
+                // support NULL as a memory type.
+                if let ValueType::Simple(SimpleType::Null) = bq_memory_type {
+                    self.expression.emit(t, f)
+                } else {
+                    let trino_memory_type =
+                        TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
+                    let transform = connector_type.storage_transform_for(&trino_memory_type);
+                    let (prefix, suffix) = transform.store_prefix_and_suffix();
+
+                    f.write_token_start(&prefix)?;
+                    self.expression.emit(t, f)?;
+                    f.write_token_start(&suffix)
+                }
             }
-            _ => self.emit_default(t, f),
         }
     }
 }

@@ -34,8 +34,7 @@ pub async fn cmd_run(files: &mut KnownFiles, opt: &RunOpt) -> Result<()> {
     let mut ast = parse_sql(files, file_id)?;
 
     // Run the type checker, but do not fail on errors.
-    let scope = Scope::root();
-    if let Err(err) = ast.infer_types(&scope) {
+    if let Err(err) = ast.infer_types_for_first_time() {
         err.emit(files);
         eprintln!("\nType checking failed. Manual fixes will probably be required!");
     }
