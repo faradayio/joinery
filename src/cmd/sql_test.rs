@@ -77,7 +77,7 @@ pub async fn cmd_sql_test(files: &mut KnownFiles, opt: &SqlTestOpt) -> Result<()
             if !opt.pending {
                 let short_path = path.strip_prefix(&base_dir).unwrap_or(&path);
                 if let Some(pending_test_info) =
-                    PendingTestInfo::for_target(locator.target(), short_path, sql)
+                    PendingTestInfo::for_target(locator.target().await?, short_path, sql)
                 {
                     progress('P');
                     pending.push(pending_test_info);

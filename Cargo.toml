@@ -17,7 +17,12 @@ async-trait = "0.1.73"
 clap = { version = "4.4.6", features = ["derive", "wrap_help"] }
 codespan-reporting = "0.11.1"
 csv = "1.2.2"
-dbcrossbar_trino = { version = "0.2.2", features = ["macros", "values", "client", "rustls-tls"] }
+dbcrossbar_trino = { version = "0.2.3", features = [
+    "macros",
+    "values",
+    "client",
+    "rustls-tls",
+] }
 derive-visitor = "0.4.0"
 glob = "0.3.1"
 joinery_macros = { path = "joinery_macros" }

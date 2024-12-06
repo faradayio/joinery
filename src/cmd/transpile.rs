@@ -51,7 +51,7 @@ pub async fn cmd_transpile(files: &mut KnownFiles, opt: &TranspileOpt) -> Result
     for statement in rewritten_ast.extra.native_setup_sql {
         println!("{};", statement);
     }
-    let transpiled_sql = rewritten_ast.ast.emit_to_string(locator.target());
+    let transpiled_sql = rewritten_ast.ast.emit_to_string(locator.target().await?);
     println!("{}", transpiled_sql);
     for statement in rewritten_ast.extra.native_teardown_sql {
         println!("{};", statement);

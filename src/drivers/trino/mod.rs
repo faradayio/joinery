@@ -5,7 +5,7 @@ use std::{fmt, str::FromStr, time::Duration};
 use async_trait::async_trait;
 use dbcrossbar_trino::{
     client::{Client, ClientBuilder, ClientError, QueryError},
-    DataType, Ident as TrinoIdent, Value,
+    ConnectorType as TrinoConnectorType, DataType, Ident as TrinoIdent, Value,
 };
 use joinery_macros::sql_quote;
 use once_cell::sync::Lazy;
@@ -105,6 +105,29 @@ pub struct TrinoLocator {
     schema: String,
 }
 
+impl TrinoLocator {
+    /// Create a client for this locator.
+    fn client(&self) -> Client {
+        ClientBuilder::new(
+            self.user.clone(),
+            self.host.clone(),
+            self.port.unwrap_or(8080),
+        )
+        .catalog_and_schema(self.catalog.clone(), self.schema.clone())
+        .build()
+    }
+
+    /// Get our Trino connector type.
+    async fn connector_type(&self) -> Result<TrinoConnectorType> {
+        let client = self.client();
+        let catalog = TrinoIdent::new(&self.catalog).map_err(Error::other)?;
+        client
+            .catalog_connector_type(&catalog)
+            .await
+            .map_err(Error::other)
+    }
+}
+
 impl fmt::Display for TrinoLocator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "trino://{}@{}", self.user, self.host,)?;
@@ -152,17 +175,19 @@ impl FromStr for TrinoLocator {
 
 #[async_trait]
 impl Locator for TrinoLocator {
-    fn target(&self) -> Target {
-        Target::Trino
+    async fn target(&self) -> Result<Target> {
+        let connector_type = self.connector_type().await?;
+        Ok(Target::Trino(connector_type))
     }
 
     async fn driver(&self) -> Result<Box<dyn Driver>> {
-        Ok(Box::new(TrinoDriver::from_locator(self)?))
+        Ok(Box::new(TrinoDriver::from_locator(self).await?))
     }
 }
 
 /// A Trino driver.
 pub struct TrinoDriver {
+    connector_type: TrinoConnectorType,
     catalog: String,
     schema: String,
     client: Client,
@@ -170,19 +195,14 @@ pub struct TrinoDriver {
 
 impl TrinoDriver {
     /// Create a new Trino driver from a locator.
-    pub fn from_locator(locator: &TrinoLocator) -> Result<Self> {
-        let client = ClientBuilder::new(
-            locator.user.clone(),
-            locator.host.clone(),
-            locator.port.unwrap_or(8080),
-        )
-        .catalog_and_schema(locator.catalog.clone(), locator.schema.clone())
-        .build();
-
+    pub async fn from_locator(locator: &TrinoLocator) -> Result<Self> {
+        let connector_type = locator.connector_type().await?;
+        let client = locator.client();
         Ok(Self {
-            client,
+            connector_type,
             catalog: locator.catalog.clone(),
             schema: locator.schema.clone(),
+            client,
         })
     }
 }
@@ -190,7 +210,7 @@ impl TrinoDriver {
 #[async_trait]
 impl Driver for TrinoDriver {
     fn target(&self) -> Target {
-        Target::Trino
+        Target::Trino(self.connector_type)
     }
 
     #[tracing::instrument(skip_all)]

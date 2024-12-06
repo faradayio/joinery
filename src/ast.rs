@@ -24,6 +24,7 @@ use std::{
     mem::take,
 };
 
+use dbcrossbar_trino::ConnectorType as TrinoConnectorType;
 use derive_visitor::{Drive, DriveMut};
 use joinery_macros::{Emit, EmitDefault, Spanned, ToTokens};
 
@@ -65,8 +66,13 @@ static KEYWORDS: phf::Set<&'static str> = phf::phf_set! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(dead_code)]
 pub enum Target {
+    /// We're transpiling BigQuery to BigQuery, which is mostly useful for
+    /// dumping the AST back out as SQL.
     BigQuery,
-    Trino,
+    /// We're transpiling BigQuery to Trino. Note that we need to specify what
+    /// kind of Trino connector we're using, because many connectors are missing
+    /// certain data types, and we need to fix the SQL we emit accordingly.
+    Trino(TrinoConnectorType),
 }
 
 impl Target {
@@ -74,7 +80,7 @@ impl Target {
     pub fn is_keyword(self, s: &str) -> bool {
         let keywords = match self {
             Target::BigQuery => &KEYWORDS,
-            Target::Trino => &TRINO_KEYWORDS,
+            Target::Trino(_) => &TRINO_KEYWORDS,
         };
         keywords.contains(s.to_ascii_uppercase().as_str())
     }
@@ -84,7 +90,7 @@ impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Target::BigQuery => write!(f, "bigquery"),
-            Target::Trino => write!(f, "trino"),
+            Target::Trino(_) => write!(f, "trino"),
         }
     }
 }
@@ -187,7 +193,7 @@ impl Emit for Ident {
         if t.is_keyword(&self.name) || !is_c_ident(&self.name) {
             match t {
                 Target::BigQuery => write!(f, "{}", BigQueryName(&self.name))?,
-                Target::Trino => {
+                Target::Trino(_) => {
                     write!(f, "{}", AnsiIdent(&self.name))?;
                 }
             }
@@ -232,7 +238,7 @@ impl Emit for LiteralValue {
             LiteralValue::Float64(fl) => write!(f, "{}", fl),
             LiteralValue::String(s) => match t {
                 Target::BigQuery => write!(f, "{}", BigQueryString(s)),
-                Target::Trino => write!(f, "{}", TrinoString(s)),
+                Target::Trino(_) => write!(f, "{}", TrinoString(s)),
             },
         }
     }
@@ -914,7 +920,7 @@ pub enum CastType {
 impl Emit for CastType {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match self {
-            CastType::SafeCast { safe_cast_token } if t == Target::Trino => {
+            CastType::SafeCast { safe_cast_token } if matches!(t, Target::Trino(_)) => {
                 safe_cast_token.ident.token.with_str("TRY_CAST").emit(t, f)
             }
             _ => self.emit_default(t, f),
@@ -1080,7 +1086,7 @@ impl Emit for ArrayExpression {
                 definition: ArrayDefinition::Query { select },
                 delim2,
                 ..
-            } if t == Target::Trino => {
+            } if matches!(t, Target::Trino(_)) => {
                 // We can't do this with a transform and sql_quote because it
                 // outputs Trino-specific closure syntax.
                 let ArraySelectExpression {
@@ -1130,7 +1136,7 @@ impl Emit for ArrayExpression {
                 last_token.with_ws_only().emit(t, f)?;
             }
             _ => match t {
-                Target::Trino => {
+                Target::Trino(_) => {
                     let needs_cast = self.definition.has_zero_element_expressions();
                     if needs_cast {
                         f.write_token_start("CAST(")?;
@@ -1231,7 +1237,7 @@ pub struct StructExpression {
 impl Emit for StructExpression {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match t {
-            Target::Trino => {
+            Target::Trino(_) => {
                 f.write_token_start("CAST(")?;
                 self.struct_token.ident.token.with_str("ROW").emit(t, f)?;
                 self.paren1.emit(t, f)?;
@@ -1537,7 +1543,7 @@ pub enum DataType {
 impl Emit for DataType {
     fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> io::Result<()> {
         match t {
-            Target::Trino => match self {
+            Target::Trino(_) => match self {
                 DataType::Bool(token) => token.ident.token.with_str("BOOLEAN").emit(t, f),
                 DataType::Bytes(token) => token.ident.token.with_str("VARBINARY").emit(t, f),
                 DataType::Date(token) => token.emit(t, f),
@@ -1660,7 +1666,7 @@ impl Emit for FromItem {
             FromItem {
                 table_expression: table_expression @ FromTableExpression::Unnest(..),
                 alias: Some(Alias { as_token, ident }),
-            } if t == Target::Trino => {
+            } if matches!(t, Target::Trino(_)) => {
                 table_expression.emit(t, f)?;
                 as_token.emit(t, f)?;
                 // UNNEST aliases aren't like other aliases, and Trino treats

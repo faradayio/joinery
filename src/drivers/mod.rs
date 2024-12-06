@@ -22,8 +22,9 @@ pub mod trino;
 /// A URL-like locator for a database.
 #[async_trait]
 pub trait Locator: fmt::Display + fmt::Debug + Send + Sync + 'static {
-    /// Get the target for this locator.
-    fn target(&self) -> Target;
+    /// Get the target for this locator. For some databases, this might need to
+    /// query the database to get details about the target.
+    async fn target(&self) -> Result<Target>;
 
     /// Get the driver for this locator.
     async fn driver(&self) -> Result<Box<dyn Driver>>;

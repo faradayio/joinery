@@ -459,9 +459,9 @@ dependencies = [
 
 [[package]]
 name = "dbcrossbar_trino"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f202d41d8f1b6b50fee260837ae3a06723510ea9df3cb8724a0665385d99960"
+checksum = "2c824a64db21129755b9ae5eb528dbe48c5eae4cf1be90b885e4ed873ddd7ea4"
 dependencies = [
  "base64",
  "chrono",

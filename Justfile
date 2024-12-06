@@ -19,7 +19,7 @@ trino-image: trino-plugin
 # Run our Trino image.
 docker-run-trino: trino-image
 	(cd trino && docker compose up)
-	docker compose exec trino install-udfs
+	(cd trino && docker compose exec trino install-udfs)
 
 # Stop and delete our Trino container.
 docker-rm-trino:
@@ -33,10 +33,14 @@ check:
 	#cargo deny check
 	cargo test
 
-# Check Trino. Assumes `docker-run-trino` has been run.
+# Check Trino (memory). Assumes `docker-run-trino` has been run.
 check-trino:
 	cargo run -- sql-test --database "trino://admin@localhost/memory/default" ./tests/sql/
 
+# Check Trino (Hive). Assumes `docker-run-trino` has been run.
+check-trino-hive:
+	cargo run -- sql-test --database "trino://admin@localhost/hive/default" ./tests/sql/
+
 # Access a Trino shell.
 trino-shell:
-	docker compose exec trino-joinery trino
+	(cd trino && docker compose exec trino-joinery trino)
