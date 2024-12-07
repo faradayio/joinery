@@ -17,9 +17,7 @@ use crate::{
     ast::{self, parse_sql, CreateTableStatement, CreateViewStatement, Target},
     drivers::{self, Driver},
     errors::{format_err, Context, Error, Result},
-    infer::InferTypes,
     known_files::{FileId, KnownFiles},
-    scope::Scope,
 };
 
 /// Run SQL tests from a directory.

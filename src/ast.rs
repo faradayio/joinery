@@ -1691,7 +1691,6 @@ impl Emit for LoadExpression {
                 self.expression.emit(t, f)?;
                 f.write_token_start(&suffix)
             }
-            _ => self.emit_default(t, f),
         }
     }
 }

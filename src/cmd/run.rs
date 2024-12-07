@@ -3,10 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use tracing::instrument;
 
-use crate::{
-    ast::parse_sql, drivers, errors::Result, infer::InferTypes, known_files::KnownFiles,
-    scope::Scope,
-};
+use crate::{ast::parse_sql, drivers, errors::Result, known_files::KnownFiles};
 
 /// Run an SQL file using the specified database.
 #[derive(Debug, Parser)]
