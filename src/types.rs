@@ -323,7 +323,9 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
             (ArgumentType::Value(a), ArgumentType::Value(b)) => {
                 Some(ArgumentType::Value(a.common_supertype(b)?))
             }
-
+            (Self::Stored(a), Self::Stored(b)) => {
+                Some(ArgumentType::Stored(a.common_supertype(b)?))
+            }
             (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => {
                 Some(ArgumentType::Aggregating(Box::new(a.common_supertype(b)?)))
             }
@@ -344,6 +346,9 @@ impl Unify for ArgumentType<TypeVar> {
         match (self, other) {
             (ArgumentType::Value(a), ArgumentType::Value(b)) => {
                 Ok(ArgumentType::Value(a.unify(b, table, spanned)?))
+            }
+            (ArgumentType::Stored(a), ArgumentType::Stored(b)) => {
+                Ok(ArgumentType::Stored(a.unify(b, table, spanned)?))
             }
             (ArgumentType::Aggregating(a), ArgumentType::Aggregating(b)) => Ok(
                 ArgumentType::Aggregating(Box::new(a.unify(b, table, spanned)?)),
