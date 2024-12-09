@@ -676,7 +676,7 @@ impl InferTypes for ast::GroupBy {
         for expr in self.expressions.node_iter_mut() {
             let _ty = expr.infer_types(scope)?;
             match expr {
-                Expression::Name(name) => {
+                Expression::Name(ast::NameExpression { name, .. }) => {
                     group_by_names.push(name.clone());
                 }
                 _ => {
@@ -719,7 +719,8 @@ impl InferTypes for ast::Expression {
             ast::Expression::Literal(Literal { value, .. }) => value.infer_types(&()),
             ast::Expression::BoolValue(_) => Ok(ArgumentType::bool()),
             ast::Expression::Null { .. } => Ok(ArgumentType::null()),
-            ast::Expression::Name(name) => name.infer_types(scope),
+            ast::Expression::Name(name_expr) => name_expr.infer_types(scope),
+            ast::Expression::Store(store_expr) => store_expr.infer_types(scope),
             ast::Expression::Cast(cast) => cast.infer_types(scope),
             ast::Expression::Is(is) => is.infer_types(scope),
             ast::Expression::In(in_expr) => in_expr.infer_types(scope),
@@ -744,8 +745,6 @@ impl InferTypes for ast::Expression {
             ast::Expression::FunctionCall(fcall) => fcall.infer_types(scope),
             ast::Expression::Index(index) => index.infer_types(scope),
             ast::Expression::FieldAccess(field_access) => field_access.infer_types(scope),
-            ast::Expression::Load(load_expr) => load_expr.infer_types(scope),
-            ast::Expression::Store(store_expr) => store_expr.infer_types(scope),
         }
     }
 }
@@ -771,6 +770,44 @@ impl InferTypes for Ident {
     fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
         let ident = self.to_owned().into();
         scope.get_argument_type(&ident)
+    }
+}
+
+impl InferTypes for ast::NameExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    /// `self.name` may be a bare type `?T`, an `Agg<?T>` type (possibly
+    /// nested), or type involving `Stored<..>`, such as `Stored<?T>`,
+    /// `Agg<Stored<?T>>` or even `Agg<Agg<Stored<?T>>>` to any depth.
+    ///
+    /// We have two jobs:
+    ///
+    /// 1. Record what type we need to load from, if any. In the examples above,
+    ///    this would be `?T`.
+    /// 2. Infer the type after the load, which removed `Stored<..>` but keeps
+    ///    `Agg<..>` if present.
+    ///
+    /// | Name type              | Load to memory type | Inferrred type |
+    /// |------------------------|---------------------|----------------|
+    /// | `?T`                   | `None`              | `?T`           |
+    /// | `Agg<?T>`              | `None`              | `Agg<?T>`      |
+    /// | `Agg<Agg<?T>>`         | `None`              | `Agg<Agg<?T>>` |
+    /// | `Stored<?T>`           | `?T`                | `?T`           |
+    /// | `Agg<Stored<?T>>`      | `?T`                | `Agg<?T>`      |
+    /// | `Agg<Agg<Stored<?T>>>` | `?T`                | `Agg<Agg<?T>>` |
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let inferred_type = self.name.infer_types(scope)?;
+        // Do we need to perform a load operation?
+        if let Some(load_to_memory_type) = inferred_type.load_to_memory_type() {
+            // Record this for `emit` to use.
+            self.load_to_memory_type = Some(load_to_memory_type.to_owned());
+            // Remove `Stored<..>` from our type.
+            inferred_type.type_after_load()
+        } else {
+            self.load_to_memory_type = None;
+            Ok(inferred_type)
+        }
     }
 }
 
@@ -820,6 +857,25 @@ impl InferTypes for ast::Name {
             );
         }
         Ok(base_type)
+    }
+}
+
+impl InferTypes for ast::StoreExpression {
+    type Scope = ColumnSetScope;
+    type Output = ArgumentType;
+
+    /// `self.expression` should have type `?T`, and we return `Stored<?T>`.
+    ///
+    /// For example, `?T` might map to UUID, and `Stored<?T>` might map to
+    /// VARCHAR, but that's someone else's problem. We only deal with this in
+    /// the abstract.
+    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
+        let inferred_type = self.expression.infer_types(scope)?;
+        let value_type = inferred_type.expect_value_type(&self.expression)?;
+        // Record this for `emit` to use if needed.
+        self.memory_type = Some(value_type.to_owned());
+        // Return the Stored<?T> for our original ?T.
+        Ok(ArgumentType::Stored(value_type.to_owned()))
     }
 }
 
@@ -1346,7 +1402,7 @@ impl InferTypes for ast::PartitionBy {
         let mut partition_by_names = vec![];
         for expr in self.expressions.node_iter_mut() {
             match expr {
-                ast::Expression::Name(name) => {
+                ast::Expression::Name(ast::NameExpression { name, .. }) => {
                     scope.get_argument_type(name)?;
                     partition_by_names.push(name.clone());
                 }
@@ -1387,47 +1443,6 @@ impl InferTypes for ast::FieldAccessExpression {
     }
 }
 
-impl InferTypes for ast::LoadExpression {
-    type Scope = ColumnSetScope;
-    type Output = ArgumentType;
-
-    /// `self.expression` should have type `Stored<?T>`, and we return `?T`.
-    ///
-    /// For example, `?T` might map to UUID, and `Stored<?T>` might map to
-    /// VARCHAR, but that's someone else's problem. We only deal with this in
-    /// the abstract.
-    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        let inferred_type = self.expression.infer_types(scope)?;
-        // Nobody should ever call us on any argument that doesn't have type
-        // `Stored<?T>`, because we're the load operation.
-        let value_type =
-            inferred_type.expect_stored_type_and_return_value_type(&self.expression)?;
-        // Record this for `emit` to use if needed.
-        self.memory_type = Some(value_type.to_owned());
-        // Return the `?T` from our original `Stored<?T>`.
-        Ok(ArgumentType::Value(value_type.to_owned()))
-    }
-}
-
-impl InferTypes for ast::StoreExpression {
-    type Scope = ColumnSetScope;
-    type Output = ArgumentType;
-
-    /// `self.expression` should have type `?T`, and we return `Stored<?T>`.
-    ///
-    /// For example, `?T` might map to UUID, and `Stored<?T>` might map to
-    /// VARCHAR, but that's someone else's problem. We only deal with this in
-    /// the abstract.
-    fn infer_types(&mut self, scope: &Self::Scope) -> Result<Self::Output> {
-        let inferred_type = self.expression.infer_types(scope)?;
-        let value_type = inferred_type.expect_value_type(&self.expression)?;
-        // Record this for `emit` to use if needed.
-        self.memory_type = Some(value_type.to_owned());
-        // Return the Stored<?T> for our original ?T.
-        Ok(ArgumentType::Stored(value_type.to_owned()))
-    }
-}
-
 /// Figure out whether an expression defines an implicit column name.
 pub trait InferColumnName {
     /// Infer the column name, if any.
@@ -1446,12 +1461,16 @@ impl<T: InferColumnName> InferColumnName for Option<T> {
 impl InferColumnName for ast::Expression {
     fn infer_column_name(&mut self) -> Option<Ident> {
         match self {
-            ast::Expression::Name(name) => {
-                let (_table, col) = name.split_table_and_column();
-                Some(col)
-            }
+            ast::Expression::Name(name) => name.infer_column_name(),
             _ => None,
         }
+    }
+}
+
+impl InferColumnName for ast::NameExpression {
+    fn infer_column_name(&mut self) -> Option<Ident> {
+        let (_table, col) = self.name.split_table_and_column();
+        Some(col)
     }
 }
 

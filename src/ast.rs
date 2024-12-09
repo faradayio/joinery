@@ -837,7 +837,8 @@ pub enum Expression {
     Literal(Literal),
     BoolValue(Keyword),
     Null(Keyword),
-    Name(Name),
+    Name(NameExpression),
+    Store(StoreExpression),
     Cast(Cast),
     Is(IsExpression),
     In(InExpression),
@@ -867,8 +868,6 @@ pub enum Expression {
     FunctionCall(FunctionCall),
     Index(IndexExpression),
     FieldAccess(FieldAccessExpression),
-    Load(LoadExpression),
-    Store(StoreExpression),
 }
 
 impl Expression {
@@ -910,6 +909,111 @@ impl DatePart {
     pub fn to_literal(&self) -> Literal {
         let s = self.date_part_token.ident.name.to_ascii_lowercase();
         Literal::string(&s, self.date_part_token.span())
+    }
+}
+
+/// A "load" expression, which transforms an SQL value from a "storage" type (eg
+/// "VARCHAR") to a "memory" type (eg "UUID"). Used for databases like Trino,
+/// where the storage types for a given connector may be more limited than the
+/// standard Trino memory types.
+///
+/// These are not found in the original parsed AST, but are added while
+/// transforming the AST.
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+pub struct NameExpression {
+    /// **If** we need to do a load conversion, this will be the inferred memory
+    /// type.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    pub load_to_memory_type: Option<ValueType>,
+
+    /// Our underlying expression.
+    pub name: Name,
+}
+
+impl Emit for NameExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
+        match t {
+            // Target::BigQuery => {
+            //     f.write_token_start("%LOAD(")?;
+            //     self.name.emit(t, f)?;
+            //     f.write_token_start(")")
+            // }
+            Target::Trino(connector_type) if self.load_to_memory_type.is_some() => {
+                let bq_memory_type = self
+                    .load_to_memory_type
+                    .as_ref()
+                    .expect("memory_type should have been filled in by type inference");
+                let trino_memory_type =
+                    TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
+                let transform = connector_type.storage_transform_for(&trino_memory_type);
+                let (prefix, suffix) = transform.load_prefix_and_suffix();
+
+                // Wrapping the expression in our prefix and suffix.
+                // If the expression was col_name containing '[1,2]' in Trino,
+                // BQ memory type -> JSON, Trino memory type -> JSON, Trino storage type -> VARCHAR
+                // The Trino storage type is dependent on what the connector can support.
+                // In this case, the wrapped version would be JSON_PARSE(col_name)
+                f.write_token_start(&prefix)?;
+                self.name.emit(t, f)?;
+                f.write_token_start(&suffix)
+            }
+            _ => self.name.emit(t, f),
+        }
+    }
+}
+
+/// A "store" expression, which transforms an SQL value from a "memory" type
+/// (eg "UUID") to a "storage" type (eg "VARCHAR"). Used for databases like
+/// Trino, where the storage types for a given connector may be more limited
+/// than the standard Trino memory types.
+///
+/// These are not found in the original parsed AST, but are added while
+/// transforming the AST.
+#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
+pub struct StoreExpression {
+    /// Inferred memory type.
+    #[emit(skip)]
+    #[to_tokens(skip)]
+    #[drive(skip)]
+    pub memory_type: Option<ValueType>,
+
+    /// Our underlying expression.
+    pub expression: Box<Expression>,
+}
+
+impl Emit for StoreExpression {
+    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
+        match t {
+            Target::BigQuery => {
+                f.write_token_start("%STORE(")?;
+                self.expression.emit(t, f)?;
+                f.write_token_start(")")
+            }
+            Target::Trino(connector_type) => {
+                let bq_memory_type = self
+                    .memory_type
+                    .as_ref()
+                    .expect("memory_type should have been filled in by type inference");
+
+                // If our bq_memory_type is NULL, we don't need to do any transforms because
+                // NULL is NULL in both storage and memory types and dbcrossbar_trino doesn't
+                // support NULL as a memory type.
+                if let ValueType::Simple(SimpleType::Null) = bq_memory_type {
+                    self.expression.emit(t, f)
+                } else {
+                    let trino_memory_type =
+                        TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
+                    let transform = connector_type.storage_transform_for(&trino_memory_type);
+                    let (prefix, suffix) = transform.store_prefix_and_suffix();
+
+                    f.write_token_start(&prefix)?;
+                    self.expression.emit(t, f)?;
+                    f.write_token_start(&suffix)
+                }
+            }
+        }
     }
 }
 
@@ -1645,109 +1749,6 @@ pub struct FieldAccessExpression {
     pub field_name: Ident,
 }
 
-/// A "load" expression, which transforms an SQL value from a "storage" type (eg
-/// "VARCHAR") to a "memory" type (eg "UUID"). Used for databases like Trino,
-/// where the storage types for a given connector may be more limited than the
-/// standard Trino memory types.
-///
-/// These are not found in the original parsed AST, but are added while
-/// transforming the AST.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
-pub struct LoadExpression {
-    /// Inferred memory type.
-    #[emit(skip)]
-    #[to_tokens(skip)]
-    #[drive(skip)]
-    pub memory_type: Option<ValueType>,
-
-    /// Our underlying expression.
-    pub expression: Box<Expression>,
-}
-
-impl Emit for LoadExpression {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
-        match t {
-            Target::BigQuery => {
-                f.write_token_start("%LOAD(")?;
-                self.expression.emit(t, f)?;
-                f.write_token_start(")")
-            }
-            Target::Trino(connector_type) => {
-                let bq_memory_type = self
-                    .memory_type
-                    .as_ref()
-                    .expect("memory_type should have been filled in by type inference");
-                let trino_memory_type =
-                    TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
-                let transform = connector_type.storage_transform_for(&trino_memory_type);
-                let (prefix, suffix) = transform.load_prefix_and_suffix();
-
-                // Wrapping the expression in our prefix and suffix.
-                // If the expression was col_name containing '[1,2]' in Trino,
-                // BQ memory type -> JSON, Trino memory type -> JSON, Trino storage type -> VARCHAR
-                // The Trino storage type is dependent on what the connector can support.
-                // In this case, the wrapped version would be JSON_PARSE(col_name)
-                f.write_token_start(&prefix)?;
-                self.expression.emit(t, f)?;
-                f.write_token_start(&suffix)
-            }
-        }
-    }
-}
-
-/// A "store" expression, which transforms an SQL value from a "memory" type
-/// (eg "UUID") to a "storage" type (eg "VARCHAR"). Used for databases like
-/// Trino, where the storage types for a given connector may be more limited
-/// than the standard Trino memory types.
-///
-/// These are not found in the original parsed AST, but are added while
-/// transforming the AST.
-#[derive(Clone, Debug, Drive, DriveMut, EmitDefault, Spanned, ToTokens)]
-pub struct StoreExpression {
-    /// Inferred memory type.
-    #[emit(skip)]
-    #[to_tokens(skip)]
-    #[drive(skip)]
-    pub memory_type: Option<ValueType>,
-
-    /// Our underlying expression.
-    pub expression: Box<Expression>,
-}
-
-impl Emit for StoreExpression {
-    fn emit(&self, t: Target, f: &mut TokenWriter<'_>) -> ::std::io::Result<()> {
-        match t {
-            Target::BigQuery => {
-                f.write_token_start("%STORE(")?;
-                self.expression.emit(t, f)?;
-                f.write_token_start(")")
-            }
-            Target::Trino(connector_type) => {
-                let bq_memory_type = self
-                    .memory_type
-                    .as_ref()
-                    .expect("memory_type should have been filled in by type inference");
-
-                // If our bq_memory_type is NULL, we don't need to do any transforms because
-                // NULL is NULL in both storage and memory types and dbcrossbar_trino doesn't
-                // support NULL as a memory type.
-                if let ValueType::Simple(SimpleType::Null) = bq_memory_type {
-                    self.expression.emit(t, f)
-                } else {
-                    let trino_memory_type =
-                        TrinoDataType::try_from(bq_memory_type).map_err(io::Error::other)?;
-                    let transform = connector_type.storage_transform_for(&trino_memory_type);
-                    let (prefix, suffix) = transform.store_prefix_and_suffix();
-
-                    f.write_token_start(&prefix)?;
-                    self.expression.emit(t, f)?;
-                    f.write_token_start(&suffix)
-                }
-            }
-        }
-    }
-}
-
 /// An `AS` alias.
 #[derive(Clone, Debug, Drive, DriveMut, Emit, EmitDefault, Spanned, ToTokens)]
 pub struct Alias {
@@ -2446,7 +2447,7 @@ peg::parser! {
             // Things from here down might start with arbitrary identifiers, so
             // we need to be careful about the order.
             function_call:function_call() { Expression::FunctionCall(function_call) }
-            column_name:name() { Expression::Name(column_name) }
+            column_name:name() { Expression::Name(NameExpression { load_to_memory_type: None, name: column_name }) }
         }
 
         rule interval_expression() -> IntervalExpression

@@ -220,26 +220,6 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
         }
     }
 
-    /// Expect a [`ArgumentType::Stored`] and return the `ValueType` it contains.
-    pub fn expect_stored_type_and_return_value_type(
-        &self,
-        spanned: &dyn Spanned,
-    ) -> Result<&ValueType<TV>> {
-        match self {
-            ArgumentType::Value(_) => Err(Error::annotated(
-                format!("expected stored type, found in-memory value type {}", self),
-                spanned.span(),
-                "type mismatch",
-            )),
-            ArgumentType::Stored(t) => Ok(t),
-            ArgumentType::Aggregating(_) => Err(Error::annotated(
-                format!("expected stored type, found aggregate type {}", self),
-                spanned.span(),
-                "type mismatch",
-            )),
-        }
-    }
-
     /// Expect a [`SimpleType`].
     pub fn expect_simple_type(&self, spanned: &dyn Spanned) -> Result<&SimpleType<TV>> {
         match self {
@@ -330,6 +310,42 @@ impl<TV: TypeVarSupport> ArgumentType<TV> {
                 Some(ArgumentType::Aggregating(Box::new(a.common_supertype(b)?)))
             }
             _ => None,
+        }
+    }
+}
+
+// Methods which only work after we've resolved type variables.
+impl ArgumentType {
+    /// Get the type we should load as, if we are stored.
+    ///
+    /// Conceptually, we load before we aggregate, so if you pass
+    /// `Agg<Agg<Stored<T>>>`, this will return `Some(T)`. We need to know this
+    /// type to generate appropriate loading code (which does not care about
+    /// aggregation).
+    ///
+    /// This will normally be followed up by calling [`Self::type_after_load`].
+    pub fn load_to_memory_type(&self) -> Option<ValueType> {
+        match self {
+            ArgumentType::Value(_) => None,
+            ArgumentType::Stored(value_type) => Some(value_type.clone()),
+            ArgumentType::Aggregating(argument_type) => argument_type.load_to_memory_type(),
+        }
+    }
+
+    /// The type of this argument after we've loaded it into memory. This will included any
+    /// aggregations.
+    ///
+    /// For example, if we have `Agg<Agg<Stored<T>>>`, this will return
+    /// `Agg<Agg<T>>`.
+    ///
+    /// This is normally called after [`Self::load_to_memory_type`].
+    pub fn type_after_load(&self) -> Result<Self> {
+        match self {
+            ArgumentType::Value(_) => Err(format_err!("cannot load a value type")),
+            ArgumentType::Stored(value_type) => Ok(ArgumentType::Value(value_type.clone())),
+            ArgumentType::Aggregating(argument_type) => Ok(ArgumentType::Aggregating(Box::new(
+                argument_type.type_after_load()?,
+            ))),
         }
     }
 }
