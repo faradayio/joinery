@@ -17,9 +17,7 @@ use crate::{
     ast::{self, parse_sql, CreateTableStatement, CreateViewStatement, Target},
     drivers::{self, Driver},
     errors::{format_err, Context, Error, Result},
-    infer::InferTypes,
     known_files::{FileId, KnownFiles},
-    scope::Scope,
 };
 
 /// Run SQL tests from a directory.
@@ -148,8 +146,7 @@ async fn run_test(
     let mut ast = parse_sql(files, file_id)?;
 
     // Type check the AST.
-    let scope = Scope::root();
-    ast.infer_types(&scope)?;
+    ast.infer_types_for_first_time()?;
 
     //eprintln!("SQLite3: {}", ast.emit_to_string(Target::SQLite3));
     let output_tables = find_output_tables(&ast)?;

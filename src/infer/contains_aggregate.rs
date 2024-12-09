@@ -65,6 +65,7 @@ impl ContainsAggregate for ast::Expression {
             ast::Expression::BoolValue(_) => false,
             ast::Expression::Null(_) => false,
             ast::Expression::Name(_) => false,
+            ast::Expression::Store(store_expr) => store_expr.contains_aggregate(scope),
             ast::Expression::Cast(cast) => cast.contains_aggregate(scope),
             ast::Expression::Is(is) => is.contains_aggregate(scope),
             ast::Expression::In(in_expr) => in_expr.contains_aggregate(scope),
@@ -91,8 +92,6 @@ impl ContainsAggregate for ast::Expression {
             // Putting an aggregate here would be very weird. Do not allow it
             // until forced to do so.
             ast::Expression::FieldAccess(_) => false,
-            ast::Expression::Load(load_expr) => load_expr.contains_aggregate(scope),
-            ast::Expression::Store(store_expr) => store_expr.contains_aggregate(scope),
         }
     }
 }
@@ -266,12 +265,6 @@ impl ContainsAggregate for ast::IndexOffset {
             ast::IndexOffset::Offset { expression, .. } => expression.contains_aggregate(scope),
             ast::IndexOffset::Ordinal { expression, .. } => expression.contains_aggregate(scope),
         }
-    }
-}
-
-impl ContainsAggregate for ast::LoadExpression {
-    fn contains_aggregate(&self, scope: &ColumnSetScope) -> bool {
-        self.expression.contains_aggregate(scope)
     }
 }
 
